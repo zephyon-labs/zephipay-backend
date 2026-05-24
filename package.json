@@ -1,23 +1,25 @@
 {
   "name": "zephipay-backend",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Backend infrastructure layer for ZephiPay beta payment execution, receipt orchestration, and future treasury services.",
+  "main": "dist/server.js",
   "scripts": {
-  "dev": "ts-node-dev --respawn --transpile-only src/server.ts"
+    "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "cors": "^2.8.6",
-    "dotenv": "^17.4.2",
-    "express": "^5.2.1"
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
-    "@types/express": "^5.0.6",
-    "@types/node": "^25.9.1",
+    "@types/express": "^5.0.5",
+    "@types/node": "^24.10.1",
     "ts-node-dev": "^2.0.0",
     "typescript": "^6.0.3"
   }
