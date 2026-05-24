@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import { executePayment } from "./services/payservice";
 
 dotenv.config();
 
@@ -26,23 +27,22 @@ app.post("/api/send", async (req, res) => {
       purpose,
     });
 
-    // TEMP MOCK RESPONSE
-    // Later this becomes real pay_devnet execution
+    const receiptId = await executePayment(recipient, amount.toString());
 
     return res.json({
       ok: true,
       status: "confirmed",
-      receiptId: "DEVNET-PLACEHOLDER-123456",
+      receiptId,
       recipient,
       amount,
       purpose,
     });
   } catch (error) {
-    console.error(error);
+    console.error("API payment failure:", error);
 
     return res.status(500).json({
       ok: false,
-      error: "Backend execution failed",
+      error: "Payment execution failed",
     });
   }
 });
