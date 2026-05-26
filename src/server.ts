@@ -12,7 +12,9 @@ app.use(express.json());
 
 app.get("/", (_req, res) => {
   res.json({
-    status: "ZephiPay backend online",
+    ok: true,
+    status: "ZephyPay backend online",
+    network: "solana-devnet",
   });
 });
 
@@ -27,15 +29,28 @@ app.post("/api/send", async (req, res) => {
       purpose,
     });
 
-    const receiptId = await executePayment(recipient, amount.toString());
+    if (!recipient || !amount) {
+      return res.status(400).json({
+        ok: false,
+        error: "Recipient and amount are required.",
+      });
+    }
+
+    const payment = await executePayment(recipient, amount.toString());
 
     return res.json({
       ok: true,
       status: "confirmed",
-      receiptId,
-      recipient,
-      amount,
-      purpose,
+      receiptId: payment.receiptId,
+      signature: payment.signature,
+      recipient: payment.recipient,
+      amount: payment.amountRaw,
+      purpose: purpose || "General",
+      treasury: payment.treasury,
+      mint: payment.mint,
+      payCountBefore: payment.payCountBefore,
+      payCountAfter: payment.payCountAfter,
+      network: "solana-devnet",
     });
   } catch (error) {
     console.error("API payment failure:", error);
@@ -50,5 +65,5 @@ app.post("/api/send", async (req, res) => {
 const PORT = process.env.PORT || 3001;
 
 app.listen(PORT, () => {
-  console.log(`ZephiPay backend running on port ${PORT}`);
+  console.log(`ZephyPay backend running on port ${PORT}`);
 });
