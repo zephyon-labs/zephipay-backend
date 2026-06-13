@@ -3,6 +3,8 @@ import { x402Client, wrapFetchWithPayment, x402HTTPClient } from "@x402/fetch";
 import { registerExactSvmScheme } from "@x402/svm/exact/client";
 import { createKeyPairSignerFromBytes } from "@solana/kit";
 import { base58 } from "@scure/base";
+import type { ZephyonReceiptPreview } from "../src/receipts/receiptTypes";
+import { verifyX402ReceiptPreview } from "../src/receipts/receiptVerifier";
 
 config();
 
@@ -54,13 +56,26 @@ async function main() {
   console.log("Payment Settlement:");
   console.log(JSON.stringify(paymentResponse, null, 2));
 
-  const boundReceipt = {
+  const boundReceipt: ZephyonReceiptPreview = {
     ...body.zephyonReceipt,
     settlementProof: paymentResponse,
   };
 
   console.log("Bound Zephyon x402 Receipt:");
   console.log(JSON.stringify(boundReceipt, null, 2));
+
+  const verification = verifyX402ReceiptPreview(boundReceipt);
+
+  console.log("Receipt Verification:");
+  console.log(JSON.stringify(verification, null, 2));
+
+  if (!verification.valid) {
+    throw new Error(
+      `Bound receipt verification failed: ${verification.errors.join("; ")}`
+    );
+  }
+
+  console.log("Receipt verification passed.");
 }
 
 main().catch(error => {
