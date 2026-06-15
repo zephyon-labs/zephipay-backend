@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import { executePayment } from "./services/payservice";
 import { x402Middleware } from "./x402/x402Server";
 import { agentRouter } from "./routes/agent";
+import { verifyRouter } from "./routes/verify";
 
 dotenv.config();
 
@@ -11,6 +12,9 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
+
+app.use("/api/verify", verifyRouter);
+
 app.use(x402Middleware);
 app.use("/api/agent", agentRouter);
 app.get("/", (_req, res) => {

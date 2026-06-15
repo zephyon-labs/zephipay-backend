@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { createX402ReceiptPreview } from "../receipts/x402ReceiptAdapter";
-
+import { registerReceipt } from "../receipts/receiptRegistry";
 export const agentRouter = Router();
 
 agentRouter.get("/costly-data", (_req, res) => {
@@ -13,6 +13,8 @@ agentRouter.get("/costly-data", (_req, res) => {
     payTo: process.env.SVM_ADDRESS || "unknown",
   });
 
+    registerReceipt(zephyonReceipt);
+
   res.json({
     ok: true,
     resource: "Zephyon agentic payment test resource",
@@ -20,6 +22,7 @@ agentRouter.get("/costly-data", (_req, res) => {
     receiptMode: "x402-offchain-preview",
     network: "solana-devnet",
     zephyonReceipt,
+        verificationUrl: `/api/verify/${zephyonReceipt.localReceiptId}`,
     message:
       "This protected resource was accessed through an experimental x402 payment flow and returned a Zephyon-style receipt preview.",
   });
