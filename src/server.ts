@@ -6,7 +6,7 @@ import { protocolRouter } from "./routes/protocol";
 import { x402Middleware } from "./x402/x402Server";
 import { agentRouter } from "./routes/agent";
 import { verifyRouter } from "./routes/verify";
-
+import { receiptsRouter } from "./routes/receipts";
 dotenv.config();
 
 const app = express();
@@ -16,7 +16,7 @@ app.use(express.json());
 
 app.use("/api/verify", verifyRouter);
 app.use("/api/protocol", protocolRouter);
-
+app.use("/api/receipts", receiptsRouter);
 app.use(x402Middleware);
 app.use("/api/agent", agentRouter);
 app.get("/", (_req, res) => {
