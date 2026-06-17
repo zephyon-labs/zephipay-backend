@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { executePayment } from "./services/payservice";
+import { protocolRouter } from "./routes/protocol";
 import { x402Middleware } from "./x402/x402Server";
 import { agentRouter } from "./routes/agent";
 import { verifyRouter } from "./routes/verify";
@@ -14,6 +15,7 @@ app.use(cors());
 app.use(express.json());
 
 app.use("/api/verify", verifyRouter);
+app.use("/api/protocol", protocolRouter);
 
 app.use(x402Middleware);
 app.use("/api/agent", agentRouter);
