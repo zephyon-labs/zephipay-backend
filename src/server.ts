@@ -7,16 +7,20 @@ import { x402Middleware } from "./x402/x402Server";
 import { agentRouter } from "./routes/agent";
 import { verifyRouter } from "./routes/verify";
 import { receiptsRouter } from "./routes/receipts";
+import {
+  generalRateLimiter,
+  sensitiveRateLimiter,
+} from "./middleware/rateLimiter";
 dotenv.config();
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
-
-app.use("/api/verify", verifyRouter);
+app.use(generalRateLimiter);
 app.use("/api/protocol", protocolRouter);
-app.use("/api/receipts", receiptsRouter);
+app.use("/api/verify", sensitiveRateLimiter, verifyRouter);
+app.use("/api/receipts", sensitiveRateLimiter, receiptsRouter);
 app.use(x402Middleware);
 app.use("/api/agent", agentRouter);
 app.get("/", (_req, res) => {

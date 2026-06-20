@@ -11,6 +11,7 @@ agentRouter.get("/costly-data", (_req, res) => {
     asset: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
     amount: "1000",
     payTo: process.env.SVM_ADDRESS || "unknown",
+    owner: process.env.SVM_ADDRESS || "unknown",
   });
 
     registerReceipt(zephyonReceipt);

@@ -7,6 +7,7 @@ type X402ReceiptInput = {
   asset: string;
   amount: string;
   payTo: string;
+  owner?: string;
 };
 
 function createDeterministicReceiptId(input: X402ReceiptInput, createdAt: string) {
@@ -35,6 +36,11 @@ export function createX402ReceiptPreview(input: X402ReceiptInput) {
     status: "settlement-proven-by-payment-response-header",
     localReceiptId,
     createdAt,
+
+        ownership: {
+      owner: input.owner || "pending-settlement-proof",
+      ownerSource: input.owner ? "x402-settlement-proof" : "pending",
+    },
 
     payment: {
       source: "x402",
