@@ -8,6 +8,7 @@ import { agentRouter } from "./routes/agent";
 import { verifyRouter } from "./routes/verify";
 import { receiptsRouter } from "./routes/receipts";
 import { entitlementsRouter } from "./routes/entitlements";
+import { catalogRouter } from "./routes/catalog";
 import {
   generalRateLimiter,
   sensitiveRateLimiter,
@@ -23,6 +24,7 @@ app.use("/api/protocol", protocolRouter);
 app.use("/api/verify", sensitiveRateLimiter, verifyRouter);
 app.use("/api/receipts", sensitiveRateLimiter, receiptsRouter);
 app.use("/api/entitlements", sensitiveRateLimiter, entitlementsRouter);
+app.use("/api/catalog", catalogRouter);
 app.use(x402Middleware);
 app.use("/api/agent", agentRouter);
 app.get("/", (_req, res) => {
