@@ -46,7 +46,13 @@ export function createX402ReceiptPreview(input: X402ReceiptInput) {
       owner: input.owner || "pending-settlement-proof",
       ownerSource: input.owner ? "x402-settlement-proof" : "pending",
     },
-
+    entitlements: {
+  resource: input.resource,
+  accessGranted: true,
+  usesRemaining: null,
+  expiresAt: null,
+  transferable: false,
+},
     payment: {
       source: "x402",
       settlementProvider: "payai",
