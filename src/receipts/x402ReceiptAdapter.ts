@@ -36,6 +36,11 @@ export function createX402ReceiptPreview(input: X402ReceiptInput) {
     status: "settlement-proven-by-payment-response-header",
     localReceiptId,
     createdAt,
+    paymentProtocol: {
+  name: "x402",
+  version: "preview",
+  status: "active",
+},
 
         ownership: {
       owner: input.owner || "pending-settlement-proof",
