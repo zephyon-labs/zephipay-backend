@@ -10,6 +10,10 @@ type X402ReceiptInput = {
   owner?: string;
 };
 
+function createSha256Hash(value: string) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
 function createDeterministicReceiptId(input: X402ReceiptInput, createdAt: string) {
   const raw = [
     "zephyon",
@@ -22,12 +26,26 @@ function createDeterministicReceiptId(input: X402ReceiptInput, createdAt: string
     createdAt,
   ].join(":");
 
-  return crypto.createHash("sha256").update(raw).digest("hex");
+  return createSha256Hash(raw);
 }
 
 export function createX402ReceiptPreview(input: X402ReceiptInput) {
   const createdAt = new Date().toISOString();
   const localReceiptId = createDeterministicReceiptId(input, createdAt);
+
+  const resourceHash = createSha256Hash(input.resource);
+
+  const receiptHash = createSha256Hash(
+    [
+      localReceiptId,
+      input.resource,
+      input.network,
+      input.asset,
+      input.amount,
+      input.payTo,
+      createdAt,
+    ].join(":")
+  );
 
   return {
     source: "x402",
@@ -36,23 +54,26 @@ export function createX402ReceiptPreview(input: X402ReceiptInput) {
     status: "settlement-proven-by-payment-response-header",
     localReceiptId,
     createdAt,
-    paymentProtocol: {
-  name: "x402",
-  version: "preview",
-  status: "active",
-},
 
-        ownership: {
+    paymentProtocol: {
+      name: "x402",
+      version: "preview",
+      status: "active",
+    },
+
+    ownership: {
       owner: input.owner || "pending-settlement-proof",
       ownerSource: input.owner ? "x402-settlement-proof" : "pending",
     },
+
     entitlements: {
-  resource: input.resource,
-  accessGranted: true,
-  usesRemaining: null,
-  expiresAt: null,
-  transferable: false,
-},
+      resource: input.resource,
+      accessGranted: true,
+      usesRemaining: null,
+      expiresAt: null,
+      transferable: false,
+    },
+
     payment: {
       source: "x402",
       settlementProvider: "payai",
@@ -72,6 +93,8 @@ export function createX402ReceiptPreview(input: X402ReceiptInput) {
     futureProtocolBinding: {
       pdaBacked: false,
       target: "Zephyon receipt PDA",
+      receiptHash,
+      resourceHash,
       note:
         "Future versions should bind x402 settlement metadata to a Zephyon receipt PDA without triggering a second payment.",
     },
