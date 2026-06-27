@@ -54,14 +54,16 @@ function loadPayer(): Keypair {
 }
 
 function validateAmount(amount: string): BN {
-  const amountRaw = Number(amount);
+  const amountUsd = Number(amount);
 
-  if (
-    !Number.isFinite(amountRaw) ||
-    amountRaw <= 0 ||
-    !Number.isInteger(amountRaw)
-  ) {
-    throw new Error("Amount must be a positive raw integer.");
+  if (!Number.isFinite(amountUsd) || amountUsd <= 0) {
+    throw new Error("Amount must be a positive number.");
+  }
+
+  const amountRaw = Math.round(amountUsd * 1_000_000);
+
+  if (!Number.isSafeInteger(amountRaw) || amountRaw <= 0) {
+    throw new Error("Amount converts to an invalid raw integer.");
   }
 
   return new BN(amountRaw);
