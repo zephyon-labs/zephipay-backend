@@ -1,3 +1,4 @@
+import { base58 } from "@scure/base";
 import * as anchor from "@coral-xyz/anchor";
 import BN from "bn.js";
 import { clusterApiUrl, Connection, Keypair, PublicKey } from "@solana/web3.js";
@@ -38,15 +39,16 @@ function deriveTreasuryPda(programId: PublicKey): PublicKey {
 }
 
 function loadPayer(): Keypair {
-  const secret = process.env.SOLANA_KEYPAIR_JSON;
+  const secret = process.env.SVM_PRIVATE_KEY;
 
   if (!secret) {
-    throw new Error("SOLANA_KEYPAIR_JSON missing");
+    throw new Error("SVM_PRIVATE_KEY missing");
   }
 
-  const secretKey = Uint8Array.from(JSON.parse(secret));
+  const secretKey = base58.decode(secret);
   return Keypair.fromSecretKey(secretKey);
 }
+
 
 function validateAmount(amount: string): BN {
   const amountUsd = Number(amount);
