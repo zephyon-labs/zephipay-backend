@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
   ComplianceEngine,
   IdentityEngine,
@@ -26,7 +28,12 @@ import {
   type SolanaSplPayResult,
 } from "../adapters/solana/solanaSplPayExecutor";
 
-export type PaymentResult = SolanaSplPayResult;
+export type PaymentResult = SolanaSplPayResult & {
+  runtimeId: string;
+  paymentId: string;
+  transactionId: string;
+  purpose: string;
+};
 
 const USDC_DEVNET_MINT = "2w2nqMemQzjwKMk3jEmtXnBqGBXGJLs8FNfb5Khb8E7J";
 
@@ -99,11 +106,11 @@ function toRawUsdcAmount(amount: string): number {
 
 function createRuntimeForSolanaDevnetPayment(
   executeTransfer: (
-    request: SolanaTransferRequest
+    request: SolanaTransferRequest,
   ) => Promise<SolanaTransferResult>,
   confirmTransfer: (
-    request: SolanaTransferRequest & { signature: string }
-  ) => Promise<SolanaSettlementResult>
+    request: SolanaTransferRequest & { signature: string },
+  ) => Promise<SolanaSettlementResult>,
 ): PaymentRuntime {
   const registry = new InMemoryPaymentAdapterRegistry();
 
@@ -112,7 +119,7 @@ function createRuntimeForSolanaDevnetPayment(
       network: "solana",
       executeTransfer,
       confirmTransfer,
-    })
+    }),
   );
 
   const decisionPipeline = new PaymentDecisionPipeline({
@@ -172,19 +179,25 @@ function createRuntimeForSolanaDevnetPayment(
   return new PaymentRuntime(decisionPipeline, orchestrator);
 }
 
-export async function executePayment(
-  recipient: string,
-  amount: string
-): Promise<PaymentResult> {
+export async function executePayment(input: {
+  recipient: string;
+  amount: string;
+  purpose: string;
+}): Promise<PaymentResult> {
+  const { recipient, amount, purpose } = input;
   try {
     let solanaResult: SolanaSplPayResult | undefined;
 
     const executeTransfer = async (
-      request: SolanaTransferRequest
+      request: SolanaTransferRequest,
     ): Promise<SolanaTransferResult> => {
+      const reference = createHash("sha256").update(request.intent.id).digest();
+
       solanaResult = await executeSolanaSplPay({
         recipient: request.intent.recipientWallet,
         amount: request.intent.money.amount.toString(),
+        reference,
+        memo: request.intent.memo,
       });
 
       return {
@@ -194,7 +207,7 @@ export async function executePayment(
     };
 
     const confirmTransfer = async (
-      request: SolanaTransferRequest & { signature: string }
+      request: SolanaTransferRequest & { signature: string },
     ): Promise<SolanaSettlementResult> => {
       return {
         signature: request.signature,
@@ -205,7 +218,7 @@ export async function executePayment(
 
     const runtime = createRuntimeForSolanaDevnetPayment(
       executeTransfer,
-      confirmTransfer
+      confirmTransfer,
     );
 
     const now = new Date().toISOString();
@@ -224,7 +237,7 @@ export async function executePayment(
       recipientWallet: recipient,
       mint: USDC_DEVNET_MINT,
       amountRaw,
-      memo: "Zephipay backend runtime payment",
+      memo: purpose,
       createdAt: now,
       updatedAt: now,
     };
@@ -256,13 +269,13 @@ export async function executePayment(
 
     if (result.decision.status !== "approved") {
       throw new Error(
-        `Payment blocked by runtime decision pipeline: ${result.decision.reason}`
+        `Payment blocked by runtime decision pipeline: ${result.decision.reason}`,
       );
     }
 
     if (result.orchestration?.status !== "completed") {
       throw new Error(
-        `Payment orchestration did not complete: ${result.orchestration?.status}`
+        `Payment orchestration did not complete: ${result.orchestration?.status}`,
       );
     }
 
@@ -270,7 +283,13 @@ export async function executePayment(
       throw new Error("Solana executor did not return a payment result.");
     }
 
-    return solanaResult;
+    return {
+      ...solanaResult,
+      runtimeId: context.requestId,
+      paymentId: intent.id,
+      transactionId: result.orchestration.transaction.id,
+      purpose,
+    };
   } catch (error) {
     console.error("executePayment failed:", error);
     throw error;

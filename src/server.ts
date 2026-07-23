@@ -46,23 +46,42 @@ app.post("/api/send", async (req, res) => {
       purpose,
     });
 
-    if (!recipient || !amount) {
+    if (!recipient || !amount || !purpose) {
       return res.status(400).json({
         ok: false,
-        error: "Recipient and amount are required.",
+        error: "Recipient, amount, and purpose are required.",
       });
     }
 
-    const payment = await executePayment(recipient, amount.toString());
+    const normalizedPurpose = purpose.trim();
+    const purposeBytes = Buffer.byteLength(normalizedPurpose, "utf8");
+
+    if (purposeBytes === 0 || purposeBytes > 120) {
+      return res.status(400).json({
+        ok: false,
+        error: "Purpose must be between 1 and 120 UTF-8 bytes.",
+      });
+    }
+
+    const payment = await executePayment({
+      recipient,
+      amount: amount.toString(),
+      purpose: normalizedPurpose,
+    });
 
     return res.json({
       ok: true,
       status: "confirmed",
+      runtimeId: payment.runtimeId,
+      paymentId: payment.paymentId,
+      transactionId: payment.transactionId,
       receiptId: payment.receiptId,
       signature: payment.signature,
       recipient: payment.recipient,
       amount: payment.amountRaw,
-      purpose: purpose || "General",
+      amountDisplay: Number(payment.amountRaw) / 1_000_000,
+      asset: "USDC",
+      purpose: payment.purpose,
       treasury: payment.treasury,
       mint: payment.mint,
       payCountBefore: payment.payCountBefore,

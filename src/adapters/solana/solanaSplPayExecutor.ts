@@ -13,7 +13,7 @@ import {
 import idl from "../../protocol/idl/protocol.json";
 
 const PROGRAM_ID = new PublicKey(
-  "BtP7rVw9sqN4pW5RuzZJ2c4576R5pJU9yRtjrRJ7b5bM"
+  "BtP7rVw9sqN4pW5RuzZJ2c4576R5pJU9yRtjrRJ7b5bM",
 );
 
 const MINT = new PublicKey("2w2nqMemQzjwKMk3jEmtXnBqGBXGJLs8FNfb5Khb8E7J");
@@ -32,7 +32,7 @@ export type SolanaSplPayResult = {
 function deriveTreasuryPda(programId: PublicKey): PublicKey {
   const [treasuryPda] = PublicKey.findProgramAddressSync(
     [Buffer.from("treasury")],
-    programId
+    programId,
   );
 
   return treasuryPda;
@@ -48,7 +48,6 @@ function loadPayer(): Keypair {
   const secretKey = base58.decode(secret);
   return Keypair.fromSecretKey(secretKey);
 }
-
 
 function validateAmount(amount: string): BN {
   const amountUsd = Number(amount);
@@ -69,6 +68,8 @@ function validateAmount(amount: string): BN {
 export async function executeSolanaSplPay(params: {
   recipient: string;
   amount: string;
+  reference?: Uint8Array;
+  memo?: string;
 }): Promise<SolanaSplPayResult> {
   try {
     console.log("Executing REAL ZephyPay devnet payment via Solana executor");
@@ -85,7 +86,7 @@ export async function executeSolanaSplPay(params: {
       {
         commitment: "confirmed",
         preflightCommitment: "confirmed",
-      }
+      },
     );
 
     anchor.setProvider(provider);
@@ -117,7 +118,7 @@ export async function executeSolanaSplPay(params: {
       treasuryPda,
       true,
       TOKEN_PROGRAM_ID,
-      ASSOCIATED_TOKEN_PROGRAM_ID
+      ASSOCIATED_TOKEN_PROGRAM_ID,
     );
 
     const recipientAta = await getOrCreateAssociatedTokenAccount(
@@ -129,7 +130,7 @@ export async function executeSolanaSplPay(params: {
       "confirmed",
       undefined,
       TOKEN_PROGRAM_ID,
-      ASSOCIATED_TOKEN_PROGRAM_ID
+      ASSOCIATED_TOKEN_PROGRAM_ID,
     );
 
     const payCountBefore = new BN(treasury.payCount.toString());
@@ -140,7 +141,7 @@ export async function executeSolanaSplPay(params: {
         treasuryPda.toBuffer(),
         payCountBefore.toArrayLike(Buffer, "le", 8),
       ],
-      PROGRAM_ID
+      PROGRAM_ID,
     );
 
     console.log("Mint:", MINT.toBase58());
@@ -153,11 +154,17 @@ export async function executeSolanaSplPay(params: {
       provider.connection,
       treasuryAta,
       "confirmed",
-      TOKEN_PROGRAM_ID
+      TOKEN_PROGRAM_ID,
     );
 
+    const referenceBytes = params.reference
+      ? Buffer.from(params.reference)
+      : null;
+
+    const memoBytes = params.memo ? Buffer.from(params.memo, "utf8") : null;
+
     const signature = await programAny.methods
-      .splPay(amountBn, null, null)
+      .splPay(amountBn, referenceBytes, memoBytes)
       .accounts({
         treasuryAuthority: provider.wallet.publicKey,
         treasury: treasuryPda,
