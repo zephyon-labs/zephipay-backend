@@ -1,0 +1,117 @@
+function parseBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined) {
+    return fallback;
+  }
+
+  const normalized = value.trim().toLowerCase();
+
+  if (normalized === "true") {
+    return true;
+  }
+
+  if (normalized === "false") {
+    return false;
+  }
+
+  throw new Error(`Expected boolean environment value, received: ${value}`);
+}
+
+function parsePositiveInteger(
+  value: string | undefined,
+  fallback: number,
+  name: string,
+): number {
+  if (value === undefined) {
+    return fallback;
+  }
+
+  const parsed = Number(value);
+
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer.`);
+  }
+
+  return parsed;
+}
+
+function parsePositiveDecimal(
+  value: string | undefined,
+  fallback: number,
+  name: string,
+): number {
+  if (value === undefined) {
+    return fallback;
+  }
+
+  const parsed = Number(value);
+
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive number.`);
+  }
+
+  return parsed;
+}
+
+function parseOrigins(value: string | undefined): string[] {
+  if (!value) {
+    return [
+      "http://localhost:3000",
+      "http://127.0.0.1:3000",
+    ];
+  }
+
+  return value
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
+const nodeEnv = process.env.NODE_ENV?.trim() || "development";
+const isProduction = nodeEnv === "production";
+
+const corsAllowedOrigins = parseOrigins(
+  process.env.CORS_ALLOWED_ORIGINS,
+);
+
+if (isProduction && !process.env.CORS_ALLOWED_ORIGINS) {
+  throw new Error(
+    "CORS_ALLOWED_ORIGINS is required when NODE_ENV=production.",
+  );
+}
+
+export const environment = Object.freeze({
+  nodeEnv,
+  isProduction,
+
+  port: parsePositiveInteger(
+    process.env.PORT,
+    3001,
+    "PORT",
+  ),
+
+  paymentsEnabled: parseBoolean(
+    process.env.PAYMENTS_ENABLED,
+    false,
+  ),
+
+  trustProxy: parseBoolean(
+    process.env.TRUST_PROXY,
+    isProduction,
+  ),
+
+  corsAllowedOrigins,
+
+  jsonBodyLimit: process.env.JSON_BODY_LIMIT?.trim() || "16kb",
+
+  paymentRateLimitPerMinute: parsePositiveInteger(
+    process.env.PAYMENT_RATE_LIMIT_PER_MINUTE,
+    5,
+    "PAYMENT_RATE_LIMIT_PER_MINUTE",
+  ),
+
+  paymentMaxUsdc: parsePositiveDecimal(
+    process.env.PAYMENT_MAX_USDC,
+    5,
+    "PAYMENT_MAX_USDC",
+  ),
+});
