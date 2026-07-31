@@ -30,7 +30,7 @@
     "express": "^5.1.0",
     "express-rate-limit": "^8.5.2",
     "viem": "^2.52.2",
-    "zephyon-protocol": "github:zephyon-labs/zephyon-protocol#ce0d309037d0d4613167c0edac53ed72b47c7243"
+    "zephyon-protocol": "github:zephyon-labs/zephyon-protocol#v0.1.0"
   },
   "devDependencies": {
     "@types/bn.js": "^5.2.0",
