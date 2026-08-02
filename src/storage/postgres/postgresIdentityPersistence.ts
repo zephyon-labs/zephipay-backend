@@ -95,6 +95,43 @@ export class PostgresIdentityPersistence implements IdentityPersistence {
     });
   }
 
+  provisionExternalIdentity(input: Parameters<IdentityPersistence["provisionExternalIdentity"]>[0]): Promise<Readonly<{ account: Account; identity: ExternalIdentity; created: boolean }>> {
+    validateUuid(input.accountId, "Account ID");
+    validateUuid(input.identityId, "Identity ID");
+    validateExternalIdentity(input.issuer, input.subject);
+    if (input.occurredAt) validateTimestamp(input.occurredAt, "Provisioning time");
+    return this.transaction(async (client) => {
+      // Serialize only callers provisioning the same validated provider identity.
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [JSON.stringify([input.issuer, input.subject])]);
+      const found = await client.query(
+        "SELECT * FROM external_identities WHERE issuer=$1 AND subject=$2",
+        [input.issuer, input.subject],
+      );
+      if (found.rows[0]) {
+        const identity = mapExternalIdentity(found.rows[0]);
+        const account = await lockAccount(client, identity.accountId);
+        return { account, identity, created: false };
+      }
+      const occurredAt = input.occurredAt ?? new Date().toISOString();
+      const accountResult = await client.query(
+        `INSERT INTO accounts (account_id,actor_subject,created_at,updated_at)
+         VALUES ($1,$2,$3,$3) RETURNING *`,
+        [input.accountId, actorSubjectForAccount(input.accountId), occurredAt],
+      );
+      const base = mapAccount(accountResult.rows[0]);
+      await appendSecurityEvent(client, base, "ACCOUNT_CREATED", base.createdAt);
+      const identityResult = await client.query(
+        `INSERT INTO external_identities (identity_id,issuer,subject,account_id,linked_at)
+         VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+        [input.identityId, input.issuer, input.subject, input.accountId, base.createdAt],
+      );
+      const identity = mapExternalIdentity(identityResult.rows[0]);
+      const account = await incrementAccount(client, base, identity.linkedAt);
+      await appendSecurityEvent(client, account, "EXTERNAL_IDENTITY_LINKED", identity.linkedAt, { identityId: identity.identityId });
+      return { account, identity, created: true };
+    });
+  }
+
   async findExternalIdentity(issuer: string, subject: string): Promise<ExternalIdentity | undefined> {
     const result = await this.pool.query(
       "SELECT * FROM external_identities WHERE issuer=$1 AND subject=$2",

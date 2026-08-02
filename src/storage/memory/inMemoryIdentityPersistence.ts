@@ -116,6 +116,41 @@ export class InMemoryIdentityPersistence implements IdentityPersistence {
     });
   }
 
+  provisionExternalIdentity(input: Parameters<IdentityPersistence["provisionExternalIdentity"]>[0]): Promise<Readonly<{ account: Account; identity: ExternalIdentity; created: boolean }>> {
+    return this.exclusive(() => {
+      validateUuid(input.accountId, "Account ID");
+      validateUuid(input.identityId, "Identity ID");
+      validateExternalIdentity(input.issuer, input.subject);
+      const key = externalIdentityKey(input.issuer, input.subject);
+      const existingId = this.identityOwners.get(key);
+      if (existingId) {
+        const identity = this.identities.get(existingId) as ExternalIdentity;
+        return { account: cloneAccount(this.requireAccount(identity.accountId)), identity: cloneIdentity(identity), created: false };
+      }
+      if (this.accounts.has(input.accountId) || this.identities.has(input.identityId)) {
+        throw new Error("Provisioning identifiers already exist.");
+      }
+      const now = input.occurredAt ?? this.now();
+      validateTimestamp(now, "Provisioning time");
+      const base: Account = Object.freeze({
+        accountId: input.accountId, actorSubject: actorSubjectForAccount(input.accountId),
+        status: "ACTIVE", version: 0n, createdAt: now, updatedAt: now,
+      });
+      this.accounts.set(base.accountId, base);
+      this.actorSubjects.set(base.actorSubject, base.accountId);
+      this.appendEventUnsafe(base, "ACCOUNT_CREATED", {}, now);
+      const identity: ExternalIdentity = Object.freeze({
+        identityId: input.identityId, issuer: input.issuer, subject: input.subject,
+        accountId: input.accountId, linkedAt: now,
+      });
+      const account = this.incrementAccount(base, now);
+      this.identities.set(identity.identityId, identity);
+      this.identityOwners.set(key, identity.identityId);
+      this.appendEventUnsafe(account, "EXTERNAL_IDENTITY_LINKED", {}, now, { identityId: identity.identityId });
+      return { account: cloneAccount(account), identity: cloneIdentity(identity), created: true };
+    });
+  }
+
   async findExternalIdentity(issuer: string, subject: string): Promise<ExternalIdentity | undefined> {
     const identityId = this.identityOwners.get(externalIdentityKey(issuer, subject));
     const identity = identityId ? this.identities.get(identityId) : undefined;

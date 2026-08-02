@@ -7,10 +7,13 @@ import express, {
   type Request,
   type Response,
 } from "express";
+import { InsufficientScopeError, UnauthorizedError } from "express-oauth2-jwt-bearer";
 
 dotenv.config();
 
 import { environment } from "./config/environment";
+import { createAuthPipeline } from "./auth/authMiddleware";
+import { AccountProvisioningService } from "./identity/accountProvisioningService";
 import {
   generalRateLimiter,
   paymentRateLimiter,
@@ -23,6 +26,9 @@ import { entitlementsRouter } from "./routes/entitlements";
 import { protocolRouter } from "./routes/protocol";
 import { receiptsRouter } from "./routes/receipts";
 import { verifyRouter } from "./routes/verify";
+import { createAccountRouter } from "./routes/account";
+import { PostgresIdentityPersistence } from "./storage/postgres/postgresIdentityPersistence";
+import { createPaymentPostgresPool } from "./storage/postgres/postgresPool";
 import { executePayment } from "./services/payservice";
 import { validatePaymentRequest } from "./validation/paymentRequest";
 import { x402Middleware } from "./x402/x402Server";
@@ -88,6 +94,24 @@ app.use(
 );
 
 app.use(generalRateLimiter);
+
+if (environment.authEnabled) {
+  const pool = createPaymentPostgresPool(environment.databaseUrl as string);
+  const accountService = new AccountProvisioningService(new PostgresIdentityPersistence(pool));
+  app.use(
+    "/api/account",
+    ...createAuthPipeline({
+      issuer: environment.auth0Issuer as string,
+      audience: environment.auth0Audience as string,
+      requiredScope: environment.auth0RequiredScope,
+    }),
+    createAccountRouter(accountService),
+  );
+} else {
+  app.get("/api/account/me", (_req, res) => res.status(503).set("Cache-Control", "no-store").json({
+    ok: false, error: "Authentication is not configured.", requestId: res.locals.requestId,
+  }));
+}
 
 app.use("/api/protocol", protocolRouter);
 app.use(
@@ -242,6 +266,18 @@ app.use(
         ok: false,
         error: "Request origin is not allowed.",
         requestId,
+      });
+    }
+
+    if (error instanceof InsufficientScopeError) {
+      return res.status(403).set("Cache-Control", "no-store").json({
+        ok: false, error: "Account access is not permitted.", requestId,
+      });
+    }
+
+    if (error instanceof UnauthorizedError) {
+      return res.status(401).set("Cache-Control", "no-store").json({
+        ok: false, error: "Authentication is required.", requestId,
       });
     }
 

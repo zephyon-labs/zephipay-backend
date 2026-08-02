@@ -7,6 +7,7 @@ import type {
   CreateAccountSessionInput,
   ExternalIdentity,
   LinkExternalIdentityInput,
+  ProvisionExternalIdentityInput,
 } from "./identityTypes";
 
 export interface AccountRepository {
@@ -22,6 +23,12 @@ export interface AccountRepository {
 }
 
 export interface ExternalIdentityRepository {
+  /** Atomically resolves or creates the canonical account and its first identity link. */
+  provisionExternalIdentity(input: ProvisionExternalIdentityInput): Promise<Readonly<{
+    account: Account;
+    identity: ExternalIdentity;
+    created: boolean;
+  }>>;
   linkExternalIdentity(input: LinkExternalIdentityInput): Promise<Readonly<{
     account: Account;
     identity: ExternalIdentity;

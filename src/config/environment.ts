@@ -116,6 +116,21 @@ const databaseUrl = parseDatabaseUrl(
   process.env.DATABASE_URL,
 );
 
+const authEnabled = parseBoolean(process.env.AUTH_ENABLED, false);
+const auth0Issuer = process.env.AUTH0_ISSUER?.trim();
+const auth0Audience = process.env.AUTH0_AUDIENCE?.trim();
+const auth0RequiredScope = process.env.AUTH0_REQUIRED_SCOPE?.trim() || "read:account";
+
+if (authEnabled && (!auth0Issuer || !auth0Audience || !postgresEnabled)) {
+  throw new Error("AUTH0_ISSUER, AUTH0_AUDIENCE, and POSTGRES_ENABLED=true are required when AUTH_ENABLED=true.");
+}
+if (auth0Issuer) {
+  const issuerUrl = new URL(auth0Issuer);
+  if (issuerUrl.protocol !== "https:" || !auth0Issuer.endsWith("/")) {
+    throw new Error("AUTH0_ISSUER must be an HTTPS URL with a trailing slash.");
+  }
+}
+
 if (isProduction && !process.env.CORS_ALLOWED_ORIGINS) {
   throw new Error(
     "CORS_ALLOWED_ORIGINS is required when NODE_ENV=production.",
@@ -139,6 +154,11 @@ export const environment = Object.freeze({
 
   postgresEnabled,
   databaseUrl,
+
+  authEnabled,
+  auth0Issuer,
+  auth0Audience,
+  auth0RequiredScope,
 
   trustProxy: parseBoolean(
     process.env.TRUST_PROXY,

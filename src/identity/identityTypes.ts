@@ -71,6 +71,14 @@ export type LinkExternalIdentityInput = Readonly<{
   linkedAt?: string;
 }>;
 
+export type ProvisionExternalIdentityInput = Readonly<{
+  accountId: string;
+  identityId: string;
+  issuer: string;
+  subject: string;
+  occurredAt?: string;
+}>;
+
 export type CreateAccountSessionInput = Readonly<{
   sessionId: string;
   accountId: string;

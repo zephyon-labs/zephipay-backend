@@ -40,6 +40,16 @@ after(async () => {
 });
 
 describe("PostgreSQL identity foundation", () => {
+  it("atomically provisions one account without orphans under concurrency", async () => {
+    const issuer = "https://tenant.example/";
+    const subject = "concurrent-first-login";
+    const results = await Promise.all(Array.from({ length: 10 }, () => storage.provisionExternalIdentity({
+      accountId: randomUUID(), identityId: randomUUID(), issuer, subject,
+    })));
+    assert.equal(new Set(results.map(({ account }) => account.accountId)).size, 1);
+    const counts = await pool.query("SELECT (SELECT count(*) FROM accounts) accounts, (SELECT count(*) FROM external_identities) identities");
+    assert.deepEqual(counts.rows[0], { accounts: "1", identities: "1" });
+  });
   it("creates a canonical account and enforces optimistic concurrency", async () => {
     const account = await storage.createAccount({ accountId: ACCOUNT_A, createdAt: START });
     assert.equal(account.actorSubject, `zp:account:${ACCOUNT_A}`);
