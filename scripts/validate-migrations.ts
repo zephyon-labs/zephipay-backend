@@ -19,6 +19,22 @@ const REQUIRED_TOKENS = [
   "payments_terminal_artifacts_guard",
 ];
 
+const IDENTITY_REQUIRED_TOKENS = [
+  "CREATE TYPE account_status",
+  "CREATE TYPE account_security_event_type",
+  "CREATE TABLE accounts",
+  "CREATE TABLE external_identities",
+  "CREATE TABLE account_sessions",
+  "CREATE TABLE account_security_events",
+  "accounts_protect_identity",
+  "external_identities_append_only",
+  "account_security_events_append_only",
+  "account_sessions_protect_lifecycle",
+  "accounts_security_artifact_guard",
+  "external_identities_security_artifact_guard",
+  "account_sessions_security_artifact_guard",
+];
+
 async function main(): Promise<void> {
   const directory = path.resolve(process.cwd(), "migrations");
   const files = (await readdir(directory)).filter((file) => /^\d+_.+\.sql$/.test(file)).sort();
@@ -28,8 +44,16 @@ async function main(): Promise<void> {
   for (const token of REQUIRED_TOKENS) {
     if (!first.includes(token)) throw new Error(`Migration is missing required token: ${token}`);
   }
-  if (/\b(?:BEGIN|COMMIT|ROLLBACK)\s*;/i.test(first)) {
-    throw new Error("Transaction control belongs to the migration runner.");
+  const identityMigration = files.find((file) => file === "002_identity_foundation.sql");
+  if (!identityMigration) throw new Error("Identity foundation migration is missing.");
+  const identitySql = await readFile(path.join(directory, identityMigration), "utf8");
+  for (const token of IDENTITY_REQUIRED_TOKENS) {
+    if (!identitySql.includes(token)) throw new Error(`Identity migration is missing required token: ${token}`);
+  }
+  for (const [file, sql] of [[files[0], first], [identityMigration, identitySql]] as const) {
+    if (/\b(?:BEGIN|COMMIT|ROLLBACK)\s*;/i.test(sql)) {
+      throw new Error(`Transaction control belongs to the migration runner: ${file}`);
+    }
   }
   const runner = await readFile(path.resolve(process.cwd(), "scripts/run-migrations.ts"), "utf8");
   for (const token of ['client.query("BEGIN")', 'client.query("COMMIT")', 'client.query("ROLLBACK")']) {
