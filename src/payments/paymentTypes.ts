@@ -1,0 +1,164 @@
+export const PAYMENT_STATUSES = [
+  "AWAITING_CONFIRMATION",
+  "PROCESSING",
+  "UNKNOWN",
+  "COMPLETED",
+  "FAILED",
+] as const;
+
+export type PaymentStatus = (typeof PAYMENT_STATUSES)[number];
+
+export const PAYMENT_EVENT_TYPES = [
+  "CREATED",
+  "USER_CONFIRMED",
+  "RUNTIME_APPROVED",
+  "SUBMISSION_STARTED",
+  "SIGNATURE_OBSERVED",
+  "SETTLEMENT_UNKNOWN",
+  "SETTLEMENT_CONFIRMED",
+  "SETTLEMENT_FAILED",
+  "RECEIPT_VERIFIED",
+] as const;
+
+export type PaymentEventType = (typeof PAYMENT_EVENT_TYPES)[number];
+
+export const INFORMATIONAL_PAYMENT_EVENT_TYPES = [
+  "CREATED",
+  "USER_CONFIRMED",
+  "RUNTIME_APPROVED",
+  "SUBMISSION_STARTED",
+  "SIGNATURE_OBSERVED",
+  "SETTLEMENT_UNKNOWN",
+] as const satisfies readonly PaymentEventType[];
+
+export type InformationalPaymentEventType =
+  (typeof INFORMATIONAL_PAYMENT_EVENT_TYPES)[number];
+
+export type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | readonly JsonValue[]
+  | { readonly [key: string]: JsonValue };
+
+export type JsonObject = { readonly [key: string]: JsonValue };
+
+export type PreSubmissionRejectionProof = Readonly<{
+  kind: "PRE_SUBMISSION_REJECTION";
+  code: string;
+  reason: string;
+}>;
+
+export type SolanaTransactionErrorProof = Readonly<{
+  kind: "SOLANA_TRANSACTION_ERROR";
+  signature: string;
+  slot?: string;
+  chainError: JsonValue;
+}>;
+
+export type ExpiredUnsignedTransactionProof = Readonly<{
+  kind: "EXPIRED_UNSIGNED_TRANSACTION";
+  recentBlockhash: string;
+  lastValidBlockHeight: string;
+  transactionWasSigned: false;
+  submissionWasAttempted: false;
+}>;
+
+export type PaymentTerminalProof =
+  | PreSubmissionRejectionProof
+  | SolanaTransactionErrorProof
+  | ExpiredUnsignedTransactionProof;
+
+export type PaymentRecord = Readonly<{
+  id: string;
+  actorSubject: string;
+  idempotencyKey: string;
+  requestHash: string;
+  status: PaymentStatus;
+  version: bigint;
+  network: "solana-devnet";
+  rail: "solana";
+  asset: "USDC";
+  mintAddress: string;
+  recipientAddress: string;
+  amountRaw: bigint;
+  purpose: string;
+  runtimeId?: string;
+  runtimePaymentId?: string;
+  runtimeTransactionId?: string;
+  userConfirmedAt?: string;
+  executionStartedAt?: string;
+  submittedAt?: string;
+  lastCheckedAt?: string;
+  completedAt?: string;
+  failedAt?: string;
+  solanaSignature?: string;
+  recentBlockhash?: string;
+  submittedSlot?: bigint;
+  confirmedSlot?: bigint;
+  confirmationStatus?: string;
+  chainError?: JsonValue;
+  receiptPda?: string;
+  failureCode?: string;
+  failureReason?: string;
+  terminalProof?: PaymentTerminalProof;
+  createdAt: string;
+  updatedAt: string;
+}>;
+
+export type PaymentEvent = Readonly<{
+  id: bigint;
+  paymentId: string;
+  sequenceNumber: number;
+  eventType: PaymentEventType;
+  fromStatus?: PaymentStatus;
+  toStatus?: PaymentStatus;
+  runtimeEventId?: string;
+  requestId?: string;
+  details: JsonObject;
+  occurredAt: string;
+}>;
+
+export type CreatePaymentInput = Pick<
+  PaymentRecord,
+  | "id"
+  | "actorSubject"
+  | "idempotencyKey"
+  | "requestHash"
+  | "network"
+  | "rail"
+  | "asset"
+  | "mintAddress"
+  | "recipientAddress"
+  | "amountRaw"
+  | "purpose"
+>;
+
+export type PaymentLifecycleEvidence = Readonly<{
+  runtimeId?: string;
+  runtimePaymentId?: string;
+  runtimeTransactionId?: string;
+  userConfirmedAt?: string;
+  executionStartedAt?: string;
+  submittedAt?: string;
+  lastCheckedAt?: string;
+  completedAt?: string;
+  failedAt?: string;
+  solanaSignature?: string;
+  recentBlockhash?: string;
+  submittedSlot?: bigint;
+  confirmedSlot?: bigint;
+  confirmationStatus?: string;
+  chainError?: JsonValue;
+  receiptPda?: string;
+  failureCode?: string;
+  failureReason?: string;
+  terminalProof?: PaymentTerminalProof;
+}>;
+
+export type PaymentFailureEvidence = PaymentLifecycleEvidence & Readonly<{
+  failedAt: string;
+  failureCode: string;
+  terminalProof: PaymentTerminalProof;
+}>;

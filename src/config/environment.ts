@@ -66,11 +66,54 @@ function parseOrigins(value: string | undefined): string[] {
     .filter(Boolean);
 }
 
+export function parseDatabaseUrl(
+  enabled: boolean,
+  value: string | undefined,
+): string | undefined {
+  const normalized = value?.trim();
+
+  if (!enabled && !normalized) {
+    return undefined;
+  }
+
+  if (!normalized) {
+    throw new Error("DATABASE_URL is required when POSTGRES_ENABLED=true.");
+  }
+
+  let parsed: URL;
+
+  try {
+    parsed = new URL(normalized);
+  } catch {
+    throw new Error("DATABASE_URL must be a valid PostgreSQL URL.");
+  }
+
+  if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
+    throw new Error("DATABASE_URL must use the postgres or postgresql protocol.");
+  }
+
+  if (!parsed.hostname || !parsed.pathname || parsed.pathname === "/") {
+    throw new Error("DATABASE_URL must include a host and database name.");
+  }
+
+  return normalized;
+}
+
 const nodeEnv = process.env.NODE_ENV?.trim() || "development";
 const isProduction = nodeEnv === "production";
 
 const corsAllowedOrigins = parseOrigins(
   process.env.CORS_ALLOWED_ORIGINS,
+);
+
+const postgresEnabled = parseBoolean(
+  process.env.POSTGRES_ENABLED,
+  false,
+);
+
+const databaseUrl = parseDatabaseUrl(
+  postgresEnabled,
+  process.env.DATABASE_URL,
 );
 
 if (isProduction && !process.env.CORS_ALLOWED_ORIGINS) {
@@ -93,6 +136,9 @@ export const environment = Object.freeze({
     process.env.PAYMENTS_ENABLED,
     false,
   ),
+
+  postgresEnabled,
+  databaseUrl,
 
   trustProxy: parseBoolean(
     process.env.TRUST_PROXY,
