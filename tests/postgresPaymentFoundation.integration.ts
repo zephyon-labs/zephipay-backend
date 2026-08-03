@@ -5,6 +5,9 @@ import { after, before, beforeEach, describe, it } from "node:test";
 import { Pool } from "pg";
 
 import type { CreatePaymentInput } from "../src/payments/paymentTypes";
+import { AccountProvisioningService } from "../src/identity/accountProvisioningService";
+import { PaymentIntentApplicationError, PaymentIntentService } from "../src/services/paymentIntentService";
+import { PostgresIdentityPersistence } from "../src/storage/postgres/postgresIdentityPersistence";
 import { PostgresPaymentPersistence } from "../src/storage/postgres/postgresPaymentPersistence";
 
 const databaseUrl = process.env.TEST_DATABASE_URL?.trim();
@@ -12,6 +15,7 @@ if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required for PostgreSQL 
 
 const pool = new Pool({ connectionString: databaseUrl, max: 12 });
 const storage = new PostgresPaymentPersistence(pool);
+const accounts = new AccountProvisioningService(new PostgresIdentityPersistence(pool));
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
 const NOW = "2026-08-01T12:00:00.000Z";
@@ -242,5 +246,80 @@ describe("PostgreSQL payment foundation", () => {
       first.release();
       second.release();
     }
+  });
+});
+
+describe("PostgreSQL authenticated payment intents", () => {
+  async function serviceFixture(options: { enabled?: boolean; expiresAt?: string; clock?: () => string } = {}) {
+    const principal = {
+      issuer: "https://integration.example/",
+      providerSubject: `auth0|${randomUUID()}`,
+      scopes: ["read:payments", "write:payments"],
+    } as const;
+    const account = (await accounts.resolve(principal)).account;
+    await storage.createAllowlistEntry({
+      actorSubject: account.actorSubject,
+      enabled: options.enabled,
+      expiresAt: options.expiresAt,
+    });
+    return {
+      principal,
+      account,
+      service: new PaymentIntentService(accounts, storage, { clock: options.clock }),
+    };
+  }
+
+  const serviceInput = (key: string) => ({
+    idempotencyKey: key,
+    recipient: RECIPIENT,
+    amount: "1.000001",
+    purpose: "Authenticated integration",
+  });
+
+  it("creates for a canonical account with active beta access and enforces ownership", async () => {
+    const first = await serviceFixture();
+    const created = await first.service.create(first.principal, serviceInput("service-active-key-0001"));
+    assert.equal(created.paymentIntent.status, "awaiting_confirmation");
+    assert.equal(created.paymentIntent.amountRaw, "1000001");
+    const other = await serviceFixture();
+    await assert.rejects(() => other.service.find(other.principal, created.paymentIntent.id), (error) =>
+      error instanceof PaymentIntentApplicationError && error.kind === "NOT_FOUND");
+  });
+
+  it("denies disabled, revoked, and expired beta access", async () => {
+    const disabled = await serviceFixture({ enabled: false });
+    await assert.rejects(() => disabled.service.create(disabled.principal, serviceInput("service-disabled-key-01")), /Beta payment access/);
+
+    const revoked = await serviceFixture();
+    await pool.query(
+      "UPDATE beta_allowlist SET enabled=false, revoked_at=now() WHERE actor_subject=$1",
+      [revoked.account.actorSubject],
+    );
+    await assert.rejects(() => revoked.service.create(revoked.principal, serviceInput("service-revoked-key-001")), /Beta payment access/);
+
+    const expired = await serviceFixture({
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      clock: () => "2031-01-01T00:00:00.000Z",
+    });
+    await assert.rejects(() => expired.service.create(expired.principal, serviceInput("service-expired-key-001")), /Beta payment access/);
+  });
+
+  it("converges concurrent creates and confirmations with one USER_CONFIRMED event", async () => {
+    const fixture = await serviceFixture();
+    const key = "service-concurrent-key-01";
+    const creates = await Promise.all(Array.from({ length: 20 }, () =>
+      fixture.service.create(fixture.principal, serviceInput(key))));
+    assert.equal(creates.filter(({ created }) => created).length, 1);
+    const payment = creates[0].paymentIntent;
+    const confirmations = await Promise.all(Array.from({ length: 20 }, () =>
+      fixture.service.confirm(fixture.principal, {
+        paymentId: payment.id,
+        requestHash: payment.requestHash,
+        expectedVersion: 0n,
+      })));
+    assert.equal(confirmations.filter(({ applied }) => applied).length, 1);
+    assert.equal(confirmations.filter(({ applied }) => !applied).length, 19);
+    const events = await storage.listPaymentEvents(payment.id);
+    assert.equal(events.filter(({ eventType }) => eventType === "USER_CONFIRMED").length, 1);
   });
 });

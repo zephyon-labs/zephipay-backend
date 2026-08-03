@@ -120,6 +120,8 @@ const authEnabled = parseBoolean(process.env.AUTH_ENABLED, false);
 const auth0Issuer = process.env.AUTH0_ISSUER?.trim();
 const auth0Audience = process.env.AUTH0_AUDIENCE?.trim();
 const auth0RequiredScope = process.env.AUTH0_REQUIRED_SCOPE?.trim() || "read:account";
+const auth0ReadPaymentsScope = process.env.AUTH0_READ_PAYMENTS_SCOPE?.trim() || "read:payments";
+const auth0WritePaymentsScope = process.env.AUTH0_WRITE_PAYMENTS_SCOPE?.trim() || "write:payments";
 
 if (authEnabled && (!auth0Issuer || !auth0Audience || !postgresEnabled)) {
   throw new Error("AUTH0_ISSUER, AUTH0_AUDIENCE, and POSTGRES_ENABLED=true are required when AUTH_ENABLED=true.");
@@ -159,6 +161,8 @@ export const environment = Object.freeze({
   auth0Issuer,
   auth0Audience,
   auth0RequiredScope,
+  auth0ReadPaymentsScope,
+  auth0WritePaymentsScope,
 
   trustProxy: parseBoolean(
     process.env.TRUST_PROXY,

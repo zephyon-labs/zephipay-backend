@@ -27,6 +27,9 @@ import { protocolRouter } from "./routes/protocol";
 import { receiptsRouter } from "./routes/receipts";
 import { verifyRouter } from "./routes/verify";
 import { createAccountRouter } from "./routes/account";
+import { createPaymentIntentsRouter, paymentIntentServiceUnavailable } from "./routes/paymentIntents";
+import { PaymentIntentService } from "./services/paymentIntentService";
+import { PostgresPaymentPersistence } from "./storage/postgres/postgresPaymentPersistence";
 import { PostgresIdentityPersistence } from "./storage/postgres/postgresIdentityPersistence";
 import { createPaymentPostgresPool } from "./storage/postgres/postgresPool";
 import { executePayment } from "./services/payservice";
@@ -107,10 +110,30 @@ if (environment.authEnabled) {
     }),
     createAccountRouter(accountService),
   );
+  const authConfiguration = {
+    issuer: environment.auth0Issuer as string,
+    audience: environment.auth0Audience as string,
+  };
+  app.use(
+    "/api/payment-intents",
+    createPaymentIntentsRouter({
+      service: new PaymentIntentService(accountService, new PostgresPaymentPersistence(pool)),
+      rateLimiter: paymentRateLimiter,
+      readAuth: createAuthPipeline({
+        ...authConfiguration,
+        requiredScope: environment.auth0ReadPaymentsScope,
+      }),
+      writeAuth: createAuthPipeline({
+        ...authConfiguration,
+        requiredScope: environment.auth0WritePaymentsScope,
+      }),
+    }),
+  );
 } else {
   app.get("/api/account/me", (_req, res) => res.status(503).set("Cache-Control", "no-store").json({
     ok: false, error: "Authentication is not configured.", requestId: res.locals.requestId,
   }));
+  app.use("/api/payment-intents", paymentIntentServiceUnavailable);
 }
 
 app.use("/api/protocol", protocolRouter);
