@@ -9,8 +9,17 @@ export type AuthConfiguration = Readonly<{
 }>;
 
 export function createAuthPipeline(configuration: AuthConfiguration) {
+  const issuerConfiguration = configuration.publicKey
+    ? {
+        issuer: configuration.issuer,
+        publicKey: configuration.publicKey,
+      }
+    : {
+        issuerBaseURL: configuration.issuer,
+      };
+
   const verify = auth({
-    issuer: configuration.issuer,
+    ...issuerConfiguration,
     audience: configuration.audience,
     tokenSigningAlg: "RS256",
     clockTolerance: 5,
@@ -23,7 +32,6 @@ export function createAuthPipeline(configuration: AuthConfiguration) {
     dpop: { enabled: false },
     timeoutDuration: 5_000,
     cacheMaxAge: 600_000,
-    ...(configuration.publicKey ? { publicKey: configuration.publicKey } : {}),
   });
   const scope = requiredScopes(configuration.requiredScope);
   return [verify, scope, normalizePrincipal] as const;
