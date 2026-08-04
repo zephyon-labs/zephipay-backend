@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { hasActivePaymentAccess } from "../src/allowlist/allowlistEntry";
 import { AccountProvisioningService } from "../src/identity/accountProvisioningService";
 import {
   parseConfirmPaymentIntentRequest,
@@ -49,7 +50,7 @@ async function fixture(options: { enabled?: boolean; expiresAt?: string; allowli
     clock: () => NOW,
     createId: () => `00000000-0000-4000-8000-${String(nextId++).padStart(12, "0")}`,
   });
-  return { identity, accounts, payments, account, service };
+  return { identity, accounts, payments, servicePayments, account, service };
 }
 
 const createInput = (overrides: Partial<{ idempotencyKey: string; recipient: string; amount: string; purpose: string }> = {}) => ({
@@ -108,12 +109,39 @@ describe("PaymentIntentService", () => {
       { revoked: true },
       { expiresAt: "2026-08-02T12:00:00.000Z" },
     ]) {
-      const { service } = await fixture(options);
+      const { account, service, servicePayments } = await fixture(options);
+      const entry = await servicePayments.findAllowlistEntry(account.actorSubject);
+      assert.equal(hasActivePaymentAccess(entry, NOW), false);
       await assert.rejects(() => service.create(principal, createInput()), (error) =>
         error instanceof PaymentIntentApplicationError && error.kind === "ACCESS_DENIED");
     }
-    const { service } = await fixture({ expiresAt: LATER });
+    const { account, service, servicePayments } = await fixture({ expiresAt: LATER });
+    assert.equal(hasActivePaymentAccess(await servicePayments.findAllowlistEntry(account.actorSubject), NOW), true);
     assert.equal((await service.create(principal, createInput())).created, true);
+  });
+
+  it("uses the same active-access predicate for confirmation", async () => {
+    const { accounts, payments, service } = await fixture();
+    const created = await service.create(principal, createInput());
+    const revokedPayments = new Proxy(payments, {
+      get(target, property) {
+        if (property === "findAllowlistEntry") {
+          return async (actorSubject: string) => {
+            const current = await target.findAllowlistEntry(actorSubject);
+            return current ? { ...current, enabled: false, revokedAt: NOW } : undefined;
+          };
+        }
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const confirmationService = new PaymentIntentService(accounts, revokedPayments, { clock: () => NOW });
+    await assert.rejects(() => confirmationService.confirm(principal, {
+      paymentId: created.paymentIntent.id,
+      requestHash: created.paymentIntent.requestHash,
+      expectedVersion: 0n,
+    }), (error) => error instanceof PaymentIntentApplicationError && error.kind === "ACCESS_DENIED");
+    assert.equal((await payments.findPayment(created.paymentIntent.id))?.status, "AWAITING_CONFIRMATION");
   });
 
   it("enforces ownership while allowing actor-owned historical reads", async () => {

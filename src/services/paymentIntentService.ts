@@ -1,6 +1,7 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 
 import type { ExternalPrincipal } from "../auth/externalPrincipal";
+import { hasActivePaymentAccess } from "../allowlist/allowlistEntry";
 import { AccountAccessDeniedError, AccountProvisioningService } from "../identity/accountProvisioningService";
 import { createPaymentRequestHash } from "../payments/requestHash";
 import type { PaymentRecord } from "../payments/paymentTypes";
@@ -156,9 +157,7 @@ export class PaymentIntentService {
 
   private async requireActiveAllowlist(actorSubject: string): Promise<void> {
     const entry = await this.payments.findAllowlistEntry(actorSubject);
-    const now = Date.parse(this.clock());
-    if (!entry || !entry.enabled || entry.revokedAt ||
-        (entry.expiresAt !== undefined && Date.parse(entry.expiresAt) <= now)) {
+    if (!hasActivePaymentAccess(entry, this.clock())) {
       throw new PaymentIntentApplicationError("ACCESS_DENIED", "Beta payment access is unavailable.");
     }
   }

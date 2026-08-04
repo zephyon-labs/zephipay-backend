@@ -7,7 +7,10 @@ import { exportJWK, SignJWT } from "jose";
 
 import { createAuthPipeline, externalPrincipalFrom } from "../src/auth/authMiddleware";
 import { AccountAccessDeniedError, AccountProvisioningService } from "../src/identity/accountProvisioningService";
+import { createAccountRouter } from "../src/routes/account";
 import { InMemoryIdentityPersistence } from "../src/storage/memory/inMemoryIdentityPersistence";
+import type { AllowlistEntry } from "../src/allowlist/allowlistEntry";
+import type { AllowlistRepository } from "../src/storage/storageContracts";
 
 const issuer = "https://tenant.example/";
 const audience = "https://api.zephipay.test";
@@ -35,7 +38,59 @@ describe("account provisioning", () => {
     await storage.updateAccountStatus({ accountId: first.account.accountId, expectedVersion: first.account.version, status: "SUSPENDED" });
     await assert.rejects(() => service.resolve({ issuer, providerSubject: "one", scopes: [] }), AccountAccessDeniedError);
   });
+
+  it("returns only authoritative, fail-closed payment access while preserving account fields", async () => {
+    const now = "2026-08-03T12:00:00.000Z";
+    const cases: Array<readonly [string, AllowlistEntry | undefined, boolean]> = [
+      ["missing", undefined, false],
+      ["disabled", entry({ enabled: false }), false],
+      ["revoked", entry({ enabled: false, revokedAt: "2026-08-02T12:00:00.000Z" }), false],
+      ["expired", entry({ expiresAt: "2026-08-03T11:59:59.000Z" }), false],
+      ["active", entry({ expiresAt: "2026-08-04T12:00:00.000Z", note: "must stay private" }), true],
+    ];
+
+    for (const [name, allowlistEntry, enabled] of cases) {
+      const identities = new InMemoryIdentityPersistence({ clock: () => now });
+      const accounts = new AccountProvisioningService(identities);
+      const repository: AllowlistRepository = {
+        createAllowlistEntry: async () => { throw new Error("not used"); },
+        findAllowlistEntry: async () => allowlistEntry,
+      };
+      const app = express();
+      app.use((_req, res, next) => { res.locals.externalPrincipal = { issuer, providerSubject: `auth0|${name}`, scopes: [] }; next(); });
+      app.use("/api/account", createAccountRouter(accounts, repository, () => now));
+      const server = app.listen(0);
+      await new Promise<void>((resolve) => server.once("listening", resolve));
+      try {
+        const address = server.address();
+        assert.ok(address && typeof address === "object");
+        const response = await fetch(`http://127.0.0.1:${address.port}/api/account/me`);
+        assert.equal(response.status, 200);
+        const body = await response.json() as { account: Record<string, unknown> };
+        assert.equal((body.account.paymentAccess as { enabled: boolean }).enabled, enabled);
+        assert.equal(typeof body.account.id, "string");
+        assert.match(String(body.account.actorSubject), /^zp:account:/);
+        assert.equal(body.account.status, "active");
+        assert.equal(Array.isArray(body.account.identities), true);
+        const serialized = JSON.stringify(body);
+        for (const privateField of ["note", "addedAt", "added_at", "expiresAt", "expires_at", "revokedAt", "revoked_at"]) {
+          assert.doesNotMatch(serialized, new RegExp(privateField));
+        }
+      } finally {
+        await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      }
+    }
+  });
 });
+
+function entry(overrides: Partial<AllowlistEntry> = {}): AllowlistEntry {
+  return {
+    actorSubject: "zp:account:00000000-0000-4000-8000-000000000001",
+    enabled: true,
+    addedAt: "2026-08-01T12:00:00.000Z",
+    ...overrides,
+  };
+}
 
 describe("JWT verification", () => {
   it("accepts only exact RS256 issuer, audience, and scope without trusting identity headers", async () => {

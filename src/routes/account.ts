@@ -1,15 +1,25 @@
 import { Router } from "express";
 
+import { hasActivePaymentAccess } from "../allowlist/allowlistEntry";
 import { externalPrincipalFrom } from "../auth/authMiddleware";
 import { AccountAccessDeniedError, AccountProvisioningService } from "../identity/accountProvisioningService";
+import type { AllowlistRepository } from "../storage/storageContracts";
 
-export function createAccountRouter(service: AccountProvisioningService): Router {
+export function createAccountRouter(
+  service: AccountProvisioningService,
+  allowlist: AllowlistRepository,
+  clock: () => string = () => new Date().toISOString(),
+): Router {
   const router = Router();
   router.get("/me", async (_req, res) => {
     res.set("Cache-Control", "no-store, private");
     res.set("Pragma", "no-cache");
     try {
       const result = await service.resolve(externalPrincipalFrom(res));
+      const paymentAccess = hasActivePaymentAccess(
+        await allowlist.findAllowlistEntry(result.account.actorSubject),
+        clock(),
+      );
       return res.json({
         ok: true,
         account: {
@@ -23,6 +33,7 @@ export function createAccountRouter(service: AccountProvisioningService): Router
             emailVerified: false,
             linkedAt: identity.linkedAt,
           })),
+          paymentAccess: { enabled: paymentAccess },
         },
       });
     } catch (error) {

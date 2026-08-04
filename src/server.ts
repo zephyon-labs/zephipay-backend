@@ -101,6 +101,7 @@ app.use(generalRateLimiter);
 if (environment.authEnabled) {
   const pool = createPaymentPostgresPool(environment.databaseUrl as string);
   const accountService = new AccountProvisioningService(new PostgresIdentityPersistence(pool));
+  const paymentPersistence = new PostgresPaymentPersistence(pool);
   app.use(
     "/api/account",
     ...createAuthPipeline({
@@ -108,7 +109,7 @@ if (environment.authEnabled) {
       audience: environment.auth0Audience as string,
       requiredScope: environment.auth0RequiredScope,
     }),
-    createAccountRouter(accountService),
+    createAccountRouter(accountService, paymentPersistence),
   );
   const authConfiguration = {
     issuer: environment.auth0Issuer as string,
@@ -117,7 +118,7 @@ if (environment.authEnabled) {
   app.use(
     "/api/payment-intents",
     createPaymentIntentsRouter({
-      service: new PaymentIntentService(accountService, new PostgresPaymentPersistence(pool)),
+      service: new PaymentIntentService(accountService, paymentPersistence),
       rateLimiter: paymentRateLimiter,
       readAuth: createAuthPipeline({
         ...authConfiguration,
