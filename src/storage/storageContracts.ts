@@ -7,6 +7,7 @@ import type {
   PaymentFailureEvidence,
   PaymentLifecycleEvidence,
   PaymentRecord,
+  PaymentIdentitySnapshot,
   PaymentStatus,
 } from "../payments/paymentTypes";
 import type { CreatePaymentReceiptInput, PaymentReceipt } from "../receipts/paymentReceipt";
@@ -15,6 +16,15 @@ export type IdempotencyClaim =
   | Readonly<{ outcome: "CLAIMED"; payment: PaymentRecord }>
   | Readonly<{ outcome: "EXISTING"; payment: PaymentRecord }>
   | Readonly<{ outcome: "HASH_CONFLICT"; payment: PaymentRecord }>;
+
+export type ClaimPaymentIdentityInput = Readonly<{
+  id: string; actorSubject: string; senderAccountId: string; idempotencyKey: string;
+  recipientAccountId: string; trustAcknowledged: boolean; network: "solana-devnet";
+  rail: "solana"; asset: "USDC"; mintAddress: string; amountRaw: bigint;
+  purpose: string; capturedAt: string;
+}>;
+
+export type RecentPaymentIdentity = PaymentIdentitySnapshot;
 
 export type AppendInformationalPaymentEventInput = Readonly<{
   paymentId: string;
@@ -58,7 +68,9 @@ export interface AllowlistRepository {
 
 export interface PaymentRepository {
   claimIdempotencyKey(input: CreatePaymentInput): Promise<IdempotencyClaim>;
+  claimPaymentIdentityKey(input: ClaimPaymentIdentityInput): Promise<IdempotencyClaim>;
   findPayment(paymentId: string): Promise<PaymentRecord | undefined>;
+  listRecentPaymentIdentities(actorSubject: string, limit: number): Promise<RecentPaymentIdentity[]>;
   listPaymentsRequiringReconciliation(limit: number): Promise<PaymentRecord[]>;
 }
 

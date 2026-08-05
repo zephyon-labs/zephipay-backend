@@ -4,19 +4,18 @@ import type { ExternalPrincipal } from "../auth/externalPrincipal";
 import { hasActivePaymentAccess } from "../allowlist/allowlistEntry";
 import { AccountAccessDeniedError, AccountProvisioningService } from "../identity/accountProvisioningService";
 import { createPaymentRequestHash } from "../payments/requestHash";
-import type { PaymentRecord } from "../payments/paymentTypes";
+import type { PaymentIdentitySnapshot, PaymentRecord } from "../payments/paymentTypes";
 import { rawUsdcToDisplay, usdcAmountToRaw } from "../payments/paymentIntentValidation";
 import type { PaymentPersistence } from "../storage/storageContracts";
 import { PaymentVersionConflictError } from "../storage/storageContracts";
 
 export const USDC_DEVNET_MINT = "2w2nqMemQzjwKMk3jEmtXnBqGBXGJLs8FNfb5Khb8E7J";
 
-export type PublicPaymentIntent = Readonly<{
+type PublicPaymentIntentBase = Readonly<{
   id: string;
   status: string;
   version: string;
   requestHash: string;
-  recipient: string;
   amountRaw: string;
   amount: string;
   asset: "USDC";
@@ -35,6 +34,10 @@ export type PublicPaymentIntent = Readonly<{
   receiptPda?: string;
   failureCode?: string;
 }>;
+export type PublicPaymentIntent = PublicPaymentIntentBase & (
+  | Readonly<{ recipientType: "direct_wallet"; recipient: string }>
+  | Readonly<{ recipientType: "payment_identity"; recipientSnapshot: ReturnType<typeof serializeSnapshot> }>
+);
 
 export class PaymentIntentApplicationError extends Error {
   constructor(
@@ -51,6 +54,12 @@ export type PaymentIntentServiceOptions = Readonly<{
   createId?: () => string;
   mintAddress?: string;
 }>;
+type CreateIntentServiceInput = Readonly<{
+  idempotencyKey: string; amount: string; purpose: string;
+} & ({ recipient: string } | {
+  recipientType: "payment_identity"; recipientAccountId: string;
+  trustAcknowledgment?: Readonly<{ acknowledged: true }>;
+})>;
 
 export class PaymentIntentService {
   private readonly clock: () => string;
@@ -67,15 +76,33 @@ export class PaymentIntentService {
     this.mintAddress = options.mintAddress ?? USDC_DEVNET_MINT;
   }
 
-  async create(principal: ExternalPrincipal, input: Readonly<{
-    idempotencyKey: string;
-    recipient: string;
-    amount: string;
-    purpose: string;
-  }>): Promise<Readonly<{ paymentIntent: PublicPaymentIntent; created: boolean }>> {
-    const actorSubject = await this.resolveActor(principal);
+  async create(principal: ExternalPrincipal, input: CreateIntentServiceInput): Promise<Readonly<{ paymentIntent: PublicPaymentIntent; created: boolean }>> {
+    const actor = await this.resolveActor(principal);
+    const actorSubject = actor.actorSubject;
     await this.requireActiveAllowlist(actorSubject);
     const amountRaw = usdcAmountToRaw(input.amount);
+    if ("recipientType" in input) {
+      let claim;
+      try {
+        claim = await this.payments.claimPaymentIdentityKey({
+          id: this.createId(), actorSubject, senderAccountId: actor.accountId,
+          idempotencyKey: input.idempotencyKey, recipientAccountId: input.recipientAccountId,
+          trustAcknowledged: input.trustAcknowledgment?.acknowledged === true,
+          network: "solana-devnet", rail: "solana", asset: "USDC", mintAddress: this.mintAddress,
+          amountRaw, purpose: input.purpose, capturedAt: this.clock(),
+        });
+      } catch (error) {
+        if (error instanceof Error && error.message === "TRUST_ACKNOWLEDGMENT_REQUIRED") {
+          throw new PaymentIntentApplicationError("CONFLICT", "Trust acknowledgment is required for this recipient.");
+        }
+        if (error instanceof Error && error.message === "RECIPIENT_UNAVAILABLE") {
+          throw new PaymentIntentApplicationError("NOT_FOUND", "Recipient was not found.");
+        }
+        throw error;
+      }
+      if (claim.outcome === "HASH_CONFLICT") throw new PaymentIntentApplicationError("CONFLICT", "Idempotency key was already used for a different payment intent.");
+      return { paymentIntent: toPublicPaymentIntent(claim.payment), created: claim.outcome === "CLAIMED" };
+    }
     const canonical = {
       actorSubject,
       network: "solana-devnet" as const,
@@ -96,6 +123,7 @@ export class PaymentIntentService {
       recipientAddress: canonical.recipientAddress,
       amountRaw: canonical.amountRaw,
       purpose: canonical.purpose,
+      recipientType: "DIRECT_WALLET",
     });
     if (claim.outcome === "HASH_CONFLICT") {
       throw new PaymentIntentApplicationError("CONFLICT", "Idempotency key was already used for a different payment intent.");
@@ -104,7 +132,7 @@ export class PaymentIntentService {
   }
 
   async find(principal: ExternalPrincipal, paymentId: string): Promise<PublicPaymentIntent> {
-    const actorSubject = await this.resolveActor(principal);
+    const actorSubject = (await this.resolveActor(principal)).actorSubject;
     return toPublicPaymentIntent(await this.requireOwnedPayment(paymentId, actorSubject));
   }
 
@@ -114,7 +142,7 @@ export class PaymentIntentService {
     expectedVersion: bigint;
     requestId?: string;
   }>): Promise<Readonly<{ paymentIntent: PublicPaymentIntent; applied: boolean }>> {
-    const actorSubject = await this.resolveActor(principal);
+    const actorSubject = (await this.resolveActor(principal)).actorSubject;
     await this.requireActiveAllowlist(actorSubject);
     const current = await this.requireOwnedPayment(input.paymentId, actorSubject);
     this.requireMatchingHash(current.requestHash, input.requestHash);
@@ -144,9 +172,18 @@ export class PaymentIntentService {
     }
   }
 
-  private async resolveActor(principal: ExternalPrincipal): Promise<string> {
+  async recent(principal: ExternalPrincipal) {
+    const actor = await this.resolveActor(principal);
+    return (await this.payments.listRecentPaymentIdentities(actor.actorSubject, 5)).map((snapshot) => ({
+      accountId: snapshot.accountId, username: snapshot.username, displayName: snapshot.displayName,
+      accountType: snapshot.accountType.toLowerCase(), verificationState: snapshot.verificationState.toLowerCase(),
+    }));
+  }
+
+  private async resolveActor(principal: ExternalPrincipal): Promise<Readonly<{ actorSubject: string; accountId: string }>> {
     try {
-      return (await this.accounts.resolve(principal)).account.actorSubject;
+      const { account } = await this.accounts.resolve(principal);
+      return { actorSubject: account.actorSubject, accountId: account.accountId };
     } catch (error) {
       if (error instanceof AccountAccessDeniedError) {
         throw new PaymentIntentApplicationError("ACCESS_DENIED", "Payment access is unavailable.");
@@ -198,7 +235,9 @@ export function toPublicPaymentIntent(payment: PaymentRecord): PublicPaymentInte
     status: payment.status.toLowerCase(),
     version: payment.version.toString(),
     requestHash: payment.requestHash,
-    recipient: payment.recipientAddress,
+    ...(payment.recipientType === "PAYMENT_IDENTITY" && payment.recipientSnapshot
+      ? { recipientType: "payment_identity" as const, recipientSnapshot: serializeSnapshot(payment.recipientSnapshot) }
+      : { recipientType: "direct_wallet" as const, recipient: payment.recipientAddress }),
     amountRaw: payment.amountRaw.toString(),
     amount: rawUsdcToDisplay(payment.amountRaw),
     asset: payment.asset,
@@ -216,5 +255,16 @@ export function toPublicPaymentIntent(payment: PaymentRecord): PublicPaymentInte
     ...(payment.confirmationStatus ? { confirmationStatus: payment.confirmationStatus } : {}),
     ...(payment.receiptPda ? { receiptPda: payment.receiptPda } : {}),
     ...(payment.failureCode ? { failureCode: payment.failureCode } : {}),
+  };
+}
+
+function serializeSnapshot(snapshot: PaymentIdentitySnapshot) {
+  return {
+    accountId: snapshot.accountId, username: snapshot.username, displayName: snapshot.displayName,
+    accountType: snapshot.accountType.toLowerCase() as Lowercase<PaymentIdentitySnapshot["accountType"]>,
+    verificationState: snapshot.verificationState.toLowerCase() as Lowercase<PaymentIdentitySnapshot["verificationState"]>,
+    payabilityState: "available" as const, capturedAt: snapshot.capturedAt,
+    schemaVersion: 1 as const, resolutionSource: "recipient_directory" as const,
+    trustOutcome: snapshot.trustOutcome.toLowerCase() as "not_required" | "acknowledged",
   };
 }

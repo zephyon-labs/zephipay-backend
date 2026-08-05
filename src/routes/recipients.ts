@@ -13,10 +13,11 @@ import {
   RecipientDirectoryService,
   serializePublicRecipient,
 } from "../recipients/recipientDirectoryService";
+import { PaymentIntentApplicationError, type PaymentIntentService } from "../services/paymentIntentService";
 
 type RecipientRequest = Request & { recipientRequesterAccountId?: string };
 
-export function createRecipientsRouter(accounts: AccountProvisioningService, directory: RecipientDirectoryService): Router {
+export function createRecipientsRouter(accounts: AccountProvisioningService, directory: RecipientDirectoryService, payments?: PaymentIntentService): Router {
   const router = Router();
   router.use((_req, res, next) => {
     res.set("Cache-Control", "no-store, private"); res.set("Pragma", "no-cache"); next();
@@ -40,6 +41,13 @@ export function createRecipientsRouter(accounts: AccountProvisioningService, dir
     } catch (error) { return handle(error, res); }
   });
 
+  router.get("/recent", async (_req: RecipientRequest, res) => {
+    if (!payments) return res.status(503).json({ ok: false, error: "Recent recipients are unavailable.", requestId: res.locals.requestId });
+    try {
+      return res.json({ ok: true, recipients: await payments.recent(externalPrincipalFrom(res)) });
+    } catch (error) { return handle(error, res); }
+  });
+
   router.get("/:accountId", async (req: RecipientRequest, res) => {
     try {
       const recipient = await directory.resolvePublicRecipient(requireRequester(req), String(req.params.accountId));
@@ -55,6 +63,9 @@ function requireRequester(req: RecipientRequest): string {
 }
 
 function handle(error: unknown, res: Response) {
+  if (error instanceof PaymentIntentApplicationError) {
+    return res.status(error.kind === "ACCESS_DENIED" ? 403 : 404).json({ ok: false, error: "Recipient access is unavailable.", requestId: res.locals.requestId });
+  }
   if (error instanceof EconomicIdentityInputError || error instanceof RecipientDirectoryError && error.kind === "INVALID") {
     return res.status(400).json({ ok: false, error: "A valid exact username is required.", requestId: res.locals.requestId });
   }

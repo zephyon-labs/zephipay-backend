@@ -8,12 +8,14 @@ import {
   validateReceiptCompletionTransition,
 } from "../../payments/paymentLifecycle";
 import { validateRequestHash } from "../../payments/requestHash";
+import { createPaymentIdentityRequestHash } from "../../payments/requestHash";
 import type {
   JsonObject,
   PaymentEvent,
   PaymentEventType,
   PaymentLifecycleEvidence,
   PaymentRecord,
+  PaymentIdentitySnapshot,
   PaymentStatus,
 } from "../../payments/paymentTypes";
 import type { PaymentReceipt } from "../../receipts/paymentReceipt";
@@ -23,7 +25,7 @@ import {
   cloneTerminalProof,
   terminalProofToJson,
 } from "../jsonValues";
-import type { AppendInformationalPaymentEventInput, IdempotencyClaim, PaymentPersistence } from "../storageContracts";
+import type { AppendInformationalPaymentEventInput, ClaimPaymentIdentityInput, IdempotencyClaim, PaymentPersistence, RecentPaymentIdentity } from "../storageContracts";
 import { PaymentVersionConflictError } from "../storageContracts";
 
 type DatabaseExecutor = Pick<Pool | PoolClient, "query">;
@@ -83,9 +85,96 @@ export class PostgresPaymentPersistence implements PaymentPersistence {
     });
   }
 
+  async claimPaymentIdentityKey(input: ClaimPaymentIdentityInput): Promise<IdempotencyClaim> {
+    return this.transaction(async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${input.actorSubject.length}:${input.actorSubject}${input.idempotencyKey}`]);
+      if (input.senderAccountId === input.recipientAccountId) throw recipientUnavailable();
+      const accounts = await client.query(
+        `SELECT account_id,status FROM accounts WHERE account_id IN ($1,$2)
+         ORDER BY account_id FOR SHARE`, [input.senderAccountId, input.recipientAccountId],
+      );
+      if (accounts.rows.length !== 2 || accounts.rows.some((row) => row.status !== "ACTIVE")) throw recipientUnavailable();
+      const resolved = await client.query(
+        `SELECT e.account_id,e.username,e.display_name,e.account_type,e.verification_state,e.payability_state,
+                d.destination_address
+         FROM economic_identities e
+         JOIN payment_destinations d ON d.account_id=e.account_id
+         WHERE e.account_id=$1 AND e.public_identity_status='ACTIVE'
+           AND e.discoverability <> 'PRIVATE' AND e.payability_state='AVAILABLE'
+           AND e.verification_state <> 'RESTRICTED'
+           AND d.destination_type='SOLANA_WALLET' AND d.status='ACTIVE' AND d.is_primary
+           AND d.ownership_state <> 'REJECTED'
+         FOR SHARE OF e,d`, [input.recipientAccountId],
+      );
+      const row = resolved.rows[0];
+      if (!row) throw recipientUnavailable();
+      const priorResult = await client.query(
+        "SELECT * FROM payments WHERE actor_subject=$1 AND idempotency_key=$2 FOR UPDATE",
+        [input.actorSubject,input.idempotencyKey],
+      );
+      const prior = priorResult.rows[0] ? mapPayment(priorResult.rows[0]) : undefined;
+      const verificationState = String(row.verification_state) as PaymentIdentitySnapshot["verificationState"];
+      const trustOutcome = verificationState === "VERIFIED" ? "NOT_REQUIRED" as const : "ACKNOWLEDGED" as const;
+      if (verificationState !== "VERIFIED" && !input.trustAcknowledged) {
+        throw new Error("TRUST_ACKNOWLEDGMENT_REQUIRED");
+      }
+      const snapshot: PaymentIdentitySnapshot = Object.freeze({
+        accountId: String(row.account_id), username: String(row.username), displayName: String(row.display_name),
+        accountType: String(row.account_type) as PaymentIdentitySnapshot["accountType"], verificationState,
+        payabilityState: "AVAILABLE", capturedAt: prior?.recipientSnapshot?.capturedAt ?? input.capturedAt, schemaVersion: 1,
+        resolutionSource: "RECIPIENT_DIRECTORY", trustOutcome,
+      });
+      const canonical = {
+        actorSubject: input.actorSubject, network: input.network, mintAddress: input.mintAddress,
+        recipientAddress: String(row.destination_address), amountRaw: input.amountRaw, purpose: input.purpose,
+        recipientAccountId: input.recipientAccountId, recipientSnapshot: snapshot,
+        trustConfirmationOutcome: trustOutcome,
+      };
+      const requestHash = createPaymentIdentityRequestHash(canonical);
+      const inserted = await client.query(
+        `INSERT INTO payments
+          (id,actor_subject,idempotency_key,request_hash,network,rail,asset,mint_address,
+           recipient_address,amount_raw,purpose,recipient_type,recipient_account_id,
+           recipient_snapshot,recipient_snapshot_version,trust_confirmation_outcome)
+         VALUES ($1,$2,$3,decode($4,'hex'),$5,$6,$7,$8,$9,$10,$11,'PAYMENT_IDENTITY',$12,$13,1,$14)
+         ON CONFLICT (actor_subject,idempotency_key) DO NOTHING RETURNING *`,
+        [input.id,input.actorSubject,input.idempotencyKey,requestHash,input.network,input.rail,input.asset,
+          input.mintAddress,canonical.recipientAddress,input.amountRaw.toString(),input.purpose,
+          input.recipientAccountId,JSON.stringify(snapshot),trustOutcome],
+      );
+      if (inserted.rows[0]) {
+        await appendEvent(client, { paymentId: input.id, eventType: "CREATED", toStatus: "AWAITING_CONFIRMATION",
+          details: { recipientType: "PAYMENT_IDENTITY", recipientAccountId: input.recipientAccountId,
+            recipientSnapshotVersion: 1, trustConfirmationOutcome: trustOutcome } });
+        return { outcome: "CLAIMED", payment: mapPayment(inserted.rows[0]) };
+      }
+      const payment = prior ?? mapPayment((await client.query(
+        "SELECT * FROM payments WHERE actor_subject=$1 AND idempotency_key=$2 FOR UPDATE",
+        [input.actorSubject,input.idempotencyKey],
+      )).rows[0]);
+      return { outcome: payment.requestHash === requestHash ? "EXISTING" : "HASH_CONFLICT", payment };
+    });
+  }
+
   async findPayment(paymentId: string): Promise<PaymentRecord | undefined> {
     const result = await this.pool.query("SELECT * FROM payments WHERE id=$1", [paymentId]);
     return result.rows[0] ? mapPayment(result.rows[0]) : undefined;
+  }
+
+  async listRecentPaymentIdentities(actorSubject: string, limit: number): Promise<RecentPaymentIdentity[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) throw new Error("Recent limit is invalid.");
+    const result = await this.pool.query(
+      `SELECT recipient_snapshot FROM (
+         SELECT p.recipient_snapshot,p.recipient_account_id,e.occurred_at,
+                row_number() OVER (PARTITION BY p.recipient_account_id ORDER BY e.occurred_at DESC,p.id DESC) AS rank
+         FROM payments p
+         JOIN payment_events e ON e.payment_id=p.id AND e.event_type='USER_CONFIRMED'
+         WHERE p.actor_subject=$1 AND p.recipient_type='PAYMENT_IDENTITY'
+           AND p.recipient_snapshot IS NOT NULL AND p.recipient_snapshot_version=1
+       ) recent WHERE rank=1 ORDER BY occurred_at DESC,recipient_account_id LIMIT $2`,
+      [actorSubject,limit],
+    );
+    return result.rows.map((row) => mapSnapshot(row.recipient_snapshot));
   }
 
   async listPaymentsRequiringReconciliation(limit: number): Promise<PaymentRecord[]> {
@@ -393,12 +482,25 @@ function mapPayment(row: QueryResultRow): PaymentRecord {
       ? undefined
       : cloneJsonValue(row.chain_error),
     receiptPda: optionalString(row.receipt_pda), failureCode: optionalString(row.failure_code),
-    failureReason: optionalString(row.failure_reason), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at),
+    failureReason: optionalString(row.failure_reason),
+    recipientType: (row.recipient_type ?? "DIRECT_WALLET") as PaymentRecord["recipientType"],
+    recipientAccountId: optionalString(row.recipient_account_id),
+    recipientSnapshot: row.recipient_snapshot ? mapSnapshot(row.recipient_snapshot) : undefined,
+    recipientSnapshotVersion: row.recipient_snapshot_version === null || row.recipient_snapshot_version === undefined ? undefined : 1,
+    trustConfirmationOutcome: optionalString(row.trust_confirmation_outcome) as PaymentRecord["trustConfirmationOutcome"],
+    createdAt: iso(row.created_at), updatedAt: iso(row.updated_at),
     terminalProof: row.terminal_proof
       ? cloneTerminalProof(row.terminal_proof)
       : undefined,
   };
 }
+
+function mapSnapshot(value: unknown): PaymentIdentitySnapshot {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Stored recipient snapshot is invalid.");
+  return Object.freeze(value as PaymentIdentitySnapshot);
+}
+
+function recipientUnavailable(): Error { return new Error("RECIPIENT_UNAVAILABLE"); }
 
 function mapEvent(row: QueryResultRow): PaymentEvent {
   return { id: BigInt(String(row.id)), paymentId: String(row.payment_id), sequenceNumber: Number(row.sequence_number),

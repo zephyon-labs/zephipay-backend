@@ -44,6 +44,24 @@ export type JsonValue =
 
 export type JsonObject = { readonly [key: string]: JsonValue };
 
+export const PAYMENT_RECIPIENT_TYPES = ["DIRECT_WALLET", "PAYMENT_IDENTITY"] as const;
+export type PaymentRecipientType = (typeof PAYMENT_RECIPIENT_TYPES)[number];
+export const TRUST_CONFIRMATION_OUTCOMES = ["NOT_REQUIRED", "ACKNOWLEDGED", "BLOCKED"] as const;
+export type TrustConfirmationOutcome = (typeof TRUST_CONFIRMATION_OUTCOMES)[number];
+
+export type PaymentIdentitySnapshot = Readonly<{
+  accountId: string;
+  username: string;
+  displayName: string;
+  accountType: "PERSONAL" | "CREATOR" | "BUSINESS" | "AI_AGENT";
+  verificationState: "UNVERIFIED" | "PENDING" | "VERIFIED";
+  payabilityState: "AVAILABLE";
+  capturedAt: string;
+  schemaVersion: 1;
+  resolutionSource: "RECIPIENT_DIRECTORY";
+  trustOutcome: Exclude<TrustConfirmationOutcome, "BLOCKED">;
+}>;
+
 export type PreSubmissionRejectionProof = Readonly<{
   kind: "PRE_SUBMISSION_REJECTION";
   code: string;
@@ -84,6 +102,11 @@ export type PaymentRecord = Readonly<{
   recipientAddress: string;
   amountRaw: bigint;
   purpose: string;
+  recipientType: PaymentRecipientType;
+  recipientAccountId?: string;
+  recipientSnapshot?: PaymentIdentitySnapshot;
+  recipientSnapshotVersion?: 1;
+  trustConfirmationOutcome?: Exclude<TrustConfirmationOutcome, "BLOCKED">;
   runtimeId?: string;
   runtimePaymentId?: string;
   runtimeTransactionId?: string;
@@ -133,7 +156,10 @@ export type CreatePaymentInput = Pick<
   | "recipientAddress"
   | "amountRaw"
   | "purpose"
->;
+> & Partial<Pick<PaymentRecord,
+  "recipientType" | "recipientAccountId" | "recipientSnapshot" |
+  "recipientSnapshotVersion" | "trustConfirmationOutcome"
+>>;
 
 export type PaymentLifecycleEvidence = Readonly<{
   runtimeId?: string;

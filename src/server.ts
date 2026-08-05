@@ -111,6 +111,7 @@ if (environment.authEnabled) {
   const economicIdentityService = new EconomicIdentityService(accountService, economicIdentityPersistence);
   const recipientDirectoryService = new RecipientDirectoryService(identityPersistence, economicIdentityPersistence);
   const paymentPersistence = new PostgresPaymentPersistence(pool);
+  const paymentIntentService = new PaymentIntentService(accountService, paymentPersistence);
   app.use(
     "/api/account",
     ...createAuthPipeline({
@@ -128,7 +129,7 @@ if (environment.authEnabled) {
       audience: environment.auth0Audience as string,
       requiredScope: environment.auth0RequiredScope,
     }),
-    createRecipientsRouter(accountService, recipientDirectoryService),
+    createRecipientsRouter(accountService, recipientDirectoryService, paymentIntentService),
   );
   const authConfiguration = {
     issuer: environment.auth0Issuer as string,
@@ -137,7 +138,7 @@ if (environment.authEnabled) {
   app.use(
     "/api/payment-intents",
     createPaymentIntentsRouter({
-      service: new PaymentIntentService(accountService, paymentPersistence),
+      service: paymentIntentService,
       rateLimiter: paymentRateLimiter,
       readAuth: createAuthPipeline({
         ...authConfiguration,

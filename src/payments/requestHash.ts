@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { PaymentIdentitySnapshot } from "./paymentTypes";
 
 const REQUEST_HASH_PATTERN = /^[a-f0-9]{64}$/;
 
@@ -31,5 +32,22 @@ export function createPaymentRequestHash(input: CanonicalPaymentRequest): string
     purpose: input.purpose,
   });
 
+  return createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
+export function createPaymentIdentityRequestHash(input: CanonicalPaymentRequest & Readonly<{
+  recipientAccountId: string;
+  recipientSnapshot: PaymentIdentitySnapshot;
+  trustConfirmationOutcome: "NOT_REQUIRED" | "ACKNOWLEDGED";
+}>): string {
+  if (input.amountRaw <= 0n) throw new Error("Payment amountRaw must be positive.");
+  const canonical = JSON.stringify({
+    actorSubject: input.actorSubject, recipientType: "PAYMENT_IDENTITY",
+    recipientAccountId: input.recipientAccountId, network: input.network,
+    mintAddress: input.mintAddress, recipientAddress: input.recipientAddress,
+    recipientSnapshot: input.recipientSnapshot,
+    trustConfirmationOutcome: input.trustConfirmationOutcome,
+    amountRaw: input.amountRaw.toString(), purpose: input.purpose,
+  });
   return createHash("sha256").update(canonical, "utf8").digest("hex");
 }

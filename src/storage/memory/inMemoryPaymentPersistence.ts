@@ -6,6 +6,7 @@ import {
   validateReceiptCompletionTransition,
 } from "../../payments/paymentLifecycle";
 import { validateRequestHash } from "../../payments/requestHash";
+import { createPaymentIdentityRequestHash } from "../../payments/requestHash";
 import type {
   CreatePaymentInput,
   InformationalPaymentEventType,
@@ -14,6 +15,7 @@ import type {
   PaymentEventType,
   PaymentLifecycleEvidence,
   PaymentRecord,
+  PaymentIdentitySnapshot,
   PaymentStatus,
 } from "../../payments/paymentTypes";
 import type { CreatePaymentReceiptInput, PaymentReceipt } from "../../receipts/paymentReceipt";
@@ -27,11 +29,18 @@ import type {
   AppendInformationalPaymentEventInput,
   IdempotencyClaim,
   PaymentPersistence,
+  ClaimPaymentIdentityInput,
+  RecentPaymentIdentity,
 } from "../storageContracts";
 import { PaymentVersionConflictError } from "../storageContracts";
 
 export type InMemoryPaymentPersistenceOptions = Readonly<{
   clock?: () => string;
+  resolvePaymentIdentity?: (input: ClaimPaymentIdentityInput) => Promise<Readonly<{
+    username: string; displayName: string; accountType: PaymentIdentitySnapshot["accountType"];
+    verificationState: PaymentIdentitySnapshot["verificationState"] | "RESTRICTED";
+    payabilityState: "AVAILABLE" | "UNAVAILABLE" | "RESTRICTED"; destinationAddress: string;
+  }> | undefined>;
 }>;
 
 /** Deterministic test adapter. Production code must never select it automatically. */
@@ -47,9 +56,11 @@ export class InMemoryPaymentPersistence implements PaymentPersistence {
   private nextEventId = 1n;
   private operationQueue: Promise<void> = Promise.resolve();
   private readonly clock: () => string;
+  private readonly resolvePaymentIdentity?: InMemoryPaymentPersistenceOptions["resolvePaymentIdentity"];
 
   constructor(options: InMemoryPaymentPersistenceOptions = {}) {
     this.clock = options.clock ?? (() => new Date().toISOString());
+    this.resolvePaymentIdentity = options.resolvePaymentIdentity;
   }
 
   createAllowlistEntry(input: CreateAllowlistEntryInput): Promise<AllowlistEntry> {
@@ -104,6 +115,7 @@ export class InMemoryPaymentPersistence implements PaymentPersistence {
       const now = this.clock();
       const payment: PaymentRecord = Object.freeze({
         ...input,
+        recipientType: input.recipientType ?? "DIRECT_WALLET",
         status: "AWAITING_CONFIRMATION",
         version: 0n,
         createdAt: now,
@@ -121,9 +133,69 @@ export class InMemoryPaymentPersistence implements PaymentPersistence {
     });
   }
 
+  claimPaymentIdentityKey(input: ClaimPaymentIdentityInput): Promise<IdempotencyClaim> {
+    return this.exclusive(async () => {
+      if (!this.resolvePaymentIdentity || input.senderAccountId === input.recipientAccountId) throw new Error("RECIPIENT_UNAVAILABLE");
+      const resolved = await this.resolvePaymentIdentity(input);
+      if (!resolved || resolved.payabilityState !== "AVAILABLE" || resolved.verificationState === "RESTRICTED") throw new Error("RECIPIENT_UNAVAILABLE");
+      const trustOutcome = resolved.verificationState === "VERIFIED" ? "NOT_REQUIRED" as const : "ACKNOWLEDGED" as const;
+      if (resolved.verificationState !== "VERIFIED" && !input.trustAcknowledged) throw new Error("TRUST_ACKNOWLEDGMENT_REQUIRED");
+      const indexKey = `${input.actorSubject}\u0000${input.idempotencyKey}`;
+      const existingId = this.idempotency.get(indexKey);
+      const prior = existingId ? this.requirePayment(existingId) : undefined;
+      const snapshot: PaymentIdentitySnapshot = Object.freeze({
+        accountId: input.recipientAccountId, username: resolved.username, displayName: resolved.displayName,
+        accountType: resolved.accountType, verificationState: resolved.verificationState,
+        payabilityState: "AVAILABLE", capturedAt: prior?.recipientSnapshot?.capturedAt ?? input.capturedAt, schemaVersion: 1,
+        resolutionSource: "RECIPIENT_DIRECTORY", trustOutcome,
+      });
+      const requestHash = createPaymentIdentityRequestHash({
+        actorSubject: input.actorSubject, network: input.network, mintAddress: input.mintAddress,
+        recipientAddress: resolved.destinationAddress, amountRaw: input.amountRaw, purpose: input.purpose,
+        recipientAccountId: input.recipientAccountId, recipientSnapshot: snapshot,
+        trustConfirmationOutcome: trustOutcome,
+      });
+      if (existingId) {
+        const existing = this.requirePayment(existingId);
+        return { outcome: existing.requestHash === requestHash ? "EXISTING" : "HASH_CONFLICT", payment: clonePayment(existing) };
+      }
+      const now = this.clock();
+      const payment: PaymentRecord = Object.freeze({
+        id: input.id, actorSubject: input.actorSubject, idempotencyKey: input.idempotencyKey, requestHash,
+        status: "AWAITING_CONFIRMATION", version: 0n, network: input.network, rail: input.rail,
+        asset: input.asset, mintAddress: input.mintAddress, recipientAddress: resolved.destinationAddress,
+        amountRaw: input.amountRaw, purpose: input.purpose, recipientType: "PAYMENT_IDENTITY",
+        recipientAccountId: input.recipientAccountId, recipientSnapshot: snapshot, recipientSnapshotVersion: 1,
+        trustConfirmationOutcome: trustOutcome, createdAt: now, updatedAt: now,
+      });
+      this.payments.set(payment.id,payment); this.idempotency.set(indexKey,payment.id);
+      this.appendEventUnsafe({ paymentId: payment.id, eventType: "CREATED", toStatus: "AWAITING_CONFIRMATION",
+        details: { recipientType: "PAYMENT_IDENTITY", recipientAccountId: input.recipientAccountId,
+          recipientSnapshotVersion: 1, trustConfirmationOutcome: trustOutcome }, occurredAt: now });
+      return { outcome: "CLAIMED", payment: clonePayment(payment) };
+    });
+  }
+
   async findPayment(paymentId: string): Promise<PaymentRecord | undefined> {
     const payment = this.payments.get(paymentId);
     return payment ? clonePayment(payment) : undefined;
+  }
+
+  async listRecentPaymentIdentities(actorSubject: string, limit: number): Promise<RecentPaymentIdentity[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) throw new Error("Recent limit is invalid.");
+    const candidates = [...this.payments.values()].flatMap((payment) => {
+      if (payment.actorSubject !== actorSubject || payment.recipientType !== "PAYMENT_IDENTITY" || !payment.recipientSnapshot) return [];
+      const confirmed = (this.events.get(payment.id) ?? []).find((event) => event.eventType === "USER_CONFIRMED");
+      return confirmed ? [{ payment, confirmedAt: confirmed.occurredAt }] : [];
+    }).sort((a,b) => b.confirmedAt.localeCompare(a.confirmedAt) || b.payment.id.localeCompare(a.payment.id));
+    const seen = new Set<string>(); const result: RecentPaymentIdentity[] = [];
+    for (const candidate of candidates) {
+      const accountId = candidate.payment.recipientAccountId!;
+      if (seen.has(accountId)) continue;
+      seen.add(accountId); result.push(Object.freeze({ ...candidate.payment.recipientSnapshot! }));
+      if (result.length === limit) break;
+    }
+    return result;
   }
 
   async listPaymentsRequiringReconciliation(limit: number): Promise<PaymentRecord[]> {

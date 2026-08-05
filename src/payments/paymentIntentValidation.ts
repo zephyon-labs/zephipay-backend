@@ -7,11 +7,19 @@ const VERSION_PATTERN = /^(?:0|[1-9]\d*)$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const POSTGRES_BIGINT_MAX = 9_223_372_036_854_775_807n;
 
-export type PaymentIntentRequest = Readonly<{
+export type DirectWalletPaymentIntentRequest = Readonly<{
   recipient: string;
   amount: string;
   purpose: string;
 }>;
+export type PaymentIdentityPaymentIntentRequest = Readonly<{
+  recipientType: "payment_identity";
+  recipientAccountId: string;
+  amount: string;
+  purpose: string;
+  trustAcknowledgment?: Readonly<{ acknowledged: true }>;
+}>;
+export type PaymentIntentRequest = DirectWalletPaymentIntentRequest | PaymentIdentityPaymentIntentRequest;
 
 export type ConfirmPaymentIntentRequest = Readonly<{
   requestHash: string;
@@ -27,6 +35,7 @@ export class PaymentIntentInputError extends Error {
 
 export function parsePaymentIntentRequest(body: unknown): PaymentIntentRequest {
   const record = requireObject(body);
+  if (record.recipientType === "payment_identity") return parsePaymentIdentityRequest(record);
   rejectUnknownFields(record, ["recipient", "amount", "purpose"]);
   if (typeof record.recipient !== "string") throw new PaymentIntentInputError("Recipient must be a Solana wallet address.");
   const recipient = record.recipient.trim();
@@ -35,19 +44,48 @@ export function parsePaymentIntentRequest(body: unknown): PaymentIntentRequest {
   } catch {
     throw new PaymentIntentInputError("Recipient must be a canonical Solana wallet address.");
   }
-  if (typeof record.amount !== "string" || !AMOUNT_PATTERN.test(record.amount)) {
+  const amount = parseAmount(record.amount);
+  const purpose = parsePurpose(record.purpose);
+  return { recipient, amount, purpose };
+}
+
+function parsePaymentIdentityRequest(record: Record<string, unknown>): PaymentIdentityPaymentIntentRequest {
+  rejectUnknownFields(record, ["recipientType", "recipientAccountId", "amount", "purpose", "trustAcknowledgment"]);
+  if (typeof record.recipientAccountId !== "string" || !UUID_PATTERN.test(record.recipientAccountId)) {
+    throw new PaymentIntentInputError("Recipient account ID must be a canonical UUID.");
+  }
+  let trustAcknowledgment: Readonly<{ acknowledged: true }> | undefined;
+  if (record.trustAcknowledgment !== undefined) {
+    const trust = requireObject(record.trustAcknowledgment);
+    rejectUnknownFields(trust, ["acknowledged"]);
+    if (trust.acknowledged !== true) throw new PaymentIntentInputError("Trust acknowledgment must be explicit.");
+    trustAcknowledgment = { acknowledged: true };
+  }
+  return {
+    recipientType: "payment_identity", recipientAccountId: record.recipientAccountId.toLowerCase(),
+    amount: parseAmount(record.amount), purpose: parsePurpose(record.purpose),
+    ...(trustAcknowledgment ? { trustAcknowledgment } : {}),
+  };
+}
+
+function parseAmount(value: unknown): string {
+  if (typeof value !== "string" || !AMOUNT_PATTERN.test(value)) {
     throw new PaymentIntentInputError("Amount must be a decimal USDC string with no more than 6 decimal places.");
   }
-  const amountRaw = usdcAmountToRaw(record.amount);
+  const amountRaw = usdcAmountToRaw(value);
   if (amountRaw <= 0n) throw new PaymentIntentInputError("Amount must be greater than zero.");
   if (amountRaw > POSTGRES_BIGINT_MAX) throw new PaymentIntentInputError("Amount exceeds the supported USDC range.");
-  if (typeof record.purpose !== "string") throw new PaymentIntentInputError("Purpose must be a string.");
-  const purpose = record.purpose.trim();
+  return value;
+}
+
+function parsePurpose(value: unknown): string {
+  if (typeof value !== "string") throw new PaymentIntentInputError("Purpose must be a string.");
+  const purpose = value.trim();
   const purposeBytes = Buffer.byteLength(purpose, "utf8");
   if (purposeBytes < 1 || purposeBytes > 120) {
     throw new PaymentIntentInputError("Purpose must be between 1 and 120 UTF-8 bytes.");
   }
-  return { recipient, amount: record.amount, purpose };
+  return purpose;
 }
 
 export function parseConfirmPaymentIntentRequest(body: unknown): ConfirmPaymentIntentRequest {
