@@ -14,6 +14,7 @@ dotenv.config();
 import { environment } from "./config/environment";
 import { createAuthPipeline } from "./auth/authMiddleware";
 import { AccountProvisioningService } from "./identity/accountProvisioningService";
+import { EconomicIdentityService } from "./economicIdentity/economicIdentityService";
 import {
   generalRateLimiter,
   paymentRateLimiter,
@@ -27,10 +28,14 @@ import { protocolRouter } from "./routes/protocol";
 import { receiptsRouter } from "./routes/receipts";
 import { verifyRouter } from "./routes/verify";
 import { createAccountRouter } from "./routes/account";
+import { createEconomicIdentityRouter } from "./routes/economicIdentity";
+import { createRecipientsRouter } from "./routes/recipients";
+import { RecipientDirectoryService } from "./recipients/recipientDirectoryService";
 import { createPaymentIntentsRouter, paymentIntentServiceUnavailable } from "./routes/paymentIntents";
 import { PaymentIntentService } from "./services/paymentIntentService";
 import { PostgresPaymentPersistence } from "./storage/postgres/postgresPaymentPersistence";
 import { PostgresIdentityPersistence } from "./storage/postgres/postgresIdentityPersistence";
+import { PostgresEconomicIdentityPersistence } from "./storage/postgres/postgresEconomicIdentityPersistence";
 import { createPaymentPostgresPool } from "./storage/postgres/postgresPool";
 import { executePayment } from "./services/payservice";
 import { validatePaymentRequest } from "./validation/paymentRequest";
@@ -100,7 +105,11 @@ app.use(generalRateLimiter);
 
 if (environment.authEnabled) {
   const pool = createPaymentPostgresPool(environment.databaseUrl as string);
-  const accountService = new AccountProvisioningService(new PostgresIdentityPersistence(pool));
+  const identityPersistence = new PostgresIdentityPersistence(pool);
+  const accountService = new AccountProvisioningService(identityPersistence);
+  const economicIdentityPersistence = new PostgresEconomicIdentityPersistence(pool);
+  const economicIdentityService = new EconomicIdentityService(accountService, economicIdentityPersistence);
+  const recipientDirectoryService = new RecipientDirectoryService(identityPersistence, economicIdentityPersistence);
   const paymentPersistence = new PostgresPaymentPersistence(pool);
   app.use(
     "/api/account",
@@ -110,6 +119,16 @@ if (environment.authEnabled) {
       requiredScope: environment.auth0RequiredScope,
     }),
     createAccountRouter(accountService, paymentPersistence),
+    createEconomicIdentityRouter(economicIdentityService),
+  );
+  app.use(
+    "/api/recipients",
+    ...createAuthPipeline({
+      issuer: environment.auth0Issuer as string,
+      audience: environment.auth0Audience as string,
+      requiredScope: environment.auth0RequiredScope,
+    }),
+    createRecipientsRouter(accountService, recipientDirectoryService),
   );
   const authConfiguration = {
     issuer: environment.auth0Issuer as string,

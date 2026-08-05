@@ -35,6 +35,19 @@ const IDENTITY_REQUIRED_TOKENS = [
   "account_sessions_security_artifact_guard",
 ];
 
+const ECONOMIC_IDENTITY_REQUIRED_TOKENS = [
+  "CREATE TYPE economic_account_type",
+  "CREATE TYPE identity_discoverability",
+  "CREATE TYPE identity_verification_state",
+  "CREATE TYPE identity_payability_state",
+  "CREATE TABLE economic_identities",
+  "CREATE TABLE payment_destinations",
+  "economic_identities_normalized_username_unique",
+  "payment_destinations_primary_per_type_unique",
+  "economic_identities_protect_lifecycle",
+  "payment_destinations_protect_lifecycle",
+];
+
 async function main(): Promise<void> {
   const directory = path.resolve(process.cwd(), "migrations");
   const files = (await readdir(directory)).filter((file) => /^\d+_.+\.sql$/.test(file)).sort();
@@ -50,7 +63,13 @@ async function main(): Promise<void> {
   for (const token of IDENTITY_REQUIRED_TOKENS) {
     if (!identitySql.includes(token)) throw new Error(`Identity migration is missing required token: ${token}`);
   }
-  for (const [file, sql] of [[files[0], first], [identityMigration, identitySql]] as const) {
+  const economicIdentityMigration = files.find((file) => file === "003_economic_identity.sql");
+  if (!economicIdentityMigration) throw new Error("Economic identity migration is missing.");
+  const economicIdentitySql = await readFile(path.join(directory, economicIdentityMigration), "utf8");
+  for (const token of ECONOMIC_IDENTITY_REQUIRED_TOKENS) {
+    if (!economicIdentitySql.includes(token)) throw new Error(`Economic identity migration is missing required token: ${token}`);
+  }
+  for (const [file, sql] of [[files[0], first], [identityMigration, identitySql], [economicIdentityMigration, economicIdentitySql]] as const) {
     if (/\b(?:BEGIN|COMMIT|ROLLBACK)\s*;/i.test(sql)) {
       throw new Error(`Transaction control belongs to the migration runner: ${file}`);
     }
