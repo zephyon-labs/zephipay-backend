@@ -39,10 +39,11 @@ export function createEconomicIdentityRouter(service: EconomicIdentityService): 
 }
 
 function handle(error: unknown, res: Parameters<Parameters<Router["get"]>[1]>[1]) {
-  if (error instanceof EconomicIdentityInputError) return res.status(400).json({ ok: false, error: error.message, requestId: res.locals.requestId });
+  if (error instanceof EconomicIdentityInputError) return res.status(400).json({ ok: false, code: "VALIDATION_ERROR", error: error.message, requestId: res.locals.requestId });
   if (error instanceof EconomicIdentityApplicationError) {
     const status = error.kind === "ACCESS_DENIED" ? 403 : error.kind === "NOT_FOUND" ? 404 : 409;
-    return res.status(status).json({ ok: false, error: error.message, requestId: res.locals.requestId });
+    const code = error.kind === "ACCESS_DENIED" ? "ACCESS_DENIED" : error.kind === "NOT_FOUND" ? "NOT_FOUND" : error.kind;
+    return res.status(status).json({ ok: false, code, error: error.message, requestId: res.locals.requestId });
   }
   throw error;
 }

@@ -13,7 +13,6 @@ import {
   EconomicIdentityInputError,
   parseVersion,
   requireExactObject,
-  validateAccountType,
   validateAvatarUrl,
   validateDiscoverability,
   validateDisplayName,
@@ -22,7 +21,7 @@ import {
 } from "./economicIdentityValidation";
 
 export class EconomicIdentityApplicationError extends Error {
-  constructor(public readonly kind: "ACCESS_DENIED" | "NOT_FOUND" | "CONFLICT", message: string) {
+  constructor(public readonly kind: "ACCESS_DENIED" | "NOT_FOUND" | "CONFLICT" | "USERNAME_UNAVAILABLE" | "VERSION_CONFLICT", message: string) {
     super(message); this.name = "EconomicIdentityApplicationError";
   }
 }
@@ -43,18 +42,23 @@ export class EconomicIdentityService {
 
   async upsertCurrent(principal: ExternalPrincipal, raw: unknown): Promise<Readonly<{ identity: EconomicIdentity; created: boolean }>> {
     const accountId = await this.resolveAccountId(principal);
-    const body = requireExactObject(raw, ["expectedVersion", "accountType", "username", "displayName", "avatarUrl", "discoverability"]);
+    const body = requireExactObject(raw, ["expectedVersion", "username", "displayName", "avatarUrl", "discoverability"]);
     const username = validateUsername(body.username);
+    const expectedVersion = parseVersion(body.expectedVersion, false);
+    const current = await this.persistence.findEconomicIdentity(accountId);
+    if ((current && expectedVersion === undefined) || (!current && expectedVersion !== undefined)) {
+      throw new EconomicIdentityApplicationError("VERSION_CONFLICT", "Economic identity version is stale.");
+    }
     try {
       return await this.persistence.upsertEconomicIdentity({
-        accountId, expectedVersion: parseVersion(body.expectedVersion, false),
-        accountType: validateAccountType(body.accountType), ...username,
+        accountId, expectedVersion,
+        accountType: current?.accountType ?? "PERSONAL", ...username,
         displayName: validateDisplayName(body.displayName), avatarUrl: validateAvatarUrl(body.avatarUrl),
         discoverability: validateDiscoverability(body.discoverability),
       });
     } catch (error) {
-      if (error instanceof UsernameConflictError) throw new EconomicIdentityApplicationError("CONFLICT", "Username is unavailable.");
-      if (error instanceof EconomicIdentityVersionConflictError) throw new EconomicIdentityApplicationError("CONFLICT", "Economic identity version is stale.");
+      if (error instanceof UsernameConflictError) throw new EconomicIdentityApplicationError("USERNAME_UNAVAILABLE", "Username is unavailable.");
+      if (error instanceof EconomicIdentityVersionConflictError) throw new EconomicIdentityApplicationError("VERSION_CONFLICT", "Economic identity version is stale.");
       throw error;
     }
   }

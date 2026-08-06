@@ -56,7 +56,7 @@ export class InMemoryEconomicIdentityPersistence implements EconomicIdentityPers
         throw new EconomicIdentityVersionConflictError(input.accountId);
       }
       const identity = Object.freeze({
-        ...current, accountType: input.accountType, username: input.username,
+        ...current, username: input.username,
         normalizedUsername: input.normalizedUsername, displayName: input.displayName,
         avatarUrl: input.avatarUrl, discoverability: input.discoverability,
         version: current.version + 1n, updatedAt: now,

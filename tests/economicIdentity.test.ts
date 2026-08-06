@@ -29,8 +29,7 @@ async function fixture() {
 
 const principal = (subject: string) => ({ issuer, providerSubject: subject, scopes: ["read:account"] });
 const identityInput = (overrides: Record<string, unknown> = {}) => ({
-  accountType: "PERSONAL", username: "Alice_01", displayName: "Alice Example",
-  discoverability: "PRIVATE", ...overrides,
+  username: "Alice_01", displayName: "Alice Example", discoverability: "PRIVATE", ...overrides,
 });
 
 describe("economic identity validation", () => {
@@ -56,6 +55,7 @@ describe("economic identity service", () => {
     const created = await service.upsertCurrent(principal("alice"), identityInput());
     assert.equal(created.created, true);
     assert.equal(created.identity.normalizedUsername, "alice_01");
+    assert.equal(created.identity.accountType, "PERSONAL");
     assert.equal(created.identity.discoverability, "PRIVATE");
     assert.equal(created.identity.verificationState, "UNVERIFIED");
     assert.equal(created.identity.payabilityState, "UNAVAILABLE");
@@ -92,7 +92,7 @@ describe("economic identity service", () => {
 
   it("rejects mass assignment of verification, payability, and account linkage", async () => {
     const { service } = await fixture();
-    for (const field of ["verificationState", "payabilityState", "accountId", "actorSubject", "email"]) {
+    for (const field of ["accountType", "verificationState", "payabilityState", "publicIdentityStatus", "accountId", "actorSubject", "email", "createdAt", "updatedAt"]) {
       await assert.rejects(() => service.upsertCurrent(principal("alice"), identityInput({ [field]: "VERIFIED" })), /Unsupported/);
     }
   });

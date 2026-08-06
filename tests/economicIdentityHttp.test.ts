@@ -71,21 +71,28 @@ describe("economic identity HTTP boundary", () => {
     assert.equal(missing.status, 200);
     assert.match(missing.headers.get("cache-control") ?? "", /no-store.*private/);
     assert.equal((await missing.json() as { identity: unknown }).identity, null);
-    const created = await putIdentity(token, { accountType: "PERSONAL", username: "Owner_01", displayName: "Owner", discoverability: "PRIVATE" });
+    const created = await putIdentity(token, { username: "Owner_01", displayName: "Owner", discoverability: "PRIVATE" });
     assert.equal(created.status, 201);
     const body = await created.json() as { identity: Record<string, unknown> };
     assert.equal(body.identity.verificationState, "unverified");
     assert.equal(body.identity.payabilityState, "unavailable");
+    assert.equal(body.identity.accountType, "personal");
     assert.equal(body.identity.version, "0");
-    assert.equal((await putIdentity(token, { accountType: "PERSONAL", username: "Owner_01", displayName: "Owner", discoverability: "PRIVATE", accountId: "forged" })).status, 400);
-    assert.equal((await putIdentity(token, { expectedVersion: "0", accountType: "PERSONAL", username: "Owner_01", displayName: "Updated", discoverability: "USERNAME_ONLY" })).status, 200);
-    assert.equal((await putIdentity(token, { expectedVersion: "0", accountType: "PERSONAL", username: "Owner_01", displayName: "Stale", discoverability: "PRIVATE" })).status, 409);
+    const forbidden = await putIdentity(token, { accountType: "PERSONAL", username: "Owner_01", displayName: "Owner", discoverability: "PRIVATE" });
+    assert.equal(forbidden.status, 400);
+    assert.equal((await forbidden.json() as { code: string }).code, "VALIDATION_ERROR");
+    assert.equal((await putIdentity(token, { expectedVersion: "0", username: "Owner_01", displayName: "Updated", discoverability: "USERNAME_ONLY" })).status, 200);
+    const stale = await putIdentity(token, { expectedVersion: "0", username: "Owner_01", displayName: "Stale", discoverability: "PRIVATE" });
+    assert.equal(stale.status, 409);
+    assert.equal((await stale.json() as { code: string }).code, "VERSION_CONFLICT");
   });
 
   it("keeps separate authenticated accounts isolated and username uniqueness global", async () => {
     const one = await jwt("isolation-one"); const two = await jwt("isolation-two");
-    assert.equal((await putIdentity(one, { accountType: "CREATOR", username: "Unique_01", displayName: "One", discoverability: "PRIVATE" })).status, 201);
-    assert.equal((await putIdentity(two, { accountType: "BUSINESS", username: "unique_01", displayName: "Two", discoverability: "PRIVATE" })).status, 409);
+    assert.equal((await putIdentity(one, { username: "Unique_01", displayName: "One", discoverability: "PRIVATE" })).status, 201);
+    const collision = await putIdentity(two, { username: "unique_01", displayName: "Two", discoverability: "PRIVATE" });
+    assert.equal(collision.status, 409);
+    assert.equal((await collision.json() as { code: string }).code, "USERNAME_UNAVAILABLE");
     const oneBody = await (await fetch(`${baseUrl}/api/account/identity`, { headers: { Authorization: `Bearer ${one}` } })).json() as { identity: { displayName: string } };
     const twoBody = await (await fetch(`${baseUrl}/api/account/identity`, { headers: { Authorization: `Bearer ${two}` } })).json() as { identity: unknown };
     assert.equal(oneBody.identity.displayName, "One"); assert.equal(twoBody.identity, null);

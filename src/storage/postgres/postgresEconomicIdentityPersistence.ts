@@ -38,11 +38,11 @@ export class PostgresEconomicIdentityPersistence implements EconomicIdentityPers
         return { identity: mapIdentity(result.rows[0]), created: true };
       }
       const result = await this.pool.query(
-        `UPDATE economic_identities SET account_type=$2,username=$3,normalized_username=$4,
-           display_name=$5,avatar_url=$6,discoverability=$7,version=version+1,
-           updated_at=COALESCE($8::timestamptz,now())
-         WHERE account_id=$1 AND version=$9 RETURNING *`,
-        [input.accountId, input.accountType, input.username, input.normalizedUsername,
+        `UPDATE economic_identities SET username=$2,normalized_username=$3,
+           display_name=$4,avatar_url=$5,discoverability=$6,version=version+1,
+           updated_at=COALESCE($7::timestamptz,now())
+         WHERE account_id=$1 AND version=$8 RETURNING *`,
+        [input.accountId, input.username, input.normalizedUsername,
           input.displayName, input.avatarUrl ?? null, input.discoverability,
           input.occurredAt ?? null, input.expectedVersion.toString()],
       );

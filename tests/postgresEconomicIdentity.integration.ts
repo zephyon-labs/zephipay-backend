@@ -73,6 +73,7 @@ describe("PostgreSQL economic identity", () => {
       occurredAt: LATER,
     });
     assert.equal(updated.identity.version, 1n);
+    assert.equal(updated.identity.accountType, "PERSONAL");
     await assert.rejects(() => economic.upsertEconomicIdentity({
       accountId: ACCOUNT_A, expectedVersion: 0n, accountType: "PERSONAL", username: "Alice_01",
       normalizedUsername: "alice_01", displayName: "Stale", discoverability: "PRIVATE",

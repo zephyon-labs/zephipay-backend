@@ -50,9 +50,16 @@ describe("PostgreSQL Payment Identity linkage",()=>{
     const claim=await payments.claimPaymentIdentityKey(input()); assert.deepEqual(await payments.listRecentPaymentIdentities(ACTOR,5),[]);
     await payments.transitionPayment({paymentId:claim.payment.id,expectedVersion:0n,toStatus:"PROCESSING",evidence:{userConfirmedAt:NOW,executionStartedAt:NOW},occurredAt:NOW});
     const recent=await payments.listRecentPaymentIdentities(ACTOR,5); assert.equal(recent.length,1); assert.equal(recent[0].accountId,RECIPIENT);
+    assert.equal(recent[0].username,"recent_01"); assert.equal(recent[0].displayName,"Recent Creator");
     assert.equal((await payments.claimPaymentIdentityKey(input({amountRaw:2_000_000n}))).outcome,"HASH_CONFLICT");
+    const current=await economic.findEconomicIdentity(RECIPIENT); assert.ok(current);
+    const changed=await economic.upsertEconomicIdentity({accountId:RECIPIENT,expectedVersion:current.version,accountType:"PERSONAL",username:"current_02",normalizedUsername:"current_02",displayName:"Current Creator",avatarUrl:"https://example.com/current.png",discoverability:"PUBLIC"});
+    assert.equal(changed.identity.accountType,"CREATOR");
+    const fresh=await payments.claimPaymentIdentityKey(input({idempotencyKey:"identity-key-00000002"}));
+    assert.equal(fresh.payment.recipientSnapshot?.username,"current_02"); assert.equal(fresh.payment.recipientSnapshot?.displayName,"Current Creator");
+    const historical=await payments.listRecentPaymentIdentities(ACTOR,5); assert.equal(historical[0].username,"recent_01"); assert.equal(historical[0].displayName,"Recent Creator");
     await pool.query("UPDATE economic_identities SET discoverability='PRIVATE',version=version+1,updated_at=updated_at + interval '1 second' WHERE account_id=$1",[RECIPIENT]);
     assert.equal((await payments.listRecentPaymentIdentities(ACTOR,5)).length,1);
-    await assert.rejects(()=>payments.claimPaymentIdentityKey(input({idempotencyKey:"identity-key-00000002"})),/RECIPIENT_UNAVAILABLE/);
+    await assert.rejects(()=>payments.claimPaymentIdentityKey(input({idempotencyKey:"identity-key-00000003"})),/RECIPIENT_UNAVAILABLE/);
   });
 });
