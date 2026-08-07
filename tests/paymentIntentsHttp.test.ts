@@ -14,6 +14,9 @@ import { createPaymentIntentsRouter, paymentIntentServiceUnavailable } from "../
 import { PaymentIntentService } from "../src/services/paymentIntentService";
 import { InMemoryIdentityPersistence } from "../src/storage/memory/inMemoryIdentityPersistence";
 import { InMemoryPaymentPersistence } from "../src/storage/memory/inMemoryPaymentPersistence";
+import { InMemoryExecutionRepository } from "../src/storage/memory/inMemoryExecutionRepository";
+import { PaymentExecutionService } from "../src/executions/executionService";
+import { createPaymentExecutionsRouter } from "../src/routes/paymentExecutions";
 
 const issuer = "https://tenant.example/";
 const audience = "https://api.zephipay.test";
@@ -31,10 +34,16 @@ before(async () => {
   const account = (await accounts.resolve({ issuer, providerSubject: "auth0|owner", scopes: [] })).account;
   await storage.createAllowlistEntry({ actorSubject: account.actorSubject });
   const service = new PaymentIntentService(accounts, storage);
+  const executionService = new PaymentExecutionService(accounts, storage, new InMemoryExecutionRepository());
   const app = express();
   app.use(requestContext, express.json({ strict: true }));
   app.use("/api/payment-intents", createPaymentIntentsRouter({
     service,
+    readAuth: createAuthPipeline({ issuer, audience, requiredScope: "read:payments", publicKey: jwk }),
+    writeAuth: createAuthPipeline({ issuer, audience, requiredScope: "write:payments", publicKey: jwk }),
+  }));
+  app.use("/api/payment-intents", createPaymentExecutionsRouter({
+    service: executionService,
     readAuth: createAuthPipeline({ issuer, audience, requiredScope: "read:payments", publicKey: jwk }),
     writeAuth: createAuthPipeline({ issuer, audience, requiredScope: "write:payments", publicKey: jwk }),
   }));
@@ -141,6 +150,18 @@ describe("payment intent HTTP boundary", () => {
     })).status, 404);
   });
 
+  it("authenticates explicit execution, rejects authority fields, and returns durable replay", async () => {
+    const write=await jwt("auth0|owner","write:payments");const read=await jwt("auth0|owner","read:payments");
+    const created=await createIntent(write,"http-execute-key-0001");const intent=(await created.json() as any).paymentIntent;
+    await fetch(`${baseUrl}/api/payment-intents/${intent.id}/confirm`,{method:"POST",headers:{Authorization:`Bearer ${write}`,"Content-Type":"application/json"},body:JSON.stringify({requestHash:intent.requestHash,expectedVersion:"0"})});
+    const forbidden=await fetch(`${baseUrl}/api/payment-intents/${intent.id}/execute`,{method:"POST",headers:{Authorization:`Bearer ${write}`,"Content-Type":"application/json"},body:JSON.stringify({requestHash:intent.requestHash,expectedVersion:"1",rail:"solana"})});assert.equal(forbidden.status,400);
+    const execute=()=>fetch(`${baseUrl}/api/payment-intents/${intent.id}/execute`,{method:"POST",headers:{Authorization:`Bearer ${write}`,"Content-Type":"application/json"},body:JSON.stringify({requestHash:intent.requestHash,expectedVersion:"1"})});
+    const first=await execute();assert.equal(first.status,202);const firstBody=await first.json() as any;const replay=await execute();assert.equal(replay.status,200);assert.equal((await replay.json() as any).execution.executionId,firstBody.execution.executionId);
+    assert.equal((await fetch(`${baseUrl}/api/payment-intents/${intent.id}/execution`,{headers:{Authorization:`Bearer ${read}`}})).status,200);
+    assert.equal((await fetch(`${baseUrl}/api/payment-intents/${intent.id}/execution`,{headers:{Authorization:`Bearer ${await jwt("auth0|other","read:payments")}`}})).status,404);
+    assert.equal((await fetch(`${baseUrl}/api/payment-intents/${intent.id}/execute`,{method:"POST",headers:{Authorization:`Bearer ${read}`,"Content-Type":"application/json"},body:"{}"})).status,403);
+  });
+
   it("returns 503 when the payment-intent service is not configured", async () => {
     const app = express();
     app.use(requestContext);
@@ -158,12 +179,14 @@ describe("payment intent HTTP boundary", () => {
     }
   });
 
-  it("keeps the execution boundary disconnected and the legacy send route unchanged", async () => {
+  it("keeps Payment Intent creation non-executing and hard-disables legacy send", async () => {
     const route = await readFile(new URL("../src/routes/paymentIntents.ts", import.meta.url), "utf8");
     const service = await readFile(new URL("../src/services/paymentIntentService.ts", import.meta.url), "utf8");
     const server = await readFile(new URL("../src/server.ts", import.meta.url), "utf8");
     assert.doesNotMatch(route + service, /payservice|executePayment|executeSolanaSplPay|solanaSplPayExecutor|PaymentRuntime/);
     assert.match(server, /"\/api\/send"/);
+    assert.match(server, /Legacy direct execution is disabled/);
+    assert.doesNotMatch(server, /executePayment\(/);
     assert.match(server, /rateLimiter: paymentRateLimiter/);
   });
 });

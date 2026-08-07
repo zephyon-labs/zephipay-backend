@@ -1,7 +1,6 @@
-import { createHash } from "node:crypto";
-
 import cors from "cors";
 import dotenv from "dotenv";
+import { randomUUID } from "node:crypto";
 import express, {
   type NextFunction,
   type Request,
@@ -34,11 +33,13 @@ import { RecipientDirectoryService } from "./recipients/recipientDirectoryServic
 import { createPaymentIntentsRouter, paymentIntentServiceUnavailable } from "./routes/paymentIntents";
 import { PaymentIntentService } from "./services/paymentIntentService";
 import { PostgresPaymentPersistence } from "./storage/postgres/postgresPaymentPersistence";
+import { PostgresExecutionRepository } from "./storage/postgres/postgresExecutionRepository";
+import { PaymentExecutionService } from "./executions/executionService";
+import { PaymentExecutionWorker } from "./executions/executionWorker";
+import { createPaymentExecutionsRouter } from "./routes/paymentExecutions";
 import { PostgresIdentityPersistence } from "./storage/postgres/postgresIdentityPersistence";
 import { PostgresEconomicIdentityPersistence } from "./storage/postgres/postgresEconomicIdentityPersistence";
 import { createPaymentPostgresPool } from "./storage/postgres/postgresPool";
-import { executePayment } from "./services/payservice";
-import { validatePaymentRequest } from "./validation/paymentRequest";
 import { x402Middleware } from "./x402/x402Server";
 
 const app = express();
@@ -112,6 +113,23 @@ if (environment.authEnabled) {
   const recipientDirectoryService = new RecipientDirectoryService(identityPersistence, economicIdentityPersistence);
   const paymentPersistence = new PostgresPaymentPersistence(pool);
   const paymentIntentService = new PaymentIntentService(accountService, paymentPersistence);
+  const executionRepository = new PostgresExecutionRepository(pool);
+  const executionService = new PaymentExecutionService(accountService, paymentPersistence, executionRepository);
+  const executionWorker = new PaymentExecutionWorker(paymentPersistence, executionRepository, `backend-${randomUUID()}`);
+  let executionTickActive = false;
+  const executionTimer = setInterval(async () => {
+    if (executionTickActive) return;
+    executionTickActive = true;
+    try {
+      await executionWorker.processNext();
+      await executionWorker.reconcileNext();
+    } catch (error) {
+      console.error("Mock execution worker tick failed.", { error: error instanceof Error ? error.message : "Unknown worker error" });
+    } finally {
+      executionTickActive = false;
+    }
+  }, 1_000);
+  executionTimer.unref();
   app.use(
     "/api/account",
     ...createAuthPipeline({
@@ -150,6 +168,11 @@ if (environment.authEnabled) {
       }),
     }),
   );
+  app.use("/api/payment-intents", createPaymentExecutionsRouter({
+    service: executionService,
+    readAuth: createAuthPipeline({ ...authConfiguration, requiredScope: environment.auth0ReadPaymentsScope }),
+    writeAuth: createAuthPipeline({ ...authConfiguration, requiredScope: environment.auth0WritePaymentsScope }),
+  }));
 } else {
   app.get("/api/account/me", (_req, res) => res.status(503).set("Cache-Control", "no-store").json({
     ok: false, error: "Authentication is not configured.", requestId: res.locals.requestId,
@@ -189,94 +212,9 @@ app.get("/", (_req, res) => {
 app.post(
   "/api/send",
   paymentRateLimiter,
-  async (req, res) => {
+  async (_req, res) => {
     const requestId = String(res.locals.requestId);
-
-    if (!environment.paymentsEnabled) {
-      return res.status(503).json({
-        ok: false,
-        error: "Payment execution is temporarily unavailable.",
-        requestId,
-      });
-    }
-
-    const validation = validatePaymentRequest(req.body);
-
-    if (!validation.valid) {
-      return res.status(400).json({
-        ok: false,
-        error: validation.error,
-        requestId,
-      });
-    }
-
-    const {
-      recipient,
-      amount,
-      purpose,
-    } = validation.value;
-
-    const recipientFingerprint = createHash("sha256")
-      .update(recipient)
-      .digest("hex")
-      .slice(0, 12);
-
-    console.info("Payment request accepted for execution.", {
-      requestId,
-      recipientFingerprint,
-      amount,
-    });
-
-    try {
-      const payment = await executePayment({
-        recipient,
-        amount,
-        purpose,
-      });
-
-      console.info("Payment execution completed.", {
-        requestId,
-        paymentId: payment.paymentId,
-        transactionId: payment.transactionId,
-        signature: payment.signature,
-      });
-
-      return res.json({
-        ok: true,
-        status: "confirmed",
-        requestId,
-        runtimeId: payment.runtimeId,
-        paymentId: payment.paymentId,
-        transactionId: payment.transactionId,
-        receiptId: payment.receiptId,
-        signature: payment.signature,
-        recipient: payment.recipient,
-        amount: payment.amountRaw,
-        amountDisplay:
-          Number(payment.amountRaw) / 1_000_000,
-        asset: "USDC",
-        purpose: payment.purpose,
-        treasury: payment.treasury,
-        mint: payment.mint,
-        payCountBefore: payment.payCountBefore,
-        payCountAfter: payment.payCountAfter,
-        network: "solana-devnet",
-      });
-    } catch (error) {
-      console.error("Payment execution failed.", {
-        requestId,
-        error:
-          error instanceof Error
-            ? error.message
-            : "Unknown payment error",
-      });
-
-      return res.status(500).json({
-        ok: false,
-        error: "Payment execution failed.",
-        requestId,
-      });
-    }
+    return res.status(410).json({ok:false,error:"Legacy direct execution is disabled. Create, confirm, and explicitly execute a Payment Intent.",requestId});
   },
 );
 

@@ -47,6 +47,9 @@ const ECONOMIC_IDENTITY_REQUIRED_TOKENS = [
   "economic_identities_protect_lifecycle",
   "payment_destinations_protect_lifecycle",
 ];
+const EXECUTION_REQUIRED_TOKENS = ["CREATE TABLE payment_executions", "CREATE TABLE payment_execution_attempts",
+  "CREATE TABLE payment_execution_events", "payment_executions_protect", "payment_execution_attempts_append_only",
+  "payment_execution_events_append_only", "selected_rail='mock'", "UNIQUE REFERENCES payments"];
 
 async function main(): Promise<void> {
   const directory = path.resolve(process.cwd(), "migrations");
@@ -68,6 +71,12 @@ async function main(): Promise<void> {
   const economicIdentitySql = await readFile(path.join(directory, economicIdentityMigration), "utf8");
   for (const token of ECONOMIC_IDENTITY_REQUIRED_TOKENS) {
     if (!economicIdentitySql.includes(token)) throw new Error(`Economic identity migration is missing required token: ${token}`);
+  }
+  const executionMigration = files.find((file) => file === "005_payment_execution.sql");
+  if (!executionMigration) throw new Error("Payment execution migration is missing.");
+  const executionSql = await readFile(path.join(directory, executionMigration), "utf8");
+  for (const token of EXECUTION_REQUIRED_TOKENS) {
+    if (!executionSql.includes(token)) throw new Error(`Execution migration is missing required token: ${token}`);
   }
   for (const [file, sql] of [[files[0], first], [identityMigration, identitySql], [economicIdentityMigration, economicIdentitySql]] as const) {
     if (/\b(?:BEGIN|COMMIT|ROLLBACK)\s*;/i.test(sql)) {

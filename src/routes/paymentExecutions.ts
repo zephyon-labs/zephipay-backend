@@ -1,0 +1,7 @@
+import { Router, type RequestHandler } from "express";
+import { externalPrincipalFrom } from "../auth/authMiddleware";
+import { ExecutionApplicationError, PaymentExecutionService } from "../executions/executionService";
+import { parsePaymentIntentId } from "../payments/paymentIntentValidation";
+
+export function createPaymentExecutionsRouter(input:{service:PaymentExecutionService;readAuth:readonly RequestHandler[];writeAuth:readonly RequestHandler[]}):Router{const router=Router();router.post("/:id/execute",...input.writeAuth,async(req,res)=>{try{const result=await input.service.execute(externalPrincipalFrom(res),parsePaymentIntentId(String(req.params.id)),req.body);return res.status(result.created?202:200).json({ok:true,created:result.created,execution:result.execution,requestId:res.locals.requestId});}catch(e){return handle(e,res);}});router.get("/:id/execution",...input.readAuth,async(req,res)=>{try{return res.json({ok:true,execution:await input.service.find(externalPrincipalFrom(res),parsePaymentIntentId(String(req.params.id))),requestId:res.locals.requestId});}catch(e){return handle(e,res);}});return router;}
+function handle(e:unknown,res:any){if(e instanceof ExecutionApplicationError){const status=e.kind==="INVALID"?400:e.kind==="ACCESS_DENIED"?403:e.kind==="NOT_FOUND"?404:409;return res.status(status).json({ok:false,error:e.message,requestId:res.locals.requestId});}throw e;}
