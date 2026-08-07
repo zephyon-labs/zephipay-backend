@@ -70,6 +70,7 @@ export interface PaymentRepository {
   claimIdempotencyKey(input: CreatePaymentInput): Promise<IdempotencyClaim>;
   claimPaymentIdentityKey(input: ClaimPaymentIdentityInput): Promise<IdempotencyClaim>;
   findPayment(paymentId: string): Promise<PaymentRecord | undefined>;
+  listPaymentsByActor(actorSubject: string, limit: number): Promise<PaymentRecord[]>;
   listRecentPaymentIdentities(actorSubject: string, limit: number): Promise<RecentPaymentIdentity[]>;
   listPaymentsRequiringReconciliation(limit: number): Promise<PaymentRecord[]>;
 }

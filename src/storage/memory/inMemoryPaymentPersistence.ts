@@ -181,6 +181,12 @@ export class InMemoryPaymentPersistence implements PaymentPersistence {
     return payment ? clonePayment(payment) : undefined;
   }
 
+  async listPaymentsByActor(actorSubject: string, limit: number): Promise<PaymentRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Activity limit is invalid.");
+    return [...this.payments.values()].filter((payment) => payment.actorSubject === actorSubject)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id)).slice(0, limit).map(clonePayment);
+  }
+
   async listRecentPaymentIdentities(actorSubject: string, limit: number): Promise<RecentPaymentIdentity[]> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) throw new Error("Recent limit is invalid.");
     const candidates = [...this.payments.values()].flatMap((payment) => {

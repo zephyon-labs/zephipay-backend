@@ -28,15 +28,25 @@ export type ExecutionEvent = Readonly<{
 }>;
 
 export type PublicPaymentExecution = Readonly<{
-  executionId: string; paymentIntentId: string; status: Lowercase<ExecutionStatus>; rail: "mock";
-  createdAt: string; submittedAt?: string; settledAt?: string; failure?: Readonly<{ code: string; retryable: boolean }>;
-  processingContinues: boolean;
+  executionId: string; paymentIntentId: string; status: "ready" | "processing" | "pending" | "settled" | "failed" | "cancelled";
+  rail: Readonly<{ id: "mock"; label: "Mock Rail" }>; createdAt: string; submittedAt?: string; settledAt?: string; failedAt?: string;
+  receiptAvailable: boolean; receiptId?: string; failure?: Readonly<{ code: string; message: string }>;
+  retryAllowed: boolean; stillProcessing: boolean; reconciliationPending: boolean;
 }>;
 
-export function toPublicExecution(value: PaymentExecution): PublicPaymentExecution {
+export function toPublicExecution(value: PaymentExecution, receiptId?: string): PublicPaymentExecution {
+  const status = value.status === "READY" ? "ready" : ["SUBMITTING","PROCESSING"].includes(value.status) ? "processing"
+    : value.status === "UNKNOWN" ? "pending" : value.status.toLowerCase() as "settled" | "failed" | "cancelled";
   return Object.freeze({ executionId: value.executionId, paymentIntentId: value.paymentIntentId,
-    status: value.status.toLowerCase() as Lowercase<ExecutionStatus>, rail: "mock", createdAt: value.createdAt,
+    status, rail: Object.freeze({ id: "mock" as const, label: "Mock Rail" as const }), createdAt: value.createdAt,
     ...(value.submittedAt ? { submittedAt: value.submittedAt } : {}), ...(value.settledAt ? { settledAt: value.settledAt } : {}),
-    ...(value.failureCode ? { failure: { code: value.failureCode, retryable: value.failureRetryable === true } } : {}),
-    processingContinues: ["READY", "SUBMITTING", "PROCESSING", "UNKNOWN"].includes(value.status) });
+    ...(value.failedAt ? { failedAt: value.failedAt } : {}), receiptAvailable: receiptId !== undefined,
+    ...(receiptId ? { receiptId } : {}), ...(value.status === "FAILED" ? { failure: safeFailure(value.failureCode) } : {}),
+    retryAllowed: false, stillProcessing: ["SUBMITTING","PROCESSING","UNKNOWN"].includes(value.status),
+    reconciliationPending: value.status === "UNKNOWN" });
+}
+
+function safeFailure(code?: string): Readonly<{ code: string; message: string }> {
+  if (code === "REJECTED") return Object.freeze({ code: "PAYMENT_DECLINED", message: "The payment could not be completed." });
+  return Object.freeze({ code: "EXECUTION_FAILED", message: "The payment could not be completed." });
 }

@@ -1,5 +1,6 @@
 import type { JsonObject } from "../payments/paymentTypes";
 import type { ExecutionAttempt, ExecutionOperation, ExecutionStatus, PaymentExecution } from "./executionTypes";
+import type { ExecutionReceipt } from "./executionReceiptTypes";
 
 export type CreateExecutionInput = Readonly<{ executionId: string; paymentIntentId: string; actorSubject: string; providerIdempotencyKey: string; now: string }>;
 export type CompleteOperationInput = Readonly<{
@@ -15,6 +16,8 @@ export interface ExecutionRepository {
   findByPaymentIntent(paymentIntentId: string): Promise<PaymentExecution | undefined>;
   claim(statuses: readonly ExecutionStatus[], workerId: string, now: string, leaseExpiresAt: string): Promise<Readonly<{ execution: PaymentExecution; attempt: ExecutionAttempt }> | undefined>;
   complete(input: CompleteOperationInput): Promise<PaymentExecution>;
+  completeSettlement(input: Readonly<{ completion: CompleteOperationInput; receipt: ExecutionReceipt }>): Promise<Readonly<{ execution: PaymentExecution; receipt: ExecutionReceipt }>>;
+  findReceiptByPaymentIntent(paymentIntentId: string): Promise<ExecutionReceipt | undefined>;
   listAttempts(executionId: string): Promise<ExecutionAttempt[]>;
 }
 

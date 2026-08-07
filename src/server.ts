@@ -36,7 +36,7 @@ import { PostgresPaymentPersistence } from "./storage/postgres/postgresPaymentPe
 import { PostgresExecutionRepository } from "./storage/postgres/postgresExecutionRepository";
 import { PaymentExecutionService } from "./executions/executionService";
 import { PaymentExecutionWorker } from "./executions/executionWorker";
-import { createPaymentExecutionsRouter } from "./routes/paymentExecutions";
+import { createActivityRouter, createPaymentExecutionsRouter } from "./routes/paymentExecutions";
 import { PostgresIdentityPersistence } from "./storage/postgres/postgresIdentityPersistence";
 import { PostgresEconomicIdentityPersistence } from "./storage/postgres/postgresEconomicIdentityPersistence";
 import { createPaymentPostgresPool } from "./storage/postgres/postgresPool";
@@ -168,11 +168,13 @@ if (environment.authEnabled) {
       }),
     }),
   );
+  const executionReadAuth = createAuthPipeline({ ...authConfiguration, requiredScope: environment.auth0ReadPaymentsScope });
   app.use("/api/payment-intents", createPaymentExecutionsRouter({
     service: executionService,
-    readAuth: createAuthPipeline({ ...authConfiguration, requiredScope: environment.auth0ReadPaymentsScope }),
+    readAuth: executionReadAuth,
     writeAuth: createAuthPipeline({ ...authConfiguration, requiredScope: environment.auth0WritePaymentsScope }),
   }));
+  app.use("/api/activity", createActivityRouter({ service: executionService, readAuth: executionReadAuth }));
 } else {
   app.get("/api/account/me", (_req, res) => res.status(503).set("Cache-Control", "no-store").json({
     ok: false, error: "Authentication is not configured.", requestId: res.locals.requestId,

@@ -161,6 +161,15 @@ export class PostgresPaymentPersistence implements PaymentPersistence {
     return result.rows[0] ? mapPayment(result.rows[0]) : undefined;
   }
 
+  async listPaymentsByActor(actorSubject: string, limit: number): Promise<PaymentRecord[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new Error("Activity limit is invalid.");
+    const result = await this.pool.query(
+      "SELECT * FROM payments WHERE actor_subject=$1 ORDER BY created_at DESC,id DESC LIMIT $2",
+      [actorSubject, limit],
+    );
+    return result.rows.map(mapPayment);
+  }
+
   async listRecentPaymentIdentities(actorSubject: string, limit: number): Promise<RecentPaymentIdentity[]> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) throw new Error("Recent limit is invalid.");
     const result = await this.pool.query(

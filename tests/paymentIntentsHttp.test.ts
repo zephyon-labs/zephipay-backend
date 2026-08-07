@@ -16,7 +16,8 @@ import { InMemoryIdentityPersistence } from "../src/storage/memory/inMemoryIdent
 import { InMemoryPaymentPersistence } from "../src/storage/memory/inMemoryPaymentPersistence";
 import { InMemoryExecutionRepository } from "../src/storage/memory/inMemoryExecutionRepository";
 import { PaymentExecutionService } from "../src/executions/executionService";
-import { createPaymentExecutionsRouter } from "../src/routes/paymentExecutions";
+import { PaymentExecutionWorker } from "../src/executions/executionWorker";
+import { createActivityRouter, createPaymentExecutionsRouter } from "../src/routes/paymentExecutions";
 
 const issuer = "https://tenant.example/";
 const audience = "https://api.zephipay.test";
@@ -25,6 +26,8 @@ const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 20
 let baseUrl = "";
 let closeServer: (() => Promise<void>) | undefined;
 let storage: InMemoryPaymentPersistence;
+let executionRepository: InMemoryExecutionRepository;
+let executionService: PaymentExecutionService;
 
 before(async () => {
   const jwk = { ...(await exportJWK(publicKey)), alg: "RS256", kid: "test" };
@@ -34,7 +37,8 @@ before(async () => {
   const account = (await accounts.resolve({ issuer, providerSubject: "auth0|owner", scopes: [] })).account;
   await storage.createAllowlistEntry({ actorSubject: account.actorSubject });
   const service = new PaymentIntentService(accounts, storage);
-  const executionService = new PaymentExecutionService(accounts, storage, new InMemoryExecutionRepository());
+  executionRepository = new InMemoryExecutionRepository();
+  executionService = new PaymentExecutionService(accounts, storage, executionRepository);
   const app = express();
   app.use(requestContext, express.json({ strict: true }));
   app.use("/api/payment-intents", createPaymentIntentsRouter({
@@ -47,6 +51,8 @@ before(async () => {
     readAuth: createAuthPipeline({ issuer, audience, requiredScope: "read:payments", publicKey: jwk }),
     writeAuth: createAuthPipeline({ issuer, audience, requiredScope: "write:payments", publicKey: jwk }),
   }));
+  app.use("/api/activity", createActivityRouter({ service: executionService,
+    readAuth: createAuthPipeline({ issuer, audience, requiredScope: "read:payments", publicKey: jwk }) }));
   app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
     if (error instanceof InsufficientScopeError) return res.status(403).json({ ok: false, error: "scope" });
     if (error instanceof UnauthorizedError) return res.status(401).json({ ok: false, error: "auth" });
@@ -160,6 +166,24 @@ describe("payment intent HTTP boundary", () => {
     assert.equal((await fetch(`${baseUrl}/api/payment-intents/${intent.id}/execution`,{headers:{Authorization:`Bearer ${read}`}})).status,200);
     assert.equal((await fetch(`${baseUrl}/api/payment-intents/${intent.id}/execution`,{headers:{Authorization:`Bearer ${await jwt("auth0|other","read:payments")}`}})).status,404);
     assert.equal((await fetch(`${baseUrl}/api/payment-intents/${intent.id}/execute`,{method:"POST",headers:{Authorization:`Bearer ${read}`,"Content-Type":"application/json"},body:"{}"})).status,403);
+  });
+
+  it("serves owner-only durable receipt, activity, and frontend-safe execution truth", async () => {
+    const write=await jwt("auth0|owner","write:payments"); const read=await jwt("auth0|owner","read:payments");
+    const intent=(await (await createIntent(write,"http-receipt-key-0001","2.5")).json() as any).paymentIntent;
+    await fetch(`${baseUrl}/api/payment-intents/${intent.id}/confirm`,{method:"POST",headers:{Authorization:`Bearer ${write}`,"Content-Type":"application/json"},body:JSON.stringify({requestHash:intent.requestHash,expectedVersion:"0"})});
+    await fetch(`${baseUrl}/api/payment-intents/${intent.id}/execute`,{method:"POST",headers:{Authorization:`Bearer ${write}`,"Content-Type":"application/json"},body:JSON.stringify({requestHash:intent.requestHash,expectedVersion:"1"})});
+    assert.equal((await fetch(`${baseUrl}/api/payment-intents/${intent.id}/receipt`,{headers:{Authorization:`Bearer ${read}`}})).status,404);
+    const worker=new PaymentExecutionWorker(storage,executionRepository,"http-worker","immediate_settled",()=>"2026-08-07T12:00:00.000Z");
+    for(let index=0;index<20;index++){const current=await executionRepository.findByPaymentIntent(intent.id);if(current?.status==="SETTLED")break;await worker.processNext();await worker.reconcileNext();}
+    const receiptResponse=await fetch(`${baseUrl}/api/payment-intents/${intent.id}/receipt`,{headers:{Authorization:`Bearer ${read}`}}); assert.equal(receiptResponse.status,200);
+    const receipt=(await receiptResponse.json() as any).receipt; assert.equal(receipt.amountRaw,"2500000"); assert.equal("evidence" in receipt,false); assert.equal("actorSubject" in receipt,false);
+    const execution=(await (await fetch(`${baseUrl}/api/payment-intents/${intent.id}/execution`,{headers:{Authorization:`Bearer ${read}`}})).json() as any).execution;
+    assert.equal(execution.status,"settled"); assert.equal(execution.receiptAvailable,true); assert.equal("providerIdempotencyKey" in execution,false);
+    const activity=(await (await fetch(`${baseUrl}/api/activity?limit=20`,{headers:{Authorization:`Bearer ${read}`}})).json() as any).items;
+    assert.ok(activity.some((item:any)=>item.paymentIntentId===intent.id&&item.status==="completed"&&item.receiptAvailable));
+    const other=await jwt("auth0|other","read:payments"); assert.equal((await fetch(`${baseUrl}/api/payment-intents/${intent.id}/receipt`,{headers:{Authorization:`Bearer ${other}`}})).status,404);
+    assert.equal((await fetch(`${baseUrl}/api/activity`,{headers:{Authorization:`Bearer ${other}`}})).status,200);
   });
 
   it("returns 503 when the payment-intent service is not configured", async () => {
