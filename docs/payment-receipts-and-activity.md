@@ -20,6 +20,11 @@ account) are:
 - `GET /api/payment-intents/:id/execution` returns the authoritative frontend projection.
 - `GET /api/activity?limit=20` returns sender-private history ordered by Payment Intent creation time. Limits are 1–50.
 
+Payment purpose is optional descriptive context. Omitted, `null`, empty, and
+whitespace-only creation values normalize to canonical `null` before hashing
+and persistence. Payment Intent, receipt (`memo`), and activity (`memo`)
+projections return `null` when absent; they never invent placeholder text.
+
 Missing and cross-account receipt/execution records return the same not-found
 response. Activity is derived from Payment Intents, executions, and receipts;
 there is no mutable activity mirror. Recipient display data always comes from

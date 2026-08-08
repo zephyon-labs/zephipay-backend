@@ -70,6 +70,15 @@ after(async () => {
 });
 
 describe("PostgreSQL payment foundation", () => {
+  it("persists canonical null purpose without changing supplied values", async () => {
+    const absent = await storage.claimIdempotencyKey(input({ purpose: null }));
+    assert.equal(absent.outcome, "CLAIMED");
+    assert.equal(absent.payment.purpose, null);
+    const supplied = await storage.claimIdempotencyKey(input({ purpose: "Historical purpose" }));
+    assert.equal(supplied.outcome, "CLAIMED");
+    assert.equal(supplied.payment.purpose, "Historical purpose");
+  });
+
   it("serializes idempotency claims and detects a hash conflict", async () => {
     const key = "integration-shared-key-0001";
     const claims = await Promise.all(Array.from({ length: 20 }, () =>

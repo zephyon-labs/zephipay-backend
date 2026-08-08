@@ -69,6 +69,22 @@ before(async () => {
 after(async () => closeServer?.());
 
 describe("payment intent HTTP boundary", () => {
+  it("accepts omitted, null, and empty purpose as canonical null over HTTP", async () => {
+    const write = await jwt("auth0|owner", "write:payments");
+    for (const [suffix, body] of [
+      ["omitted", { recipient, amount: "1" }],
+      ["null", { recipient, amount: "1", purpose: null }],
+      ["empty", { recipient, amount: "1", purpose: "" }],
+      ["space", { recipient, amount: "1", purpose: "   " }],
+    ] as const) {
+      const response = await fetch(`${baseUrl}/api/payment-intents`, { method: "POST", headers: {
+        Authorization: `Bearer ${write}`, "Content-Type": "application/json", "Idempotency-Key": `http-purpose-${suffix}-0001`,
+      }, body: JSON.stringify(body) });
+      assert.equal(response.status, 201);
+      assert.equal((await response.json() as { paymentIntent: { purpose: string | null } }).paymentIntent.purpose, null);
+    }
+  });
+
   it("enforces authentication and route-specific scopes", async () => {
     assert.equal((await fetch(`${baseUrl}/api/payment-intents/00000000-0000-4000-8000-000000000001`)).status, 401);
     const readOnly = await jwt("auth0|owner", "read:payments");

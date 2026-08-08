@@ -21,7 +21,7 @@ export type ClaimPaymentIdentityInput = Readonly<{
   id: string; actorSubject: string; senderAccountId: string; idempotencyKey: string;
   recipientAccountId: string; trustAcknowledged: boolean; network: "solana-devnet";
   rail: "solana"; asset: "USDC"; mintAddress: string; amountRaw: bigint;
-  purpose: string; capturedAt: string;
+  purpose: string | null; capturedAt: string;
 }>;
 
 export type RecentPaymentIdentity = PaymentIdentitySnapshot;

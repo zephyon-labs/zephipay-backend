@@ -10,6 +10,7 @@ import {
   rawUsdcToDisplay,
   usdcAmountToRaw,
 } from "../src/payments/paymentIntentValidation";
+import { createPaymentRequestHash } from "../src/payments/requestHash";
 import { PaymentIntentApplicationError, PaymentIntentService } from "../src/services/paymentIntentService";
 import { InMemoryIdentityPersistence } from "../src/storage/memory/inMemoryIdentityPersistence";
 import { InMemoryPaymentPersistence } from "../src/storage/memory/inMemoryPaymentPersistence";
@@ -53,7 +54,7 @@ async function fixture(options: { enabled?: boolean; expiresAt?: string; allowli
   return { identity, accounts, payments, servicePayments, account, service };
 }
 
-const createInput = (overrides: Partial<{ idempotencyKey: string; recipient: string; amount: string; purpose: string }> = {}) => ({
+const createInput = (overrides: Partial<{ idempotencyKey: string; recipient: string; amount: string; purpose: string | null }> = {}) => ({
   idempotencyKey: "intent-key-00000001",
   recipient: RECIPIENT,
   amount: "1.250000",
@@ -62,6 +63,21 @@ const createInput = (overrides: Partial<{ idempotencyKey: string; recipient: str
 });
 
 describe("payment intent input", () => {
+  it("normalizes every absent purpose form to null and preserves valid supplied context", () => {
+    for (const purpose of [undefined, null, "", "   "]) {
+      const input = { recipient: RECIPIENT, amount: "1", ...(purpose === undefined ? {} : { purpose }) };
+      assert.equal(parsePaymentIntentRequest(input).purpose, null);
+    }
+    assert.equal(parsePaymentIntentRequest({ recipient: RECIPIENT, amount: "1", purpose: " Dinner " }).purpose, "Dinner");
+    assert.throws(() => parsePaymentIntentRequest({ recipient: RECIPIENT, amount: "1", purpose: "x".repeat(121) }));
+  });
+
+  it("hashes equivalent absent forms canonically and distinguishes supplied purpose", () => {
+    const base = { actorSubject: "actor", network: "solana-devnet" as const, mintAddress: "mint", recipientAddress: RECIPIENT, amountRaw: 1n };
+    const absent = [undefined, null, "", "   "].map((purpose) => createPaymentRequestHash({ ...base, purpose: parsePaymentIntentRequest({ recipient: RECIPIENT, amount: "1", ...(purpose === undefined ? {} : { purpose }) }).purpose }));
+    assert.equal(new Set(absent).size, 1);
+    assert.notEqual(createPaymentRequestHash({ ...base, purpose: "Dinner" }), absent[0]);
+  });
   it("converts exact decimal USDC without floating point", () => {
     assert.equal(usdcAmountToRaw("9007199254740.993001"), 9_007_199_254_740_993_001n);
     assert.equal(rawUsdcToDisplay(1_250_000n), "1.25");
@@ -86,6 +102,15 @@ describe("payment intent input", () => {
 });
 
 describe("PaymentIntentService", () => {
+  it("creates, reads, and replays a direct-wallet intent with canonical null purpose", async () => {
+    const { service, payments } = await fixture();
+    const first = await service.create(principal, createInput({ purpose: null }));
+    const replay = await service.create(principal, createInput({ purpose: null }));
+    assert.equal(first.paymentIntent.purpose, null);
+    assert.equal((await service.find(principal, first.paymentIntent.id)).purpose, null);
+    assert.equal((await payments.findPayment(first.paymentIntent.id))?.purpose, null);
+    assert.equal(replay.created, false);
+  });
   it("creates, serializes, replays, and rejects a changed idempotent request", async () => {
     const { service } = await fixture();
     const first = await service.create(principal, createInput());

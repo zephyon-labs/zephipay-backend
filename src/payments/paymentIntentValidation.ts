@@ -10,13 +10,13 @@ const POSTGRES_BIGINT_MAX = 9_223_372_036_854_775_807n;
 export type DirectWalletPaymentIntentRequest = Readonly<{
   recipient: string;
   amount: string;
-  purpose: string;
+  purpose: string | null;
 }>;
 export type PaymentIdentityPaymentIntentRequest = Readonly<{
   recipientType: "payment_identity";
   recipientAccountId: string;
   amount: string;
-  purpose: string;
+  purpose: string | null;
   trustAcknowledgment?: Readonly<{ acknowledged: true }>;
 }>;
 export type PaymentIntentRequest = DirectWalletPaymentIntentRequest | PaymentIdentityPaymentIntentRequest;
@@ -78,12 +78,14 @@ function parseAmount(value: unknown): string {
   return value;
 }
 
-function parsePurpose(value: unknown): string {
-  if (typeof value !== "string") throw new PaymentIntentInputError("Purpose must be a string.");
+function parsePurpose(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") throw new PaymentIntentInputError("Purpose must be a string or null.");
   const purpose = value.trim();
+  if (purpose.length === 0) return null;
   const purposeBytes = Buffer.byteLength(purpose, "utf8");
-  if (purposeBytes < 1 || purposeBytes > 120) {
-    throw new PaymentIntentInputError("Purpose must be between 1 and 120 UTF-8 bytes.");
+  if (purposeBytes > 120) {
+    throw new PaymentIntentInputError("Purpose must not exceed 120 UTF-8 bytes.");
   }
   return purpose;
 }

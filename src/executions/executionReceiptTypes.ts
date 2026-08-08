@@ -13,7 +13,7 @@ export type ExecutionReceipt = Readonly<{
   senderId: string;
   recipientId: string;
   recipientSnapshot?: PaymentIdentitySnapshot;
-  memo: string;
+  memo: string | null;
   providerReference?: string;
   settledAt: string;
   evidenceType: string;
@@ -34,7 +34,7 @@ export type PublicExecutionReceipt = Readonly<{
   asset: "USDC";
   sender: Readonly<{ displayName: "You" }>;
   recipient: Readonly<{ type: "payment_identity"; displayName: string; username: string; verificationState: string; trustOutcome: string } | { type: "direct_wallet"; displayName: "Wallet recipient" }>;
-  memo: string;
+  memo: string | null;
   rail: Readonly<{ id: "mock"; label: "Mock Rail" }>;
   settledAt: string;
   providerReference?: string;

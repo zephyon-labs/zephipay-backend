@@ -9,7 +9,7 @@ export type CanonicalPaymentRequest = Readonly<{
   mintAddress: string;
   recipientAddress: string;
   amountRaw: bigint;
-  purpose: string;
+  purpose: string | null;
 }>;
 
 export function validateRequestHash(requestHash: string): void {

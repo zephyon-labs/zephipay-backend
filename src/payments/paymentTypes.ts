@@ -101,7 +101,7 @@ export type PaymentRecord = Readonly<{
   mintAddress: string;
   recipientAddress: string;
   amountRaw: bigint;
-  purpose: string;
+  purpose: string | null;
   recipientType: PaymentRecipientType;
   recipientAccountId?: string;
   recipientSnapshot?: PaymentIdentitySnapshot;

@@ -25,6 +25,12 @@ describe("Payment Identity intents",()=>{
     assert.deepEqual(parsePaymentIntentRequest({recipientType:"payment_identity",recipientAccountId:RECIPIENT,amount:"1",purpose:"Test"}),{recipientType:"payment_identity",recipientAccountId:RECIPIENT,amount:"1",purpose:"Test"});
     for(const extra of [{recipient:"wallet"},{walletAddress:"wallet"},{verificationState:"verified"},{snapshot:{}},{trustAcknowledgment:{acknowledged:false}}]) assert.throws(()=>parsePaymentIntentRequest({recipientType:"payment_identity",recipientAccountId:RECIPIENT,amount:"1",purpose:"Test",...extra}));
   });
+  it("creates an identity-linked intent without purpose",async()=>{
+    const {service,payments}=await fixture("VERIFIED");
+    const created=await service.create(principal,{...request(false),purpose:null});
+    assert.equal(created.paymentIntent.purpose,null);
+    assert.equal((await payments.findPayment(created.paymentIntent.id))?.purpose,null);
+  });
   it("enforces trust, hides destination, converges, and conflicts on destination changes",async()=>{
     const {service,setDestination}=await fixture(); await assert.rejects(()=>service.create(principal,request(false)),(e)=>e instanceof PaymentIntentApplicationError&&e.kind==="CONFLICT");
     const first=await service.create(principal,request()); const replay=await service.create(principal,request()); assert.equal(replay.created,false);

@@ -506,9 +506,9 @@ function validateCreatePayment(input: CreatePaymentInput): void {
   if (input.network !== "solana-devnet" || input.rail !== "solana" || input.asset !== "USDC") {
     throw new Error("Only Solana Devnet USDC payments are supported.");
   }
-  const purposeBytes = Buffer.byteLength(input.purpose, "utf8");
-  if (purposeBytes < 1 || purposeBytes > 120) {
-    throw new Error("Purpose must contain between 1 and 120 UTF-8 bytes.");
+  const purposeBytes = input.purpose === null ? 0 : Buffer.byteLength(input.purpose, "utf8");
+  if (input.purpose !== null && (purposeBytes < 1 || purposeBytes > 120)) {
+    throw new Error("Purpose must be null or contain between 1 and 120 UTF-8 bytes.");
   }
 }
 

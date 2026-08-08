@@ -480,7 +480,7 @@ function mapPayment(row: QueryResultRow): PaymentRecord {
     requestHash: Buffer.from(row.request_hash).toString("hex"), status: row.status,
     version: BigInt(String(row.version)), network: row.network, rail: row.rail, asset: row.asset,
     mintAddress: String(row.mint_address), recipientAddress: String(row.recipient_address), amountRaw: BigInt(String(row.amount_raw)),
-    purpose: String(row.purpose), runtimeId: optionalString(row.runtime_id), runtimePaymentId: optionalString(row.runtime_payment_id),
+    purpose: row.purpose === null ? null : String(row.purpose), runtimeId: optionalString(row.runtime_id), runtimePaymentId: optionalString(row.runtime_payment_id),
     runtimeTransactionId: optionalString(row.runtime_transaction_id), userConfirmedAt: optionalIso(row.user_confirmed_at),
     executionStartedAt: optionalIso(row.execution_started_at), submittedAt: optionalIso(row.submitted_at),
     lastCheckedAt: optionalIso(row.last_checked_at), completedAt: optionalIso(row.completed_at), failedAt: optionalIso(row.failed_at),

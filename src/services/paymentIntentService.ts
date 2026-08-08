@@ -20,7 +20,7 @@ type PublicPaymentIntentBase = Readonly<{
   amount: string;
   asset: "USDC";
   network: "solana-devnet";
-  purpose: string;
+  purpose: string | null;
   createdAt: string;
   userConfirmedAt?: string;
   executionStartedAt?: string;
@@ -55,7 +55,7 @@ export type PaymentIntentServiceOptions = Readonly<{
   mintAddress?: string;
 }>;
 type CreateIntentServiceInput = Readonly<{
-  idempotencyKey: string; amount: string; purpose: string;
+  idempotencyKey: string; amount: string; purpose: string | null;
 } & ({ recipient: string } | {
   recipientType: "payment_identity"; recipientAccountId: string;
   trustAcknowledgment?: Readonly<{ acknowledged: true }>;
