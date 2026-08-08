@@ -122,7 +122,7 @@ export class PostgresPaymentPersistence implements PaymentPersistence {
         accountId: String(row.account_id), username: String(row.username), displayName: String(row.display_name),
         accountType: String(row.account_type) as PaymentIdentitySnapshot["accountType"], verificationState,
         payabilityState: "AVAILABLE", capturedAt: prior?.recipientSnapshot?.capturedAt ?? input.capturedAt, schemaVersion: 1,
-        resolutionSource: "RECIPIENT_DIRECTORY", trustOutcome,
+        identitySource: "RECIPIENT_DIRECTORY", resolutionSource: "RECIPIENT_DIRECTORY", trustOutcome,
       });
       const canonical = {
         actorSubject: input.actorSubject, network: input.network, mintAddress: input.mintAddress,
@@ -156,6 +156,10 @@ export class PostgresPaymentPersistence implements PaymentPersistence {
     });
   }
 
+  async claimSyntheticPaymentIdentityKey(input: import("../storageContracts").ClaimSyntheticPaymentIdentityInput): Promise<IdempotencyClaim> {
+    return this.transaction(async(client)=>{await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",[`${input.actorSubject.length}:${input.actorSubject}${input.idempotencyKey}`]);const exists=(await client.query("SELECT synthetic_id FROM synthetic_beta_identities WHERE synthetic_id=$1 FOR SHARE",[input.syntheticId])).rows[0];if(!exists)throw recipientUnavailable();const priorRow=(await client.query("SELECT * FROM payments WHERE actor_subject=$1 AND idempotency_key=$2 FOR UPDATE",[input.actorSubject,input.idempotencyKey])).rows[0];const prior=priorRow?mapPayment(priorRow):undefined;if(!input.trustAcknowledged)throw new Error("TRUST_ACKNOWLEDGMENT_REQUIRED");const snapshot:PaymentIdentitySnapshot=Object.freeze({accountId:input.syntheticId,username:input.username,displayName:input.displayName,accountType:"PERSONAL",verificationState:"UNVERIFIED",payabilityState:"AVAILABLE",capturedAt:prior?.recipientSnapshot?.capturedAt??input.capturedAt,schemaVersion:1,identitySource:"SYNTHETIC_BETA",resolutionSource:"SYNTHETIC_BETA",trustOutcome:"ACKNOWLEDGED"});const recipientAddress=`synthetic:${input.syntheticId}`,requestHash=createPaymentIdentityRequestHash({actorSubject:input.actorSubject,network:input.network,mintAddress:input.mintAddress,recipientAddress,amountRaw:input.amountRaw,purpose:input.purpose,recipientAccountId:input.syntheticId,recipientSnapshot:snapshot,trustConfirmationOutcome:"ACKNOWLEDGED"});if(prior)return{outcome:prior.requestHash===requestHash?"EXISTING":"HASH_CONFLICT",payment:prior};const inserted=await client.query(`INSERT INTO payments(id,actor_subject,idempotency_key,request_hash,network,rail,asset,mint_address,recipient_address,amount_raw,purpose,recipient_type,recipient_synthetic_id,recipient_snapshot,recipient_snapshot_version,trust_confirmation_outcome) VALUES($1,$2,$3,decode($4,'hex'),$5,$6,$7,$8,$9,$10,$11,'PAYMENT_IDENTITY',$12,$13,1,'ACKNOWLEDGED') RETURNING *`,[input.id,input.actorSubject,input.idempotencyKey,requestHash,input.network,input.rail,input.asset,input.mintAddress,recipientAddress,input.amountRaw.toString(),input.purpose,input.syntheticId,JSON.stringify(snapshot)]);await appendEvent(client,{paymentId:input.id,eventType:"CREATED",toStatus:"AWAITING_CONFIRMATION",details:{recipientType:"PAYMENT_IDENTITY",identitySource:"SYNTHETIC_BETA",recipientSnapshotVersion:1,trustConfirmationOutcome:"ACKNOWLEDGED"}});return{outcome:"CLAIMED",payment:mapPayment(inserted.rows[0])}})
+  }
+
   async findPayment(paymentId: string): Promise<PaymentRecord | undefined> {
     const result = await this.pool.query("SELECT * FROM payments WHERE id=$1", [paymentId]);
     return result.rows[0] ? mapPayment(result.rows[0]) : undefined;
@@ -180,6 +184,7 @@ export class PostgresPaymentPersistence implements PaymentPersistence {
          JOIN payment_events e ON e.payment_id=p.id AND e.event_type='USER_CONFIRMED'
          WHERE p.actor_subject=$1 AND p.recipient_type='PAYMENT_IDENTITY'
            AND p.recipient_snapshot IS NOT NULL AND p.recipient_snapshot_version=1
+           AND COALESCE(p.recipient_snapshot->>'identitySource','RECIPIENT_DIRECTORY')='RECIPIENT_DIRECTORY'
        ) recent WHERE rank=1 ORDER BY occurred_at DESC,recipient_account_id LIMIT $2`,
       [actorSubject,limit],
     );
@@ -494,6 +499,7 @@ function mapPayment(row: QueryResultRow): PaymentRecord {
     failureReason: optionalString(row.failure_reason),
     recipientType: (row.recipient_type ?? "DIRECT_WALLET") as PaymentRecord["recipientType"],
     recipientAccountId: optionalString(row.recipient_account_id),
+    recipientSyntheticId: optionalString(row.recipient_synthetic_id),
     recipientSnapshot: row.recipient_snapshot ? mapSnapshot(row.recipient_snapshot) : undefined,
     recipientSnapshotVersion: row.recipient_snapshot_version === null || row.recipient_snapshot_version === undefined ? undefined : 1,
     trustConfirmationOutcome: optionalString(row.trust_confirmation_outcome) as PaymentRecord["trustConfirmationOutcome"],

@@ -147,7 +147,7 @@ export class InMemoryPaymentPersistence implements PaymentPersistence {
         accountId: input.recipientAccountId, username: resolved.username, displayName: resolved.displayName,
         accountType: resolved.accountType, verificationState: resolved.verificationState,
         payabilityState: "AVAILABLE", capturedAt: prior?.recipientSnapshot?.capturedAt ?? input.capturedAt, schemaVersion: 1,
-        resolutionSource: "RECIPIENT_DIRECTORY", trustOutcome,
+        identitySource: "RECIPIENT_DIRECTORY", resolutionSource: "RECIPIENT_DIRECTORY", trustOutcome,
       });
       const requestHash = createPaymentIdentityRequestHash({
         actorSubject: input.actorSubject, network: input.network, mintAddress: input.mintAddress,
@@ -175,6 +175,7 @@ export class InMemoryPaymentPersistence implements PaymentPersistence {
       return { outcome: "CLAIMED", payment: clonePayment(payment) };
     });
   }
+  claimSyntheticPaymentIdentityKey(input: import("../storageContracts").ClaimSyntheticPaymentIdentityInput): Promise<IdempotencyClaim>{return this.exclusive(async()=>{if(!input.trustAcknowledged)throw new Error("TRUST_ACKNOWLEDGMENT_REQUIRED");const indexKey=`${input.actorSubject}\u0000${input.idempotencyKey}`,existingId=this.idempotency.get(indexKey),prior=existingId?this.requirePayment(existingId):undefined;const snapshot:PaymentIdentitySnapshot=Object.freeze({accountId:input.syntheticId,username:input.username,displayName:input.displayName,accountType:"PERSONAL",verificationState:"UNVERIFIED",payabilityState:"AVAILABLE",capturedAt:prior?.recipientSnapshot?.capturedAt??input.capturedAt,schemaVersion:1,identitySource:"SYNTHETIC_BETA",resolutionSource:"SYNTHETIC_BETA",trustOutcome:"ACKNOWLEDGED"}),recipientAddress=`synthetic:${input.syntheticId}`,requestHash=createPaymentIdentityRequestHash({actorSubject:input.actorSubject,network:input.network,mintAddress:input.mintAddress,recipientAddress,amountRaw:input.amountRaw,purpose:input.purpose,recipientAccountId:input.syntheticId,recipientSnapshot:snapshot,trustConfirmationOutcome:"ACKNOWLEDGED"});if(prior)return{outcome:prior.requestHash===requestHash?"EXISTING":"HASH_CONFLICT",payment:clonePayment(prior)};const now=this.clock(),payment:PaymentRecord=Object.freeze({id:input.id,actorSubject:input.actorSubject,idempotencyKey:input.idempotencyKey,requestHash,status:"AWAITING_CONFIRMATION",version:0n,network:input.network,rail:input.rail,asset:input.asset,mintAddress:input.mintAddress,recipientAddress,amountRaw:input.amountRaw,purpose:input.purpose,recipientType:"PAYMENT_IDENTITY",recipientSyntheticId:input.syntheticId,recipientSnapshot:snapshot,recipientSnapshotVersion:1,trustConfirmationOutcome:"ACKNOWLEDGED",createdAt:now,updatedAt:now});this.payments.set(payment.id,payment);this.idempotency.set(indexKey,payment.id);this.appendEventUnsafe({paymentId:payment.id,eventType:"CREATED",toStatus:"AWAITING_CONFIRMATION",occurredAt:now,details:{identitySource:"SYNTHETIC_BETA"}});return{outcome:"CLAIMED",payment:clonePayment(payment)}})}
 
   async findPayment(paymentId: string): Promise<PaymentRecord | undefined> {
     const payment = this.payments.get(paymentId);
@@ -190,7 +191,7 @@ export class InMemoryPaymentPersistence implements PaymentPersistence {
   async listRecentPaymentIdentities(actorSubject: string, limit: number): Promise<RecentPaymentIdentity[]> {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10) throw new Error("Recent limit is invalid.");
     const candidates = [...this.payments.values()].flatMap((payment) => {
-      if (payment.actorSubject !== actorSubject || payment.recipientType !== "PAYMENT_IDENTITY" || !payment.recipientSnapshot) return [];
+      if (payment.actorSubject !== actorSubject || payment.recipientType !== "PAYMENT_IDENTITY" || !payment.recipientSnapshot || payment.recipientSnapshot.identitySource === "SYNTHETIC_BETA") return [];
       const confirmed = (this.events.get(payment.id) ?? []).find((event) => event.eventType === "USER_CONFIRMED");
       return confirmed ? [{ payment, confirmedAt: confirmed.occurredAt }] : [];
     }).sort((a,b) => b.confirmedAt.localeCompare(a.confirmedAt) || b.payment.id.localeCompare(a.payment.id));

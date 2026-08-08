@@ -58,7 +58,8 @@ export type PaymentIdentitySnapshot = Readonly<{
   payabilityState: "AVAILABLE";
   capturedAt: string;
   schemaVersion: 1;
-  resolutionSource: "RECIPIENT_DIRECTORY";
+  identitySource?: "RECIPIENT_DIRECTORY" | "SYNTHETIC_BETA";
+  resolutionSource: "RECIPIENT_DIRECTORY" | "SYNTHETIC_BETA";
   trustOutcome: Exclude<TrustConfirmationOutcome, "BLOCKED">;
 }>;
 
@@ -104,6 +105,7 @@ export type PaymentRecord = Readonly<{
   purpose: string | null;
   recipientType: PaymentRecipientType;
   recipientAccountId?: string;
+  recipientSyntheticId?: string;
   recipientSnapshot?: PaymentIdentitySnapshot;
   recipientSnapshotVersion?: 1;
   trustConfirmationOutcome?: Exclude<TrustConfirmationOutcome, "BLOCKED">;
@@ -157,7 +159,7 @@ export type CreatePaymentInput = Pick<
   | "amountRaw"
   | "purpose"
 > & Partial<Pick<PaymentRecord,
-  "recipientType" | "recipientAccountId" | "recipientSnapshot" |
+  "recipientType" | "recipientAccountId" | "recipientSyntheticId" | "recipientSnapshot" |
   "recipientSnapshotVersion" | "trustConfirmationOutcome"
 >>;
 

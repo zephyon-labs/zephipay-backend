@@ -10,10 +10,12 @@ import { Pool } from "pg";
 import { PostgresEconomicIdentityPersistence } from "../src/storage/postgres/postgresEconomicIdentityPersistence";
 import { PostgresIdentityPersistence } from "../src/storage/postgres/postgresIdentityPersistence";
 import { PostgresPaymentPersistence } from "../src/storage/postgres/postgresPaymentPersistence";
+import {PostgresSyntheticBetaIdentityStore}from"../src/storage/postgres/postgresSyntheticBetaIdentityStore";import{syntheticBetaIdentity}from"../src/recipients/syntheticBetaIdentity";
 
 const url=process.env.TEST_DATABASE_URL?.trim(); if(!url) throw new Error("TEST_DATABASE_URL is required.");
 const pool=new Pool({connectionString:url,max:12}); const accounts=new PostgresIdentityPersistence(pool);
 const economic=new PostgresEconomicIdentityPersistence(pool); const payments=new PostgresPaymentPersistence(pool);
+const synthetics=new PostgresSyntheticBetaIdentityStore(pool);
 const SENDER="00000000-0000-4000-8000-000000000801", RECIPIENT="00000000-0000-4000-8000-000000000802";
 const ACTOR=`zp:account:${SENDER}`, WALLET="2w2nqMemQzjwKMk3jEmtXnBqGBXGJLs8FNfb5Khb8E7J";
 const NOW="2026-08-05T12:00:00.000Z"; const execFileAsync=promisify(execFile);
@@ -25,7 +27,7 @@ before(async()=>{
   assert.equal(row.rows.length,1); assert.equal(row.rows[0].checksum,createHash("sha256").update(sql).digest("hex"));
 });
 beforeEach(async()=>{
-  await pool.query("TRUNCATE payment_events,payment_receipts,payments,beta_allowlist,economic_identities,payment_destinations,account_security_events,account_sessions,external_identities,accounts RESTART IDENTITY CASCADE");
+  await pool.query("TRUNCATE payment_events,payment_receipts,payments,beta_allowlist,synthetic_beta_identities,economic_identities,payment_destinations,account_security_events,account_sessions,external_identities,accounts RESTART IDENTITY CASCADE");
   await accounts.createAccount({accountId:SENDER,createdAt:NOW}); await accounts.createAccount({accountId:RECIPIENT,createdAt:NOW});
   await payments.createAllowlistEntry({actorSubject:ACTOR});
   const identity=(await economic.upsertEconomicIdentity({accountId:RECIPIENT,accountType:"CREATOR",username:"recent_01",normalizedUsername:"recent_01",displayName:"Recent Creator",discoverability:"USERNAME_ONLY",occurredAt:NOW})).identity;
@@ -62,4 +64,5 @@ describe("PostgreSQL Payment Identity linkage",()=>{
     assert.equal((await payments.listRecentPaymentIdentities(ACTOR,5)).length,1);
     await assert.rejects(()=>payments.claimPaymentIdentityKey(input({idempotencyKey:"identity-key-00000003"})),/RECIPIENT_UNAVAILABLE/);
   });
+  it("persists synthetic linkage without canonical account pollution and excludes it from recents",async()=>{const synthetic=await synthetics.claim(syntheticBetaIdentity("Nova"));const claim=await payments.claimSyntheticPaymentIdentityKey({id:randomUUID(),actorSubject:ACTOR,senderAccountId:SENDER,idempotencyKey:"synthetic-pg-key-01",syntheticId:synthetic.syntheticId,username:synthetic.username,displayName:synthetic.displayName,trustAcknowledged:true,network:"solana-devnet",rail:"solana",asset:"USDC",mintAddress:"mint",amountRaw:2_000_000n,purpose:null,capturedAt:NOW});assert.equal(claim.payment.recipientAccountId,undefined);assert.equal(claim.payment.recipientSyntheticId,synthetic.syntheticId);assert.equal(claim.payment.recipientSnapshot?.identitySource,"SYNTHETIC_BETA");assert.equal((await accounts.findAccount(synthetic.syntheticId)),undefined);await payments.transitionPayment({paymentId:claim.payment.id,expectedVersion:0n,toStatus:"PROCESSING",evidence:{userConfirmedAt:NOW,executionStartedAt:NOW},occurredAt:NOW});assert.deepEqual(await payments.listRecentPaymentIdentities(ACTOR,5),[]);await assert.rejects(()=>pool.query("UPDATE payments SET recipient_synthetic_id=$2 WHERE id=$1",[claim.payment.id,randomUUID()]),/immutable|foreign key/)});
 });

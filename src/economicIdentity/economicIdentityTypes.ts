@@ -59,6 +59,7 @@ export type PublicRecipient = Readonly<{
   verificationState: IdentityVerificationState;
   payabilityState: PayabilityState;
   avatarUrl?: string;
+  identitySource?: "RECIPIENT_DIRECTORY" | "SYNTHETIC_BETA";
 }>;
 
 export type UpsertEconomicIdentityInput = Readonly<{

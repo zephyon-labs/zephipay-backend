@@ -23,6 +23,7 @@ export type ClaimPaymentIdentityInput = Readonly<{
   rail: "solana"; asset: "USDC"; mintAddress: string; amountRaw: bigint;
   purpose: string | null; capturedAt: string;
 }>;
+export type ClaimSyntheticPaymentIdentityInput = Omit<ClaimPaymentIdentityInput,"recipientAccountId"> & Readonly<{syntheticId:string;username:string;displayName:string}>;
 
 export type RecentPaymentIdentity = PaymentIdentitySnapshot;
 
@@ -69,6 +70,7 @@ export interface AllowlistRepository {
 export interface PaymentRepository {
   claimIdempotencyKey(input: CreatePaymentInput): Promise<IdempotencyClaim>;
   claimPaymentIdentityKey(input: ClaimPaymentIdentityInput): Promise<IdempotencyClaim>;
+  claimSyntheticPaymentIdentityKey(input: ClaimSyntheticPaymentIdentityInput): Promise<IdempotencyClaim>;
   findPayment(paymentId: string): Promise<PaymentRecord | undefined>;
   listPaymentsByActor(actorSubject: string, limit: number): Promise<PaymentRecord[]>;
   listRecentPaymentIdentities(actorSubject: string, limit: number): Promise<RecentPaymentIdentity[]>;

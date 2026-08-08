@@ -117,6 +117,7 @@ const databaseUrl = parseDatabaseUrl(
 );
 
 const authEnabled = parseBoolean(process.env.AUTH_ENABLED, false);
+const syntheticBetaIdentitiesRequested = parseBoolean(process.env.SYNTHETIC_BETA_IDENTITIES_ENABLED, false);
 const auth0Issuer = process.env.AUTH0_ISSUER?.trim();
 const auth0Audience = process.env.AUTH0_AUDIENCE?.trim();
 const auth0RequiredScope = process.env.AUTH0_REQUIRED_SCOPE?.trim() || "read:account";
@@ -125,6 +126,9 @@ const auth0WritePaymentsScope = process.env.AUTH0_WRITE_PAYMENTS_SCOPE?.trim() |
 
 if (authEnabled && (!auth0Issuer || !auth0Audience || !postgresEnabled)) {
   throw new Error("AUTH0_ISSUER, AUTH0_AUDIENCE, and POSTGRES_ENABLED=true are required when AUTH_ENABLED=true.");
+}
+if (syntheticBetaIdentitiesRequested && (!authEnabled || !postgresEnabled || parseBoolean(process.env.PAYMENTS_ENABLED,false))) {
+  throw new Error("SYNTHETIC_BETA_IDENTITIES_ENABLED requires authenticated PostgreSQL Mock-only execution with PAYMENTS_ENABLED=false.");
 }
 if (auth0Issuer) {
   const issuerUrl = new URL(auth0Issuer);
@@ -153,6 +157,7 @@ export const environment = Object.freeze({
     process.env.PAYMENTS_ENABLED,
     false,
   ),
+  syntheticBetaIdentitiesEnabled: syntheticBetaIdentitiesRequested,
 
   postgresEnabled,
   databaseUrl,

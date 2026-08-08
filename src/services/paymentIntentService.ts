@@ -8,6 +8,7 @@ import type { PaymentIdentitySnapshot, PaymentRecord } from "../payments/payment
 import { rawUsdcToDisplay, usdcAmountToRaw } from "../payments/paymentIntentValidation";
 import type { PaymentPersistence } from "../storage/storageContracts";
 import { PaymentVersionConflictError } from "../storage/storageContracts";
+import type {SyntheticBetaIdentityStore} from "../recipients/syntheticBetaIdentity";
 
 export const USDC_DEVNET_MINT = "2w2nqMemQzjwKMk3jEmtXnBqGBXGJLs8FNfb5Khb8E7J";
 
@@ -53,6 +54,7 @@ export type PaymentIntentServiceOptions = Readonly<{
   clock?: () => string;
   createId?: () => string;
   mintAddress?: string;
+  syntheticIdentityStore?: SyntheticBetaIdentityStore;
 }>;
 export type CreateIntentServiceInput = Readonly<{
   idempotencyKey: string; amount: string; purpose: string | null;
@@ -65,6 +67,7 @@ export class PaymentIntentService {
   private readonly clock: () => string;
   private readonly createId: () => string;
   private readonly mintAddress: string;
+  private readonly syntheticIdentityStore?: SyntheticBetaIdentityStore;
 
   constructor(
     private readonly accounts: AccountProvisioningService,
@@ -74,6 +77,7 @@ export class PaymentIntentService {
     this.clock = options.clock ?? (() => new Date().toISOString());
     this.createId = options.createId ?? randomUUID;
     this.mintAddress = options.mintAddress ?? USDC_DEVNET_MINT;
+    this.syntheticIdentityStore=options.syntheticIdentityStore;
   }
 
   async create(principal: ExternalPrincipal, input: CreateIntentServiceInput): Promise<Readonly<{ paymentIntent: PublicPaymentIntent; created: boolean }>> {
@@ -84,7 +88,11 @@ export class PaymentIntentService {
     if ("recipientType" in input) {
       let claim;
       try {
-        claim = await this.payments.claimPaymentIdentityKey({
+        const synthetic=await this.syntheticIdentityStore?.findById(input.recipientAccountId);
+        claim = synthetic ? await this.payments.claimSyntheticPaymentIdentityKey({
+          id:this.createId(),actorSubject,senderAccountId:actor.accountId,idempotencyKey:input.idempotencyKey,syntheticId:synthetic.syntheticId,username:synthetic.username,displayName:synthetic.displayName,
+          trustAcknowledged:input.trustAcknowledgment?.acknowledged===true,network:"solana-devnet",rail:"solana",asset:"USDC",mintAddress:this.mintAddress,amountRaw,purpose:input.purpose,capturedAt:this.clock(),
+        }) : await this.payments.claimPaymentIdentityKey({
           id: this.createId(), actorSubject, senderAccountId: actor.accountId,
           idempotencyKey: input.idempotencyKey, recipientAccountId: input.recipientAccountId,
           trustAcknowledged: input.trustAcknowledgment?.acknowledged === true,
@@ -264,7 +272,7 @@ function serializeSnapshot(snapshot: PaymentIdentitySnapshot) {
     accountType: snapshot.accountType.toLowerCase() as Lowercase<PaymentIdentitySnapshot["accountType"]>,
     verificationState: snapshot.verificationState.toLowerCase() as Lowercase<PaymentIdentitySnapshot["verificationState"]>,
     payabilityState: "available" as const, capturedAt: snapshot.capturedAt,
-    schemaVersion: 1 as const, resolutionSource: "recipient_directory" as const,
+    schemaVersion: 1 as const, identitySource: (snapshot.identitySource??"RECIPIENT_DIRECTORY").toLowerCase() as "recipient_directory"|"synthetic_beta", resolutionSource: snapshot.resolutionSource.toLowerCase() as "recipient_directory"|"synthetic_beta",
     trustOutcome: snapshot.trustOutcome.toLowerCase() as "not_required" | "acknowledged",
   };
 }

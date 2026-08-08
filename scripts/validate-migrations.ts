@@ -51,6 +51,7 @@ const EXECUTION_REQUIRED_TOKENS = ["CREATE TABLE payment_executions", "CREATE TA
   "CREATE TABLE payment_execution_events", "payment_executions_protect", "payment_execution_attempts_append_only",
   "payment_execution_events_append_only", "selected_rail='mock'", "UNIQUE REFERENCES payments"];
 const REQUEST_REQUIRED_TOKENS=["CREATE TABLE payment_requests","CREATE TABLE payment_request_events","payment_requests_protect","payment_request_events_append_only","payment_requests_event_guard","payment_requests_mark_paid"];
+const SYNTHETIC_REQUIRED_TOKENS=["CREATE TABLE synthetic_beta_identities","recipient_synthetic_id","SYNTHETIC_BETA","protect_payment_identity_linkage"];
 
 async function main(): Promise<void> {
   const directory = path.resolve(process.cwd(), "migrations");
@@ -83,6 +84,7 @@ async function main(): Promise<void> {
   if(!requestMigration)throw new Error("Payment request migration is missing.");
   const requestSql=await readFile(path.join(directory,requestMigration),"utf8");
   for(const token of REQUEST_REQUIRED_TOKENS)if(!requestSql.includes(token))throw new Error(`Payment request migration is missing required token: ${token}`);
+  const syntheticMigration=files.find(file=>file==="009_synthetic_beta_identities.sql");if(!syntheticMigration)throw new Error("Synthetic beta identity migration is missing.");const syntheticSql=await readFile(path.join(directory,syntheticMigration),"utf8");for(const token of SYNTHETIC_REQUIRED_TOKENS)if(!syntheticSql.includes(token))throw new Error(`Synthetic migration is missing required token: ${token}`);
   for (const [file, sql] of [[files[0], first], [identityMigration, identitySql], [economicIdentityMigration, economicIdentitySql]] as const) {
     if (/\b(?:BEGIN|COMMIT|ROLLBACK)\s*;/i.test(sql)) {
       throw new Error(`Transaction control belongs to the migration runner: ${file}`);
