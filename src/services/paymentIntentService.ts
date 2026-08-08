@@ -54,7 +54,7 @@ export type PaymentIntentServiceOptions = Readonly<{
   createId?: () => string;
   mintAddress?: string;
 }>;
-type CreateIntentServiceInput = Readonly<{
+export type CreateIntentServiceInput = Readonly<{
   idempotencyKey: string; amount: string; purpose: string | null;
 } & ({ recipient: string } | {
   recipientType: "payment_identity"; recipientAccountId: string;

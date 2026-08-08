@@ -34,6 +34,12 @@ export class RecipientDirectoryService {
     return toPublicRecipient(identity);
   }
 
+  async resolveOwnPayableRecipient(accountId: string): Promise<PublicRecipient> {
+    const identity = await this.identities.findEconomicIdentity(accountId.toLowerCase());
+    if (!identity || !await this.isPubliclyResolvable(identity)) throw notFound();
+    return toPublicRecipient(identity);
+  }
+
   async resolvePaymentDestination(requesterAccountId: string, accountId: string): Promise<ResolvedPaymentDestination> {
     const recipient = await this.resolvePublicRecipient(requesterAccountId, accountId);
     const destinations = await this.identities.listPaymentDestinations(recipient.accountId);

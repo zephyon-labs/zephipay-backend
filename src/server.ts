@@ -41,6 +41,9 @@ import { PostgresIdentityPersistence } from "./storage/postgres/postgresIdentity
 import { PostgresEconomicIdentityPersistence } from "./storage/postgres/postgresEconomicIdentityPersistence";
 import { createPaymentPostgresPool } from "./storage/postgres/postgresPool";
 import { x402Middleware } from "./x402/x402Server";
+import { PostgresPaymentRequestRepository } from "./storage/postgres/postgresPaymentRequestRepository";
+import { PaymentRequestService } from "./paymentRequests/paymentRequestService";
+import { createPaymentRequestsRouter } from "./routes/paymentRequests";
 
 const app = express();
 
@@ -115,6 +118,8 @@ if (environment.authEnabled) {
   const paymentIntentService = new PaymentIntentService(accountService, paymentPersistence);
   const executionRepository = new PostgresExecutionRepository(pool);
   const executionService = new PaymentExecutionService(accountService, paymentPersistence, executionRepository);
+  const paymentRequestRepository = new PostgresPaymentRequestRepository(pool);
+  const paymentRequestService = new PaymentRequestService(accountService,paymentPersistence,paymentRequestRepository,recipientDirectoryService,paymentIntentService,executionRepository);
   const executionWorker = new PaymentExecutionWorker(paymentPersistence, executionRepository, `backend-${randomUUID()}`);
   let executionTickActive = false;
   const executionTimer = setInterval(async () => {
@@ -175,6 +180,7 @@ if (environment.authEnabled) {
     writeAuth: createAuthPipeline({ ...authConfiguration, requiredScope: environment.auth0WritePaymentsScope }),
   }));
   app.use("/api/activity", createActivityRouter({ service: executionService, readAuth: executionReadAuth }));
+  app.use("/api/payment-requests", createPaymentRequestsRouter({service:paymentRequestService,rateLimiter:paymentRateLimiter,readAuth:executionReadAuth,writeAuth:createAuthPipeline({...authConfiguration,requiredScope:environment.auth0WritePaymentsScope})}));
 } else {
   app.get("/api/account/me", (_req, res) => res.status(503).set("Cache-Control", "no-store").json({
     ok: false, error: "Authentication is not configured.", requestId: res.locals.requestId,

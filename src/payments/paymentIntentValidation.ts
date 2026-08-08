@@ -78,6 +78,8 @@ function parseAmount(value: unknown): string {
   return value;
 }
 
+export function parseUsdcAmount(value: unknown): string { return parseAmount(value); }
+
 function parsePurpose(value: unknown): string | null {
   if (value === undefined || value === null) return null;
   if (typeof value !== "string") throw new PaymentIntentInputError("Purpose must be a string or null.");

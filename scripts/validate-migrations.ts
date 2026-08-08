@@ -50,6 +50,7 @@ const ECONOMIC_IDENTITY_REQUIRED_TOKENS = [
 const EXECUTION_REQUIRED_TOKENS = ["CREATE TABLE payment_executions", "CREATE TABLE payment_execution_attempts",
   "CREATE TABLE payment_execution_events", "payment_executions_protect", "payment_execution_attempts_append_only",
   "payment_execution_events_append_only", "selected_rail='mock'", "UNIQUE REFERENCES payments"];
+const REQUEST_REQUIRED_TOKENS=["CREATE TABLE payment_requests","CREATE TABLE payment_request_events","payment_requests_protect","payment_request_events_append_only","payment_requests_event_guard","payment_requests_mark_paid"];
 
 async function main(): Promise<void> {
   const directory = path.resolve(process.cwd(), "migrations");
@@ -78,6 +79,10 @@ async function main(): Promise<void> {
   for (const token of EXECUTION_REQUIRED_TOKENS) {
     if (!executionSql.includes(token)) throw new Error(`Execution migration is missing required token: ${token}`);
   }
+  const requestMigration=files.find(file=>file==="008_payment_requests.sql");
+  if(!requestMigration)throw new Error("Payment request migration is missing.");
+  const requestSql=await readFile(path.join(directory,requestMigration),"utf8");
+  for(const token of REQUEST_REQUIRED_TOKENS)if(!requestSql.includes(token))throw new Error(`Payment request migration is missing required token: ${token}`);
   for (const [file, sql] of [[files[0], first], [identityMigration, identitySql], [economicIdentityMigration, economicIdentitySql]] as const) {
     if (/\b(?:BEGIN|COMMIT|ROLLBACK)\s*;/i.test(sql)) {
       throw new Error(`Transaction control belongs to the migration runner: ${file}`);
