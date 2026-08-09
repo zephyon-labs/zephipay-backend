@@ -52,6 +52,7 @@ const EXECUTION_REQUIRED_TOKENS = ["CREATE TABLE payment_executions", "CREATE TA
   "payment_execution_events_append_only", "selected_rail='mock'", "UNIQUE REFERENCES payments"];
 const REQUEST_REQUIRED_TOKENS=["CREATE TABLE payment_requests","CREATE TABLE payment_request_events","payment_requests_protect","payment_request_events_append_only","payment_requests_event_guard","payment_requests_mark_paid"];
 const SYNTHETIC_REQUIRED_TOKENS=["CREATE TABLE synthetic_beta_identities","recipient_synthetic_id","SYNTHETIC_BETA","protect_payment_identity_linkage"];
+const TELEMETRY_EPOCH_REQUIRED_TOKENS=["CREATE TABLE telemetry_epochs","'OPEN_BETA'","2026-08-09T06:09:34.531759Z","telemetry_epochs_append_only"];
 
 async function main(): Promise<void> {
   const directory = path.resolve(process.cwd(), "migrations");
@@ -85,6 +86,7 @@ async function main(): Promise<void> {
   const requestSql=await readFile(path.join(directory,requestMigration),"utf8");
   for(const token of REQUEST_REQUIRED_TOKENS)if(!requestSql.includes(token))throw new Error(`Payment request migration is missing required token: ${token}`);
   const syntheticMigration=files.find(file=>file==="009_synthetic_beta_identities.sql");if(!syntheticMigration)throw new Error("Synthetic beta identity migration is missing.");const syntheticSql=await readFile(path.join(directory,syntheticMigration),"utf8");for(const token of SYNTHETIC_REQUIRED_TOKENS)if(!syntheticSql.includes(token))throw new Error(`Synthetic migration is missing required token: ${token}`);
+  const telemetryEpochMigration=files.find(file=>file==="011_open_beta_telemetry_epoch.sql");if(!telemetryEpochMigration)throw new Error("Open Beta telemetry epoch migration is missing.");const telemetryEpochSql=await readFile(path.join(directory,telemetryEpochMigration),"utf8");for(const token of TELEMETRY_EPOCH_REQUIRED_TOKENS)if(!telemetryEpochSql.includes(token))throw new Error(`Telemetry epoch migration is missing required token: ${token}`);
   for (const [file, sql] of [[files[0], first], [identityMigration, identitySql], [economicIdentityMigration, economicIdentitySql]] as const) {
     if (/\b(?:BEGIN|COMMIT|ROLLBACK)\s*;/i.test(sql)) {
       throw new Error(`Transaction control belongs to the migration runner: ${file}`);

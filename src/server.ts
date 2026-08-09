@@ -45,8 +45,17 @@ import { x402Middleware } from "./x402/x402Server";
 import { PostgresPaymentRequestRepository } from "./storage/postgres/postgresPaymentRequestRepository";
 import { PaymentRequestService } from "./paymentRequests/paymentRequestService";
 import { createPaymentRequestsRouter } from "./routes/paymentRequests";
+import { createOpenBetaActivityRouter } from "./routes/openBetaActivity";
+import { PostgresOpenBetaActivityRepository } from "./storage/postgres/postgresOpenBetaActivityRepository";
+import { OpenBetaActivityService } from "./telemetry/openBetaActivity";
 
 const app = express();
+const postgresPool = environment.postgresEnabled
+  ? createPaymentPostgresPool(environment.databaseUrl as string)
+  : undefined;
+const openBetaActivityService = postgresPool
+  ? new OpenBetaActivityService(new PostgresOpenBetaActivityRepository(postgresPool))
+  : undefined;
 
 if (environment.trustProxy) {
   app.set("trust proxy", 1);
@@ -107,9 +116,10 @@ app.use(
 );
 
 app.use(generalRateLimiter);
+app.use("/api/telemetry", createOpenBetaActivityRouter(openBetaActivityService));
 
 if (environment.authEnabled) {
-  const pool = createPaymentPostgresPool(environment.databaseUrl as string);
+  const pool = postgresPool as NonNullable<typeof postgresPool>;
   const identityPersistence = new PostgresIdentityPersistence(pool);
   const accountService = new AccountProvisioningService(identityPersistence);
   const economicIdentityPersistence = new PostgresEconomicIdentityPersistence(pool);
