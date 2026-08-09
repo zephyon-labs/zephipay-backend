@@ -91,7 +91,7 @@ export class PaymentIntentService {
         const synthetic=await this.syntheticIdentityStore?.findById(input.recipientAccountId);
         claim = synthetic ? await this.payments.claimSyntheticPaymentIdentityKey({
           id:this.createId(),actorSubject,senderAccountId:actor.accountId,idempotencyKey:input.idempotencyKey,syntheticId:synthetic.syntheticId,username:synthetic.username,displayName:synthetic.displayName,
-          trustAcknowledged:input.trustAcknowledgment?.acknowledged===true,network:"solana-devnet",rail:"solana",asset:"USDC",mintAddress:this.mintAddress,amountRaw,purpose:input.purpose,capturedAt:this.clock(),
+          network:"solana-devnet",rail:"solana",asset:"USDC",mintAddress:this.mintAddress,amountRaw,purpose:input.purpose,capturedAt:this.clock(),
         }) : await this.payments.claimPaymentIdentityKey({
           id: this.createId(), actorSubject, senderAccountId: actor.accountId,
           idempotencyKey: input.idempotencyKey, recipientAccountId: input.recipientAccountId,

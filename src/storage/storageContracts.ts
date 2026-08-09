@@ -23,7 +23,7 @@ export type ClaimPaymentIdentityInput = Readonly<{
   rail: "solana"; asset: "USDC"; mintAddress: string; amountRaw: bigint;
   purpose: string | null; capturedAt: string;
 }>;
-export type ClaimSyntheticPaymentIdentityInput = Omit<ClaimPaymentIdentityInput,"recipientAccountId"> & Readonly<{syntheticId:string;username:string;displayName:string}>;
+export type ClaimSyntheticPaymentIdentityInput = Omit<ClaimPaymentIdentityInput,"recipientAccountId"|"trustAcknowledged"> & Readonly<{syntheticId:string;username:string;displayName:string}>;
 
 export type RecentPaymentIdentity = PaymentIdentitySnapshot;
 
