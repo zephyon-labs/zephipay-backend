@@ -5,6 +5,7 @@ import { after, before, beforeEach, describe, it } from "node:test";
 import { Pool } from "pg";
 
 import type { CreatePaymentInput } from "../src/payments/paymentTypes";
+import { actorSubjectForAccount } from "../src/identity/identityTypes";
 import { AccountProvisioningService } from "../src/identity/accountProvisioningService";
 import { PaymentIntentApplicationError, PaymentIntentService } from "../src/services/paymentIntentService";
 import { PostgresIdentityPersistence } from "../src/storage/postgres/postgresIdentityPersistence";
@@ -15,18 +16,23 @@ if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required for PostgreSQL 
 
 const pool = new Pool({ connectionString: databaseUrl, max: 12 });
 const storage = new PostgresPaymentPersistence(pool);
-const accounts = new AccountProvisioningService(new PostgresIdentityPersistence(pool));
+const identityStorage = new PostgresIdentityPersistence(pool);
+const accounts = new AccountProvisioningService(identityStorage);
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
 const NOW = "2026-08-01T12:00:00.000Z";
 const MINT = "integration-mint";
 const RECIPIENT = "integration-recipient";
 const MIGRATION_LOCK_ID = "827346192045711001";
+const INTEGRATION_ACCOUNT_ID = "10000000-0000-4000-8000-000000000001";
+const INTEGRATION_ACCOUNT_TWO_ID = "10000000-0000-4000-8000-000000000002";
+const INTEGRATION_ACTOR = actorSubjectForAccount(INTEGRATION_ACCOUNT_ID);
+const INTEGRATION_ACTOR_TWO = actorSubjectForAccount(INTEGRATION_ACCOUNT_TWO_ID);
 
 function input(overrides: Partial<CreatePaymentInput> = {}): CreatePaymentInput {
   return {
     id: randomUUID(),
-    actorSubject: "integration-actor",
+    actorSubject: INTEGRATION_ACTOR,
     idempotencyKey: `integration-key-${randomUUID()}`,
     requestHash: HASH_A,
     network: "solana-devnet",
@@ -60,9 +66,11 @@ before(async () => {
 });
 
 beforeEach(async () => {
-  await pool.query("TRUNCATE payment_events, payment_receipts, payments, beta_allowlist RESTART IDENTITY CASCADE");
-  await storage.createAllowlistEntry({ actorSubject: "integration-actor" });
-  await storage.createAllowlistEntry({ actorSubject: "integration-actor-two" });
+  await pool.query("TRUNCATE payment_events, payment_receipts, payments, beta_allowlist, accounts RESTART IDENTITY CASCADE");
+  await identityStorage.createAccount({ accountId: INTEGRATION_ACCOUNT_ID, createdAt: NOW });
+  await identityStorage.createAccount({ accountId: INTEGRATION_ACCOUNT_TWO_ID, createdAt: NOW });
+  await storage.createAllowlistEntry({ actorSubject: INTEGRATION_ACTOR });
+  await storage.createAllowlistEntry({ actorSubject: INTEGRATION_ACTOR_TWO });
 });
 
 after(async () => {
