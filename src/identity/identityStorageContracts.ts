@@ -23,6 +23,11 @@ export interface AccountRepository {
 }
 
 export interface ExternalIdentityRepository {
+  /** Resolves the current authoritative account projection without entering provisioning. */
+  findAccountByExternalIdentity(issuer: string, subject: string): Promise<Readonly<{
+    account: Account;
+    identities: ExternalIdentity[];
+  }> | undefined>;
   /** Atomically resolves or creates the canonical account and its first identity link. */
   provisionExternalIdentity(input: ProvisionExternalIdentityInput): Promise<Readonly<{
     account: Account;

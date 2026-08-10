@@ -40,6 +40,23 @@ after(async () => {
 });
 
 describe("PostgreSQL identity foundation", () => {
+  it("resolves a returning identity and all canonical links with one joined projection query", async () => {
+    const issuer = "https://tenant.example/";
+    const subject = "returning-fast-path";
+    const provisioned = await storage.provisionExternalIdentity({
+      accountId: ACCOUNT_A, identityId: randomUUID(), issuer, subject, occurredAt: START,
+    });
+    await storage.linkExternalIdentity({
+      identityId: randomUUID(), accountId: ACCOUNT_A, expectedAccountVersion: provisioned.account.version,
+      issuer: "https://second.example/", subject: "second-link", linkedAt: LATER,
+    });
+
+    const resolved = await storage.findAccountByExternalIdentity(issuer, subject);
+    assert.equal(resolved?.account.accountId, ACCOUNT_A);
+    assert.equal(resolved?.account.status, "ACTIVE");
+    assert.deepEqual(resolved?.identities.map(({ issuer: linkedIssuer }) => linkedIssuer), [issuer, "https://second.example/"]);
+  });
+
   it("atomically provisions one account without orphans under concurrency", async () => {
     const issuer = "https://tenant.example/";
     const subject = "concurrent-first-login";

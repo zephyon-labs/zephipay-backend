@@ -134,6 +134,35 @@ export class PostgresIdentityPersistence implements IdentityPersistence {
     });
   }
 
+  async findAccountByExternalIdentity(issuer: string, subject: string) {
+    validateExternalIdentity(issuer, subject);
+    const result = await this.pool.query(
+      `SELECT account.*,
+         jsonb_agg(jsonb_build_object(
+           'identityId', linked.identity_id,
+           'issuer', linked.issuer,
+           'subject', linked.subject,
+           'accountId', linked.account_id,
+           'linkedAt', linked.linked_at
+         ) ORDER BY linked.linked_at, linked.identity_id) AS linked_identities
+       FROM external_identities matched
+       JOIN accounts account ON account.account_id=matched.account_id
+       JOIN external_identities linked ON linked.account_id=account.account_id
+       WHERE matched.issuer=$1 AND matched.subject=$2
+       GROUP BY account.account_id`,
+      [issuer, subject],
+    );
+    if (!result.rows[0]) return undefined;
+    const identities = (result.rows[0].linked_identities as Array<Record<string, unknown>>).map((identity) => Object.freeze({
+      identityId: String(identity.identityId),
+      issuer: String(identity.issuer),
+      subject: String(identity.subject),
+      accountId: String(identity.accountId),
+      linkedAt: new Date(String(identity.linkedAt)).toISOString(),
+    }));
+    return { account: mapAccount(result.rows[0]), identities };
+  }
+
   async findExternalIdentity(issuer: string, subject: string): Promise<ExternalIdentity | undefined> {
     const result = await this.pool.query(
       "SELECT * FROM external_identities WHERE issuer=$1 AND subject=$2",

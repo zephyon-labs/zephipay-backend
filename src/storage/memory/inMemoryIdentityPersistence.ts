@@ -151,6 +151,18 @@ export class InMemoryIdentityPersistence implements IdentityPersistence {
     });
   }
 
+  async findAccountByExternalIdentity(issuer: string, subject: string) {
+    validateExternalIdentity(issuer, subject);
+    const identityId = this.identityOwners.get(externalIdentityKey(issuer, subject));
+    if (!identityId) return undefined;
+    const identity = this.identities.get(identityId) as ExternalIdentity;
+    const identities = Array.from(this.identities.values())
+      .filter((candidate) => candidate.accountId === identity.accountId)
+      .sort((left, right) => left.linkedAt.localeCompare(right.linkedAt) || left.identityId.localeCompare(right.identityId))
+      .map(cloneIdentity);
+    return { account: cloneAccount(this.requireAccount(identity.accountId)), identities };
+  }
+
   async findExternalIdentity(issuer: string, subject: string): Promise<ExternalIdentity | undefined> {
     const identityId = this.identityOwners.get(externalIdentityKey(issuer, subject));
     const identity = identityId ? this.identities.get(identityId) : undefined;
