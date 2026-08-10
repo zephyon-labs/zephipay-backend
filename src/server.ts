@@ -15,8 +15,9 @@ import { createAuthPipeline } from "./auth/authMiddleware";
 import { AccountProvisioningService } from "./identity/accountProvisioningService";
 import { EconomicIdentityService } from "./economicIdentity/economicIdentityService";
 import {
+  authenticatedReadRateLimiter,
   generalRateLimiter,
-  paymentRateLimiter,
+  paymentMutationRateLimiter,
   sensitiveRateLimiter,
 } from "./middleware/rateLimiter";
 import { requestContext } from "./middleware/requestContext";
@@ -115,8 +116,7 @@ app.use(
   }),
 );
 
-app.use(generalRateLimiter);
-app.use("/api/telemetry", createOpenBetaActivityRouter(openBetaActivityService));
+app.use("/api/telemetry", generalRateLimiter, createOpenBetaActivityRouter(openBetaActivityService));
 
 if (environment.authEnabled) {
   const pool = postgresPool as NonNullable<typeof postgresPool>;
@@ -154,6 +154,7 @@ if (environment.authEnabled) {
       audience: environment.auth0Audience as string,
       requiredScope: environment.auth0RequiredScope,
     }),
+    authenticatedReadRateLimiter,
     createAccountRouter(accountService, paymentPersistence),
     createEconomicIdentityRouter(economicIdentityService),
   );
@@ -174,7 +175,8 @@ if (environment.authEnabled) {
     "/api/payment-intents",
     createPaymentIntentsRouter({
       service: paymentIntentService,
-      rateLimiter: paymentRateLimiter,
+      mutationLimiter: paymentMutationRateLimiter,
+      readLimiter: authenticatedReadRateLimiter,
       readAuth: createAuthPipeline({
         ...authConfiguration,
         requiredScope: environment.auth0ReadPaymentsScope,
@@ -188,11 +190,13 @@ if (environment.authEnabled) {
   const executionReadAuth = createAuthPipeline({ ...authConfiguration, requiredScope: environment.auth0ReadPaymentsScope });
   app.use("/api/payment-intents", createPaymentExecutionsRouter({
     service: executionService,
+    mutationLimiter: paymentMutationRateLimiter,
+    readLimiter: authenticatedReadRateLimiter,
     readAuth: executionReadAuth,
     writeAuth: createAuthPipeline({ ...authConfiguration, requiredScope: environment.auth0WritePaymentsScope }),
   }));
-  app.use("/api/activity", createActivityRouter({ service: executionService, readAuth: executionReadAuth }));
-  app.use("/api/payment-requests", createPaymentRequestsRouter({service:paymentRequestService,rateLimiter:paymentRateLimiter,readAuth:executionReadAuth,writeAuth:createAuthPipeline({...authConfiguration,requiredScope:environment.auth0WritePaymentsScope})}));
+  app.use("/api/activity", createActivityRouter({ service: executionService, readAuth: executionReadAuth, readLimiter: authenticatedReadRateLimiter }));
+  app.use("/api/payment-requests", createPaymentRequestsRouter({service:paymentRequestService,mutationLimiter:paymentMutationRateLimiter,readLimiter:authenticatedReadRateLimiter,readAuth:executionReadAuth,writeAuth:createAuthPipeline({...authConfiguration,requiredScope:environment.auth0WritePaymentsScope})}));
 } else {
   app.get("/api/account/me", (_req, res) => res.status(503).set("Cache-Control", "no-store").json({
     ok: false, error: "Authentication is not configured.", requestId: res.locals.requestId,
@@ -200,6 +204,7 @@ if (environment.authEnabled) {
   app.use("/api/payment-intents", paymentIntentServiceUnavailable);
 }
 
+app.use(generalRateLimiter);
 app.use("/api/protocol", protocolRouter);
 app.use(
   "/api/verify",
@@ -231,7 +236,6 @@ app.get("/", (_req, res) => {
 
 app.post(
   "/api/send",
-  paymentRateLimiter,
   async (_req, res) => {
     const requestId = String(res.locals.requestId);
     return res.status(410).json({ok:false,error:"Legacy direct execution is disabled. Create, confirm, and explicitly execute a Payment Intent.",requestId});

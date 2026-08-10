@@ -184,6 +184,12 @@ export const environment = Object.freeze({
     "PAYMENT_RATE_LIMIT_PER_MINUTE",
   ),
 
+  authenticatedReadRateLimitPerMinute: parsePositiveInteger(
+    process.env.AUTHENTICATED_READ_RATE_LIMIT_PER_MINUTE,
+    120,
+    "AUTHENTICATED_READ_RATE_LIMIT_PER_MINUTE",
+  ),
+
   paymentMaxUsdc: parsePositiveDecimal(
     process.env.PAYMENT_MAX_USDC,
     5,

@@ -227,7 +227,8 @@ describe("payment intent HTTP boundary", () => {
     assert.match(server, /"\/api\/send"/);
     assert.match(server, /Legacy direct execution is disabled/);
     assert.doesNotMatch(server, /executePayment\(/);
-    assert.match(server, /rateLimiter: paymentRateLimiter/);
+    assert.match(server, /mutationLimiter: paymentMutationRateLimiter/);
+    assert.match(server, /readLimiter: authenticatedReadRateLimiter/);
   });
 });
 

@@ -17,7 +17,8 @@ export function createPaymentIntentsRouter(input: Readonly<{
   service: PaymentIntentService;
   readAuth: readonly RequestHandler[];
   writeAuth: readonly RequestHandler[];
-  rateLimiter?: RequestHandler;
+  mutationLimiter?: RequestHandler;
+  readLimiter?: RequestHandler;
 }>): Router {
   const router = Router();
   router.use((_req, res, next) => {
@@ -25,9 +26,7 @@ export function createPaymentIntentsRouter(input: Readonly<{
     res.set("Pragma", "no-cache");
     next();
   });
-  if (input.rateLimiter) router.use(input.rateLimiter);
-
-  router.post("/", ...input.writeAuth, async (req, res) => {
+  router.post("/", ...input.writeAuth, ...(input.mutationLimiter ? [input.mutationLimiter] : []), async (req, res) => {
     try {
       const body = parsePaymentIntentRequest(req.body);
       const result = await input.service.create(externalPrincipalFrom(res), {
@@ -44,7 +43,7 @@ export function createPaymentIntentsRouter(input: Readonly<{
     }
   });
 
-  router.get("/:id", ...input.readAuth, async (req, res) => {
+  router.get("/:id", ...input.readAuth, ...(input.readLimiter ? [input.readLimiter] : []), async (req, res) => {
     try {
       const paymentIntent = await input.service.find(
         externalPrincipalFrom(res),
@@ -56,7 +55,7 @@ export function createPaymentIntentsRouter(input: Readonly<{
     }
   });
 
-  router.post("/:id/confirm", ...input.writeAuth, async (req, res) => {
+  router.post("/:id/confirm", ...input.writeAuth, ...(input.mutationLimiter ? [input.mutationLimiter] : []), async (req, res) => {
     try {
       const confirmation = parseConfirmPaymentIntentRequest(req.body);
       const result = await input.service.confirm(externalPrincipalFrom(res), {

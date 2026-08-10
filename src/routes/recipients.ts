@@ -5,7 +5,6 @@ import { EconomicIdentityInputError } from "../economicIdentity/economicIdentity
 import { AccountAccessDeniedError, AccountProvisioningService } from "../identity/accountProvisioningService";
 import {
   createRecipientDirectoryAccountRateLimiter,
-  createRecipientDirectoryIpRateLimiter,
 } from "../middleware/recipientDirectoryRateLimiter";
 import {
   parseExactSearchRequest,
@@ -22,7 +21,6 @@ export function createRecipientsRouter(accounts: AccountProvisioningService, dir
   router.use((_req, res, next) => {
     res.set("Cache-Control", "no-store, private"); res.set("Pragma", "no-cache"); next();
   });
-  router.use(createRecipientDirectoryIpRateLimiter());
   router.use(async (req: RecipientRequest, res, next) => {
     try {
       req.recipientRequesterAccountId = (await accounts.resolve(externalPrincipalFrom(res))).account.accountId;
