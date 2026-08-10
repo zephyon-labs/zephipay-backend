@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import { observeTransaction, runWithReliabilityContext } from "../../observability/reliabilityObservability";
 import type { CompleteOperationInput, CreateExecutionInput, ExecutionRepository } from "../../executions/executionRepository";
 import type { ExecutionReceipt } from "../../executions/executionReceiptTypes";
 import type { ExecutionAttempt, ExecutionStatus, PaymentExecution } from "../../executions/executionTypes";
@@ -7,7 +8,7 @@ import type { ExecutionAttempt, ExecutionStatus, PaymentExecution } from "../../
 export class PostgresExecutionRepository implements ExecutionRepository {
   constructor(private readonly pool: Pool) {}
 
-  async createOrGet(input: CreateExecutionInput) { return this.tx(async (client) => {
+  async createOrGet(input: CreateExecutionInput) { return runWithReliabilityContext({dbOperation:"EXECUTION_CREATE"},()=>this.tx(async (client) => {
     const result = await client.query(`INSERT INTO payment_executions(execution_id,payment_intent_id,actor_subject,provider_idempotency_key,created_at,updated_at)
       VALUES($1,$2,$3,$4,$5,$5) ON CONFLICT(payment_intent_id) DO NOTHING RETURNING *`,
     [input.executionId,input.paymentIntentId,input.actorSubject,input.providerIdempotencyKey,input.now]);
@@ -17,12 +18,12 @@ export class PostgresExecutionRepository implements ExecutionRepository {
     }
     const existing = await client.query("SELECT * FROM payment_executions WHERE payment_intent_id=$1 FOR UPDATE",[input.paymentIntentId]);
     return { execution: mapExecution(existing.rows[0]), created: false };
-  }); }
+  })); }
 
   async findByPaymentIntent(id: string) { const result = await this.pool.query("SELECT * FROM payment_executions WHERE payment_intent_id=$1",[id]); return result.rows[0] ? mapExecution(result.rows[0]) : undefined; }
   async findReceiptByPaymentIntent(id: string) { const result = await this.pool.query("SELECT * FROM payment_execution_receipts WHERE payment_intent_id=$1",[id]); return result.rows[0] ? mapReceipt(result.rows[0]) : undefined; }
 
-  async claim(statuses: readonly ExecutionStatus[], workerId: string, now: string, leaseExpiresAt: string) { return this.tx(async (client) => {
+  async claim(statuses: readonly ExecutionStatus[], workerId: string, now: string, leaseExpiresAt: string) { return runWithReliabilityContext({dbOperation:"EXECUTION_CLAIM"},()=>this.tx(async (client) => {
     const result = await client.query(`SELECT * FROM payment_executions WHERE status=ANY($1::payment_execution_status[])
       AND (next_attempt_at IS NULL OR next_attempt_at<=$2) AND (lease_expires_at IS NULL OR lease_expires_at<=$2)
       ORDER BY created_at,execution_id FOR UPDATE SKIP LOCKED LIMIT 1`,[statuses,now]);
@@ -36,11 +37,11 @@ export class PostgresExecutionRepository implements ExecutionRepository {
     const execution = mapExecution(updated.rows[0]);
     await appendEvent(client,execution.executionId,operation === "SUBMIT" ? "submission_started" : "reconciliation_pending",current.status,status,now);
     return { execution, attempt: { attemptId: randomUUID(), executionId: execution.executionId, attemptNumber: execution.attemptCount, operation, startedAt: now } };
-  }); }
+  })); }
 
-  async complete(input: CompleteOperationInput) { return this.tx((client) => this.completeInTransaction(client,input)); }
+  async complete(input: CompleteOperationInput) { return runWithReliabilityContext({dbOperation:input.operation==="RECONCILE"?"EXECUTION_RECONCILE":"EXECUTION_COMPLETE"},()=>this.tx((client) => this.completeInTransaction(client,input))); }
 
-  async completeSettlement(input: Readonly<{ completion: CompleteOperationInput; receipt: ExecutionReceipt }>) { return this.tx(async (client) => {
+  async completeSettlement(input: Readonly<{ completion: CompleteOperationInput; receipt: ExecutionReceipt }>) { return runWithReliabilityContext({dbOperation:"EXECUTION_COMPLETE"},()=>this.tx(async (client) => {
     if (input.completion.toStatus !== "SETTLED") throw new Error("Settlement completion must be SETTLED.");
     const existing = await client.query("SELECT * FROM payment_execution_receipts WHERE execution_id=$1 FOR SHARE",[input.completion.executionId]);
     if (existing.rows[0]) {
@@ -61,7 +62,7 @@ export class PostgresExecutionRepository implements ExecutionRepository {
       input.receipt.requestHash,input.receipt.createdAt]);
     await appendEvent(client,execution.executionId,"receipt_created","SETTLED","SETTLED",input.receipt.createdAt);
     return { execution, receipt: mapReceipt(receiptResult.rows[0]) };
-  }); }
+  })); }
 
   async listAttempts(id: string): Promise<ExecutionAttempt[]> { const result = await this.pool.query("SELECT * FROM payment_execution_attempts WHERE execution_id=$1 ORDER BY attempt_number",[id]); return result.rows.map((row) => ({ attemptId:String(row.attempt_id),executionId:String(row.execution_id),attemptNumber:Number(row.attempt_number),operation:row.operation,startedAt:iso(row.started_at)!,completedAt:iso(row.completed_at),outcome:row.outcome??undefined,failureCode:row.failure_code??undefined,sideEffect:row.side_effect??undefined,recoveryAction:row.recovery_action??undefined,evidence:row.evidence??undefined })); }
 
@@ -88,7 +89,7 @@ export class PostgresExecutionRepository implements ExecutionRepository {
     return execution;
   }
 
-  private async tx<T>(fn: (client: PoolClient) => Promise<T>) { const client=await this.pool.connect(); try { await client.query("BEGIN"); const value=await fn(client); await client.query("COMMIT"); return value; } catch(error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); } }
+  private async tx<T>(fn: (client: PoolClient) => Promise<T>) { const client=await this.pool.connect(); try { return await observeTransaction(this.pool,async()=>{try{await client.query("BEGIN");const value=await fn(client);await client.query("COMMIT");return value}catch(error){await client.query("ROLLBACK");throw error}}); } finally { client.release(); } }
 }
 
 async function appendEvent(client: PoolClient, executionId: string, eventTypeValue: string, fromStatus: ExecutionStatus | null, toStatus: ExecutionStatus, occurredAt: string) {

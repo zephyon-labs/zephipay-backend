@@ -8,6 +8,7 @@ import { environment } from "../config/environment";
 function safeHandler(category: string, error: string): NonNullable<Options["handler"]> {
   return (req, res, _next, options) => {
     const requestId = String(res.locals.requestId || "unknown");
+    res.locals.limiterCategory = category;
     console.warn("Request rate limited.", {
       category,
       method: req.method,

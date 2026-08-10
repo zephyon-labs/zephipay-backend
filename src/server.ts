@@ -49,6 +49,7 @@ import { createPaymentRequestsRouter } from "./routes/paymentRequests";
 import { createOpenBetaActivityRouter } from "./routes/openBetaActivity";
 import { PostgresOpenBetaActivityRepository } from "./storage/postgres/postgresOpenBetaActivityRepository";
 import { OpenBetaActivityService } from "./telemetry/openBetaActivity";
+import { classifyDatabaseError, elapsed, emitReliabilityLog, observeDatabaseFailure, recordCounter, recordTiming, runWithReliabilityContext } from "./observability/reliabilityObservability";
 
 const app = express();
 const postgresPool = environment.postgresEnabled
@@ -137,11 +138,31 @@ if (environment.authEnabled) {
   const executionTimer = setInterval(async () => {
     if (executionTickActive) return;
     executionTickActive = true;
+    const tickStarted = performance.now();
+    recordCounter("worker.tick");
     try {
-      await executionWorker.processNext();
-      await executionWorker.reconcileNext();
+      const processStarted=performance.now();
+      const processed=await runWithReliabilityContext({dbOperation:"EXECUTION_CLAIM"},()=>executionWorker.processNext());
+      const processDuration=elapsed(processStarted);
+      recordTiming("worker.operation.duration",processDuration,{operation:"process"});
+      recordCounter("worker.claim",{operation:"process",outcome:processed?"claimed":"empty"});
+      if(processed)recordCounter("worker.outcome",{status:processed.status.toLowerCase()});
+      const reconcileStarted=performance.now();
+      const reconciled=await runWithReliabilityContext({dbOperation:"EXECUTION_RECONCILE"},()=>executionWorker.reconcileNext());
+      const reconcileDuration=elapsed(reconcileStarted);
+      recordTiming("worker.operation.duration",reconcileDuration,{operation:"reconcile"});
+      recordCounter("worker.claim",{operation:"reconcile",outcome:reconciled?"claimed":"empty"});
+      if(reconciled)recordCounter("worker.outcome",{status:reconciled.status.toLowerCase()});
     } catch (error) {
-      console.error("Mock execution worker tick failed.", { error: error instanceof Error ? error.message : "Unknown worker error" });
+      const dbFailure=classifyDatabaseError(error);
+      recordCounter("worker.failure",{category:dbFailure});
+      emitReliabilityLog("error","worker_tick_failed",{dbFailure,phase:"tick",durationMs:elapsed(tickStarted)});
+      if(dbFailure!=="DB_UNKNOWN")observeDatabaseFailure(error,postgresPool as NonNullable<typeof postgresPool>,"worker_tick");
+      console.error("Mock execution worker tick failed.", {
+        error: dbFailure !== "DB_UNKNOWN"
+          ? dbFailure
+          : error instanceof Error ? error.message : "Unknown worker error",
+      });
     } finally {
       executionTickActive = false;
     }
@@ -252,6 +273,11 @@ app.use(
     const requestId = String(
       res.locals.requestId || "unknown",
     );
+    const dbFailure=classifyDatabaseError(error);
+    if(postgresPool&&dbFailure!=="DB_UNKNOWN"){
+      res.locals.safeErrorCategory=dbFailure;
+      observeDatabaseFailure(error,postgresPool,"http_error");
+    }
 
     if (
       error instanceof SyntaxError &&
@@ -290,7 +316,9 @@ app.use(
     console.error("Unhandled API error.", {
       requestId,
       error:
-        error instanceof Error
+        dbFailure !== "DB_UNKNOWN"
+          ? dbFailure
+          : error instanceof Error
           ? error.message
           : "Unknown server error",
     });

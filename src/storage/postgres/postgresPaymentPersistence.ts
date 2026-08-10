@@ -1,5 +1,7 @@
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 
+import { observeTransaction } from "../../observability/reliabilityObservability";
+
 import type { AllowlistEntry, CreateAllowlistEntryInput } from "../../allowlist/allowlistEntry";
 import {
   eventTypeForTransition,
@@ -376,13 +378,17 @@ export class PostgresPaymentPersistence implements PaymentPersistence {
   private async transaction<T>(operation: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
     try {
-      await client.query("BEGIN");
-      const result = await operation(client);
-      await client.query("COMMIT");
-      return result;
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
+      return await observeTransaction(this.pool, async () => {
+        try {
+          await client.query("BEGIN");
+          const result = await operation(client);
+          await client.query("COMMIT");
+          return result;
+        } catch (error) {
+          await client.query("ROLLBACK");
+          throw error;
+        }
+      });
     } finally {
       client.release();
     }

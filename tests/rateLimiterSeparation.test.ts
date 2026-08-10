@@ -5,11 +5,14 @@ import express from "express";
 
 import { authenticatedReadRateLimiter, paymentMutationRateLimiter } from "../src/middleware/rateLimiter";
 import { requestContext } from "../src/middleware/requestContext";
+import { setReliabilityLogSinkForTest } from "../src/observability/reliabilityObservability";
 
 let baseUrl = "";
 let closeServer: (() => Promise<void>) | undefined;
+const reliabilityLogs: Array<{event:string;fields:Record<string,unknown>}>=[];
 
 before(async () => {
+  setReliabilityLogSinkForTest((_level,event,fields)=>reliabilityLogs.push({event,fields:fields as Record<string,unknown>}));
   const app = express();
   app.use(requestContext, (req, res, next) => {
     res.locals.externalPrincipal = { issuer: "https://issuer.example/", providerSubject: String(req.header("x-test-principal")), scopes: [] };
@@ -25,7 +28,7 @@ before(async () => {
   closeServer = () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 });
 
-after(async () => closeServer?.());
+after(async () => {await closeServer?.();setReliabilityLogSinkForTest()});
 
 describe("authenticated payment limiter separation", () => {
   it("does not let one principal consume another principal's mutation allowance", async () => {
@@ -34,6 +37,7 @@ describe("authenticated payment limiter separation", () => {
     assert.equal(limited.status, 429);
     const body = await limited.json() as { requestId?: string };
     assert.equal(typeof body.requestId, "string");
+    assert.ok(reliabilityLogs.some(entry=>entry.event==="http_request_completed"&&entry.fields.status===429&&entry.fields.limiterCategory==="payment-mutation"));
     assert.equal((await request("/mutate", "POST", "principal-b")).status, 200);
   });
 

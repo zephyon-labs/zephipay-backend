@@ -1,5 +1,7 @@
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 
+import { observeTransaction } from "../../observability/reliabilityObservability";
+
 import type { EconomicIdentity, PaymentDestination } from "../../economicIdentity/economicIdentityTypes";
 import type { EconomicIdentityPersistence } from "../../economicIdentity/economicIdentityStorageContracts";
 import {
@@ -127,8 +129,7 @@ export class PostgresEconomicIdentityPersistence implements EconomicIdentityPers
 
   private async transaction<T>(operation: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
-    try { await client.query("BEGIN"); const result = await operation(client); await client.query("COMMIT"); return result; }
-    catch (error) { await client.query("ROLLBACK"); throw error; }
+    try { return await observeTransaction(this.pool,async()=>{try{await client.query("BEGIN");const result=await operation(client);await client.query("COMMIT");return result}catch(error){await client.query("ROLLBACK");throw error}}); }
     finally { client.release(); }
   }
 }
