@@ -55,8 +55,10 @@ import { PostgresActivityRepository } from "./storage/postgres/postgresActivityR
 import { ReadinessService } from "./health/readiness";
 import { createHealthRouter } from "./routes/health";
 import { GracefulShutdownCoordinator } from "./lifecycle/gracefulShutdown";
+import { localHarnessAuth } from "./auth/localHarnessAuth";
 
 const app = express();
+const harnessAuth = localHarnessAuth();
 let executionLoop: AdaptiveWorkerLoop | undefined;
 const postgresPool = environment.postgresEnabled
   ? createPaymentPostgresPool(environment.databaseUrl as string)
@@ -141,7 +143,7 @@ if (environment.authEnabled) {
   const executionService = new PaymentExecutionService(accountService, paymentPersistence, executionRepository,undefined,undefined,new PostgresActivityRepository(pool));
   const paymentRequestRepository = new PostgresPaymentRequestRepository(pool);
   const paymentRequestService = new PaymentRequestService(accountService,paymentPersistence,paymentRequestRepository,recipientDirectoryService,paymentIntentService,executionRepository);
-  const executionWorker = new PaymentExecutionWorker(paymentPersistence, executionRepository, `backend-${randomUUID()}`);
+  const executionWorker = new PaymentExecutionWorker(paymentPersistence, executionRepository, `backend-${randomUUID()}`,harnessAuth?.mockScenario);
   executionLoop = new AdaptiveWorkerLoop(async () => {
     const tickStarted = performance.now();
     recordCounter("worker.tick");
@@ -179,6 +181,7 @@ if (environment.authEnabled) {
       issuer: environment.auth0Issuer as string,
       audience: environment.auth0Audience as string,
       requiredScope: environment.auth0RequiredScope,
+      ...(harnessAuth?{publicKey:harnessAuth.publicKey}:{}),
     }),
     authenticatedReadRateLimiter,
     createAccountRouter(accountService, paymentPersistence),
@@ -190,12 +193,14 @@ if (environment.authEnabled) {
       issuer: environment.auth0Issuer as string,
       audience: environment.auth0Audience as string,
       requiredScope: environment.auth0RequiredScope,
+      ...(harnessAuth?{publicKey:harnessAuth.publicKey}:{}),
     }),
     createRecipientsRouter(accountService, recipientDirectoryService, paymentIntentService),
   );
   const authConfiguration = {
     issuer: environment.auth0Issuer as string,
     audience: environment.auth0Audience as string,
+    ...(harnessAuth?{publicKey:harnessAuth.publicKey}:{}),
   };
   app.use(
     "/api/payment-intents",
@@ -361,3 +366,5 @@ const shutdownCoordinator=new GracefulShutdownCoordinator(
 );
 process.on("SIGTERM",()=>{void shutdownCoordinator.shutdown("SIGTERM");});
 process.on("SIGINT",()=>{void shutdownCoordinator.shutdown("SIGINT");});
+
+export const runningBackend = Object.freeze({ app, server, postgresPool, readinessService, shutdownCoordinator });

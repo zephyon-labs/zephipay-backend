@@ -1,0 +1,1 @@
+import {get,principal,smokeOptions} from "./shared.js";export const options=smokeOptions;export default function(){const p=principal();get("/api/account/me",p.account,"account_me");get("/api/account/identity",p.account,"payment_identity");get("/api/activity?limit=10",p.read,"activity_read");}

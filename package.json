@@ -8,9 +8,11 @@
     "build": "tsc",
     "lint": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "test:postgres": "tsx --test --test-concurrency=1 tests/postgresPaymentFoundation.integration.ts tests/postgresIdentityFoundation.integration.ts tests/postgresEconomicIdentity.integration.ts tests/postgresPaymentIdentity.integration.ts tests/postgresExecution.integration.ts tests/postgresPaymentRequests.integration.ts tests/postgresOpenBetaActivity.integration.ts tests/postgresActivity.integration.ts",
+    "test:postgres": "tsx --test --test-concurrency=1 tests/postgresPaymentFoundation.integration.ts tests/postgresIdentityFoundation.integration.ts tests/postgresEconomicIdentity.integration.ts tests/postgresPaymentIdentity.integration.ts tests/postgresExecution.integration.ts tests/postgresPaymentRequests.integration.ts tests/postgresOpenBetaActivity.integration.ts tests/postgresActivity.integration.ts tests/r4Invariants.integration.ts",
     "migrate": "tsx scripts/run-migrations.ts",
     "migrate:validate": "tsx scripts/validate-migrations.ts",
+    "r4:stage0": "npm run build && tsx scripts/r4/run-local.ts stage0",
+    "r4:smoke": "npm run build && tsx scripts/r4/run-local.ts smoke",
     "start": "node dist/server.js",
     "x402:client": "ts-node-dev --transpile-only ./scripts/x402-fetch-client.ts"
   },
