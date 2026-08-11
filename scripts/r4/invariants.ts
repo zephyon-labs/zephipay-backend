@@ -15,7 +15,7 @@ const checks = Object.freeze([
   ["duplicate_receipt_effect", `SELECT count(*)::int n FROM (SELECT execution_id FROM payment_execution_events WHERE event_type='receipt_created' GROUP BY 1 HAVING count(*)>1) x`],
 ] as const);
 
-export async function verifyEconomicInvariants(pool: Pick<Pool,"query">, options: Readonly<{expectedUnresolved?:number;crossAccountReadsDenied?:boolean;expectedPayments?:readonly Readonly<{actorSubject:string;idempotencyKey:string}>[];expectedSettledIntentIds?:readonly string[]}> = {}): Promise<InvariantReport> {
+export async function verifyEconomicInvariants(pool: Pick<Pool,"query">, options: Readonly<{expectedUnresolved?:number;expectedPaymentCount?:number;crossAccountReadsDenied?:boolean;expectedPayments?:readonly Readonly<{actorSubject:string;idempotencyKey:string}>[];expectedSettledIntentIds?:readonly string[]}> = {}): Promise<InvariantReport> {
   const violations: InvariantViolation[]=[];
   for (const [name,sql] of checks) {
     const result=await pool.query(sql); const count=Number(result.rows[0]?.n??0);
@@ -23,6 +23,7 @@ export async function verifyEconomicInvariants(pool: Pick<Pool,"query">, options
   }
   const unresolved=Number((await pool.query(`SELECT count(*)::int n FROM payment_executions WHERE status NOT IN ('SETTLED','FAILED','CANCELLED')`)).rows[0]?.n??0);
   if(unresolved!==(options.expectedUnresolved??0))violations.push(Object.freeze({name:"unexpected_unresolved_executions",count:unresolved}));
+  if(options.expectedPaymentCount!==undefined){const count=Number((await pool.query("SELECT count(*)::int n FROM payments")).rows[0]?.n??0);if(count!==options.expectedPaymentCount)violations.push(Object.freeze({name:"expected_total_payment_count",count}));}
   for(const expected of options.expectedPayments??[]){const count=Number((await pool.query("SELECT count(*)::int n FROM payments WHERE actor_subject=$1 AND idempotency_key=$2",[expected.actorSubject,expected.idempotencyKey])).rows[0]?.n??0);if(count!==1)violations.push(Object.freeze({name:"expected_payment_record_count",count}));}
   for(const intentId of options.expectedSettledIntentIds??[]){const result=await pool.query(`SELECT count(DISTINCT e.execution_id)::int executions,count(DISTINCT r.receipt_id)::int receipts,count(*) FILTER (WHERE ev.event_type='execution_settled')::int settlements,count(*) FILTER (WHERE ev.event_type='receipt_created')::int receipt_effects FROM payment_executions e LEFT JOIN payment_execution_receipts r ON r.execution_id=e.execution_id LEFT JOIN payment_execution_events ev ON ev.execution_id=e.execution_id WHERE e.payment_intent_id=$1 AND e.status='SETTLED'`,[intentId]);const row=result.rows[0]??{};for(const [name,value] of [["expected_settled_execution_count",row.executions],["expected_receipt_count",row.receipts],["expected_settlement_effect_count",row.settlements],["expected_receipt_effect_count",row.receipt_effects]] as const){const count=Number(value??0);if(count!==1)violations.push(Object.freeze({name,count}));}}
   if(options.crossAccountReadsDenied===false)violations.push(Object.freeze({name:"cross_account_read_exposed",count:1}));

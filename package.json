@@ -13,6 +13,10 @@
     "migrate:validate": "tsx scripts/validate-migrations.ts",
     "r4:stage0": "npm run build && tsx scripts/r4/run-local.ts stage0",
     "r4:smoke": "npm run build && tsx scripts/r4/run-local.ts smoke",
+    "r4:baseline:read": "npm run build && tsx scripts/r4/run-local.ts baseline-read",
+    "r4:baseline:write": "npm run build && tsx scripts/r4/run-local.ts baseline-write",
+    "r4:stage2:read": "npm run build && tsx scripts/r4/run-local.ts stage2-read",
+    "r4:fault-gates": "npm run build && tsx scripts/r4/run-local.ts fault-gates",
     "start": "node dist/server.js",
     "x402:client": "ts-node-dev --transpile-only ./scripts/x402-fetch-client.ts"
   },
