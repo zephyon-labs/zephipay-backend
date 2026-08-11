@@ -1,0 +1,52 @@
+export const WORKER_POLL_DELAYS_MS = Object.freeze([100, 250, 500, 1_000, 2_000] as const);
+
+type TimerHandle = ReturnType<typeof setTimeout>;
+
+export class AdaptiveWorkerLoop {
+  private timer: TimerHandle | undefined;
+  private stopped = true;
+  private delayIndex = 0;
+
+  constructor(
+    private readonly iteration: () => Promise<boolean>,
+    private readonly observeDelay: (delayMs: number, outcome: "work" | "idle" | "failure") => void = () => undefined,
+    private readonly schedule: (callback: () => void, delayMs: number) => TimerHandle = setTimeout,
+    private readonly cancel: (handle: TimerHandle) => void = clearTimeout,
+  ) {}
+
+  start(): void {
+    if (!this.stopped) return;
+    this.stopped = false;
+    this.delayIndex = 0;
+    this.scheduleNext(WORKER_POLL_DELAYS_MS[this.delayIndex]);
+  }
+
+  stop(): void {
+    this.stopped = true;
+    if (this.timer !== undefined) this.cancel(this.timer);
+    this.timer = undefined;
+  }
+
+  private scheduleNext(delayMs: number): void {
+    if (this.stopped) return;
+    this.timer = this.schedule(() => { void this.run(); }, delayMs);
+    (this.timer as TimerHandle & { unref?: () => void }).unref?.();
+  }
+
+  private async run(): Promise<void> {
+    this.timer = undefined;
+    let outcome: "work" | "idle" | "failure";
+    try {
+      outcome = await this.iteration() ? "work" : "idle";
+    } catch {
+      outcome = "failure";
+    }
+    if (this.stopped) return;
+    this.delayIndex = outcome === "work"
+      ? 0
+      : Math.min(this.delayIndex + 1, WORKER_POLL_DELAYS_MS.length - 1);
+    const delayMs = WORKER_POLL_DELAYS_MS[this.delayIndex];
+    try { this.observeDelay(delayMs, outcome); } catch { /* Observability cannot stop polling. */ }
+    this.scheduleNext(delayMs);
+  }
+}

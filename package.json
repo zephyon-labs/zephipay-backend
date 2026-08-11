@@ -8,7 +8,7 @@
     "build": "tsc",
     "lint": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "test:postgres": "tsx --test --test-concurrency=1 tests/postgresPaymentFoundation.integration.ts tests/postgresIdentityFoundation.integration.ts tests/postgresEconomicIdentity.integration.ts tests/postgresPaymentIdentity.integration.ts tests/postgresExecution.integration.ts tests/postgresPaymentRequests.integration.ts tests/postgresOpenBetaActivity.integration.ts",
+    "test:postgres": "tsx --test --test-concurrency=1 tests/postgresPaymentFoundation.integration.ts tests/postgresIdentityFoundation.integration.ts tests/postgresEconomicIdentity.integration.ts tests/postgresPaymentIdentity.integration.ts tests/postgresExecution.integration.ts tests/postgresPaymentRequests.integration.ts tests/postgresOpenBetaActivity.integration.ts tests/postgresActivity.integration.ts",
     "migrate": "tsx scripts/run-migrations.ts",
     "migrate:validate": "tsx scripts/validate-migrations.ts",
     "start": "node dist/server.js",

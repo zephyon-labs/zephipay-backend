@@ -50,8 +50,11 @@ import { createOpenBetaActivityRouter } from "./routes/openBetaActivity";
 import { PostgresOpenBetaActivityRepository } from "./storage/postgres/postgresOpenBetaActivityRepository";
 import { OpenBetaActivityService } from "./telemetry/openBetaActivity";
 import { classifyDatabaseError, elapsed, emitReliabilityLog, observeDatabaseFailure, recordCounter, recordTiming, runWithReliabilityContext } from "./observability/reliabilityObservability";
+import { AdaptiveWorkerLoop } from "./executions/adaptiveWorkerLoop";
+import { PostgresActivityRepository } from "./storage/postgres/postgresActivityRepository";
 
 const app = express();
+let executionLoop: AdaptiveWorkerLoop | undefined;
 const postgresPool = environment.postgresEnabled
   ? createPaymentPostgresPool(environment.databaseUrl as string)
   : undefined;
@@ -130,14 +133,11 @@ if (environment.authEnabled) {
   const paymentPersistence = new PostgresPaymentPersistence(pool);
   const paymentIntentService = new PaymentIntentService(accountService, paymentPersistence, {syntheticIdentityStore});
   const executionRepository = new PostgresExecutionRepository(pool);
-  const executionService = new PaymentExecutionService(accountService, paymentPersistence, executionRepository);
+  const executionService = new PaymentExecutionService(accountService, paymentPersistence, executionRepository,undefined,undefined,new PostgresActivityRepository(pool));
   const paymentRequestRepository = new PostgresPaymentRequestRepository(pool);
   const paymentRequestService = new PaymentRequestService(accountService,paymentPersistence,paymentRequestRepository,recipientDirectoryService,paymentIntentService,executionRepository);
   const executionWorker = new PaymentExecutionWorker(paymentPersistence, executionRepository, `backend-${randomUUID()}`);
-  let executionTickActive = false;
-  const executionTimer = setInterval(async () => {
-    if (executionTickActive) return;
-    executionTickActive = true;
+  executionLoop = new AdaptiveWorkerLoop(async () => {
     const tickStarted = performance.now();
     recordCounter("worker.tick");
     try {
@@ -153,6 +153,7 @@ if (environment.authEnabled) {
       recordTiming("worker.operation.duration",reconcileDuration,{operation:"reconcile"});
       recordCounter("worker.claim",{operation:"reconcile",outcome:reconciled?"claimed":"empty"});
       if(reconciled)recordCounter("worker.outcome",{status:reconciled.status.toLowerCase()});
+      return processed!==undefined||reconciled!==undefined;
     } catch (error) {
       const dbFailure=classifyDatabaseError(error);
       recordCounter("worker.failure",{category:dbFailure});
@@ -163,11 +164,10 @@ if (environment.authEnabled) {
           ? dbFailure
           : error instanceof Error ? error.message : "Unknown worker error",
       });
-    } finally {
-      executionTickActive = false;
+      throw error;
     }
-  }, 1_000);
-  executionTimer.unref();
+  },(delayMs,outcome)=>{recordCounter("worker.schedule",{outcome,phase:delayMs===2_000?"max_backoff":"backoff"});});
+  executionLoop.start();
   app.use(
     "/api/account",
     ...createAuthPipeline({
@@ -331,7 +331,7 @@ app.use(
   },
 );
 
-app.listen(environment.port, () => {
+const server = app.listen(environment.port, () => {
   console.log(
     `ZephiPay backend running on port ${environment.port}`,
   );
@@ -343,3 +343,4 @@ app.listen(environment.port, () => {
       environment.corsAllowedOrigins.length,
   });
 });
+server.on("close",()=>executionLoop?.stop());

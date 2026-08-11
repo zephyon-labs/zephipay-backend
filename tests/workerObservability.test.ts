@@ -3,10 +3,11 @@ import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 
 describe("Mock worker observability boundary",()=>{
-  it("records ticks, claim timing, empty/successful claims, outcomes, and failures without changing cadence",async()=>{
+  it("records ticks, claim timing, empty/successful claims, outcomes, failures, and adaptive cadence",async()=>{
     const source=await readFile(new URL("../src/server.ts",import.meta.url),"utf8");
-    assert.match(source,/setInterval\(async \(\) =>/);
-    assert.match(source,/}, 1_000\)/);
+    assert.match(source,/new AdaptiveWorkerLoop\(async \(\) =>/);
+    assert.match(source,/executionLoop\.start\(\)/);
+    assert.match(source,/server\.on\("close",\(\)=>executionLoop\?\.stop\(\)\)/);
     assert.match(source,/recordCounter\("worker\.tick"\)/);
     assert.match(source,/recordTiming\("worker\.operation\.duration"/);
     assert.match(source,/recordCounter\("worker\.claim"/);
@@ -14,6 +15,7 @@ describe("Mock worker observability boundary",()=>{
     assert.match(source,/recordCounter\("worker\.outcome"/);
     assert.match(source,/recordCounter\("worker\.failure"/);
     assert.match(source,/worker_tick_failed/);
+    assert.match(source,/recordCounter\("worker\.schedule"/);
     assert.doesNotMatch(source,/queueDepth|pg_stat_activity/);
   });
 
