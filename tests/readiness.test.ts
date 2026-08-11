@@ -1,0 +1,13 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { ReadinessService } from "../src/health/readiness";
+
+function deferred<T>(){let resolve!:(value:T)=>void,reject!:(error:Error)=>void;const promise=new Promise<T>((r,j)=>{resolve=r;reject=j;});return{promise,resolve,reject};}
+function pool(query:()=>Promise<unknown>,state={idleCount:1,totalCount:1,max:10}){return{query,idleCount:state.idleCount,totalCount:state.totalCount,options:{max:state.max}} as any;}
+
+test("readiness succeeds for a healthy DB and supported local mode",async()=>{let config:any;const service=new ReadinessService(pool(async(input?:any)=>{config=input;return{};}));assert.deepEqual(await service.check(),{ready:true,reason:"ready"});assert.deepEqual(config,{text:"SELECT 1",query_timeout:2_000});assert.deepEqual(await new ReadinessService().check(),{ready:true,reason:"local"});});
+test("readiness reports unavailable DB without exposing its error",async()=>{const service=new ReadinessService(pool(async()=>{throw new Error("sensitive database detail");}));assert.deepEqual(await service.check(),{ready:false,reason:"unavailable"});});
+test("readiness fails immediately rather than queueing when the pool is saturated",async()=>{let calls=0;const service=new ReadinessService(pool(async()=>{calls++;return{};},{idleCount:0,totalCount:10,max:10}));assert.deepEqual(await service.check(),{ready:false,reason:"saturated"});assert.equal(calls,0);});
+test("readiness shares one raw probe across concurrent callers",async()=>{const probe=deferred<unknown>();let calls=0;const service=new ReadinessService(pool(()=>{calls++;return probe.promise;}));const one=service.check(),two=service.check();assert.equal(calls,1);probe.resolve({});assert.deepEqual(await Promise.all([one,two]),[{ready:true,reason:"ready"},{ready:true,reason:"ready"}]);});
+test("application deadline retains the underlying single-flight probe until it settles",async()=>{const probe=deferred<unknown>();let calls=0;const timers:Array<()=>void>=[];const service=new ReadinessService(pool(()=>{calls++;return probe.promise;}),()=>undefined,((callback:()=>void)=>{timers.push(callback);return{} as any;}) as any,()=>undefined);const first=service.check();timers[0]();assert.deepEqual(await first,{ready:false,reason:"timeout"});const second=service.check();assert.equal(calls,1);probe.resolve({});assert.deepEqual(await second,{ready:true,reason:"ready"});});
+test("shutdown state makes readiness immediately unavailable",async()=>{let calls=0;const service=new ReadinessService(pool(async()=>{calls++;return{};}));service.markShuttingDown();assert.deepEqual(await service.check(),{ready:false,reason:"shutting_down"});assert.equal(calls,0);});

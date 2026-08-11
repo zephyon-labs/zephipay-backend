@@ -52,12 +52,16 @@ import { OpenBetaActivityService } from "./telemetry/openBetaActivity";
 import { classifyDatabaseError, elapsed, emitReliabilityLog, observeDatabaseFailure, recordCounter, recordTiming, runWithReliabilityContext } from "./observability/reliabilityObservability";
 import { AdaptiveWorkerLoop } from "./executions/adaptiveWorkerLoop";
 import { PostgresActivityRepository } from "./storage/postgres/postgresActivityRepository";
+import { ReadinessService } from "./health/readiness";
+import { createHealthRouter } from "./routes/health";
+import { GracefulShutdownCoordinator } from "./lifecycle/gracefulShutdown";
 
 const app = express();
 let executionLoop: AdaptiveWorkerLoop | undefined;
 const postgresPool = environment.postgresEnabled
   ? createPaymentPostgresPool(environment.databaseUrl as string)
   : undefined;
+const readinessService=new ReadinessService(postgresPool,(result)=>recordCounter("readiness.check",{outcome:result.ready?"success":"failure",reason:result.reason}));
 const openBetaActivityService = postgresPool
   ? new OpenBetaActivityService(new PostgresOpenBetaActivityRepository(postgresPool))
   : undefined;
@@ -120,6 +124,7 @@ app.use(
   }),
 );
 
+app.use("/health",createHealthRouter(readinessService));
 app.use("/api/telemetry", generalRateLimiter, createOpenBetaActivityRouter(openBetaActivityService));
 
 if (environment.authEnabled) {
@@ -344,3 +349,15 @@ const server = app.listen(environment.port, () => {
   });
 });
 server.on("close",()=>executionLoop?.stop());
+const shutdownCoordinator=new GracefulShutdownCoordinator(
+  readinessService,
+  executionLoop??{stopAndDrain:async()=>undefined},
+  server,
+  postgresPool,
+  (event,signal)=>{
+    recordCounter("shutdown.lifecycle",{event,signal});
+    emitReliabilityLog(event==="timeout"||event==="failure"?"error":"info",`graceful_shutdown_${event}`,{phase:signal});
+  },
+);
+process.on("SIGTERM",()=>{void shutdownCoordinator.shutdown("SIGTERM");});
+process.on("SIGINT",()=>{void shutdownCoordinator.shutdown("SIGINT");});

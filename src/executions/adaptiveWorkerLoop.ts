@@ -6,6 +6,7 @@ export class AdaptiveWorkerLoop {
   private timer: TimerHandle | undefined;
   private stopped = true;
   private delayIndex = 0;
+  private active: Promise<void> | undefined;
 
   constructor(
     private readonly iteration: () => Promise<boolean>,
@@ -27,9 +28,17 @@ export class AdaptiveWorkerLoop {
     this.timer = undefined;
   }
 
+  async stopAndDrain(): Promise<void> {
+    this.stop();
+    await this.active;
+  }
+
   private scheduleNext(delayMs: number): void {
     if (this.stopped) return;
-    this.timer = this.schedule(() => { void this.run(); }, delayMs);
+    this.timer = this.schedule(() => {
+      const active=this.run();this.active=active;
+      void active.then(()=>{if(this.active===active)this.active=undefined;},()=>{if(this.active===active)this.active=undefined;});
+    }, delayMs);
     (this.timer as TimerHandle & { unref?: () => void }).unref?.();
   }
 

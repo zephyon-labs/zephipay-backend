@@ -191,6 +191,7 @@ export function normalizeRouteFamily(path: string): string {
 }
 
 export function databaseOperationFor(routeFamily: string, method: string): DatabaseOperationFamily {
+  if (routeFamily === "/health/ready") return "HEALTH_CHECK";
   if (routeFamily === "/api/account") return "ACCOUNT_RESOLUTION";
   if (routeFamily.startsWith("/api/account/identity")) return "PAYMENT_IDENTITY";
   if (routeFamily === "/api/recipients/search") return "RECIPIENT_SEARCH";

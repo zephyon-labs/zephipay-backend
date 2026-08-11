@@ -7,7 +7,7 @@ import { Pool } from "pg";
 
 import { requestContext } from "../src/middleware/requestContext";
 import {
-  DB_OPERATION_FAMILIES, classifyDatabaseError, emitReliabilityLog, instrumentPostgresPool,
+  DB_OPERATION_FAMILIES, classifyDatabaseError, databaseOperationFor, emitReliabilityLog, instrumentPostgresPool,
   normalizeRouteFamily, observeDatabaseFailure, observeTransaction, poolSnapshot, processInstance,
   reliabilityMetricsSnapshot, resetReliabilityMetricsForTest, runWithReliabilityContext,
   setReliabilityLogSinkForTest,
@@ -42,6 +42,7 @@ describe("reliability observability", () => {
     assert.equal(normalizeRouteFamily("/api/payment-intents/private-value/receipt"),"/api/payment-intents/:intentId/receipt");
     assert.equal(normalizeRouteFamily("/api/recipients/00000000-0000-4000-8000-000000000001"),"/api/recipients/:accountId");
     assert.equal(normalizeRouteFamily("/api/payment-requests/00000000-0000-4000-8000-000000000001/accept"),"/api/payment-requests/:requestId/accept");
+    assert.equal(databaseOperationFor("/health/ready","GET"),"HEALTH_CHECK");
   });
 
   it("records successful acquisition timing and distinguishes a saturated checkout timeout", async () => {
