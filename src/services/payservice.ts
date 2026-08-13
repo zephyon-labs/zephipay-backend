@@ -27,6 +27,7 @@ import {
   executeSolanaSplPay,
   type SolanaSplPayResult,
 } from "../adapters/solana/solanaSplPayExecutor";
+import { CIRCLE_SOLANA_DEVNET_USDC_MINT } from "../devnet/canonicalDevnetAsset";
 
 export type PaymentResult = SolanaSplPayResult & {
   runtimeId: string;
@@ -35,7 +36,7 @@ export type PaymentResult = SolanaSplPayResult & {
   purpose: string;
 };
 
-const USDC_DEVNET_MINT = "2w2nqMemQzjwKMk3jEmtXnBqGBXGJLs8FNfb5Khb8E7J";
+const USDC_DEVNET_MINT = CIRCLE_SOLANA_DEVNET_USDC_MINT;
 
 const approvingIdentityService: IdentityService = {
   async verify() {

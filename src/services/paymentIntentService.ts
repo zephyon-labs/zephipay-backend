@@ -9,8 +9,9 @@ import { rawUsdcToDisplay, usdcAmountToRaw } from "../payments/paymentIntentVali
 import type { PaymentPersistence } from "../storage/storageContracts";
 import { PaymentVersionConflictError } from "../storage/storageContracts";
 import type {SyntheticBetaIdentityStore} from "../recipients/syntheticBetaIdentity";
+import { CIRCLE_SOLANA_DEVNET_USDC_MINT } from "../devnet/canonicalDevnetAsset";
 
-export const USDC_DEVNET_MINT = "2w2nqMemQzjwKMk3jEmtXnBqGBXGJLs8FNfb5Khb8E7J";
+export const USDC_DEVNET_MINT = CIRCLE_SOLANA_DEVNET_USDC_MINT;
 
 type PublicPaymentIntentBase = Readonly<{
   id: string;

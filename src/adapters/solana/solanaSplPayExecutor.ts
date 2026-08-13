@@ -11,12 +11,13 @@ import {
 } from "@solana/spl-token";
 
 import idl from "../../protocol/idl/protocol.json";
+import { CIRCLE_SOLANA_DEVNET_USDC_MINT } from "../../devnet/canonicalDevnetAsset";
 
 const PROGRAM_ID = new PublicKey(
   "BtP7rVw9sqN4pW5RuzZJ2c4576R5pJU9yRtjrRJ7b5bM",
 );
 
-const MINT = new PublicKey("2w2nqMemQzjwKMk3jEmtXnBqGBXGJLs8FNfb5Khb8E7J");
+const MINT = new PublicKey(CIRCLE_SOLANA_DEVNET_USDC_MINT);
 
 export type SolanaSplPayResult = {
   receiptId: string;

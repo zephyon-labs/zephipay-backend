@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { createX402ReceiptPreview } from "../receipts/x402ReceiptAdapter";
 import { registerReceipt } from "../receipts/receiptRegistry";
+import { CIRCLE_SOLANA_DEVNET_USDC_MINT } from "../devnet/canonicalDevnetAsset";
 export const agentRouter = Router();
 
 agentRouter.get("/costly-data", (_req, res) => {
@@ -8,7 +9,7 @@ agentRouter.get("/costly-data", (_req, res) => {
     resource: "/api/agent/costly-data",
     description: "Zephyon agentic payment test resource",
     network: "solana-devnet",
-    asset: "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+    asset: CIRCLE_SOLANA_DEVNET_USDC_MINT,
     amount: "1000",
     payTo: process.env.SVM_ADDRESS || "unknown",
     owner: process.env.SVM_ADDRESS || "unknown",
