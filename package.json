@@ -11,6 +11,7 @@
     "test:postgres": "tsx --test --test-concurrency=1 tests/postgresPaymentFoundation.integration.ts tests/postgresIdentityFoundation.integration.ts tests/postgresEconomicIdentity.integration.ts tests/postgresPaymentIdentity.integration.ts tests/postgresExecution.integration.ts tests/postgresDevnetExecutionState.integration.ts tests/postgresPaymentRequests.integration.ts tests/postgresOpenBetaActivity.integration.ts tests/postgresActivity.integration.ts tests/r4Invariants.integration.ts",
     "migrate": "tsx scripts/run-migrations.ts",
     "migrate:validate": "tsx scripts/validate-migrations.ts",
+    "devnet:e6a:validate": "tsx scripts/validate-e6a-read-only.ts",
     "r4:stage0": "npm run build && tsx scripts/r4/run-local.ts stage0",
     "r4:smoke": "npm run build && tsx scripts/r4/run-local.ts smoke",
     "r4:baseline:read": "npm run build && tsx scripts/r4/run-local.ts baseline-read",
