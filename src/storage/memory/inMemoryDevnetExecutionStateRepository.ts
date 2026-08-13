@@ -1,9 +1,10 @@
-import type { CommitDevnetSubmissionResult, DevnetExecutionStateRepository, DevnetSubmissionCommitmentRecord, PersistDevnetPreparationInput, PersistedDevnetPreparation } from "../../devnet/devnetExecutionState";
-import { assertPreparedArtifact } from "../../devnet/devnetExecutionState";
+import type { CommitDevnetSubmissionResult, DevnetExecutionStateRepository, DevnetReconciliationObservation, DevnetSubmissionCommitmentRecord, PersistDevnetPreparationInput, PersistedDevnetPreparation } from "../../devnet/devnetExecutionState";
+import { assertPreparedArtifact, assertReconciliationEvidence, reconciliationLifecycle } from "../../devnet/devnetExecutionState";
 
 export class InMemoryDevnetExecutionStateRepository implements DevnetExecutionStateRepository {
   private readonly preparations = new Map<string, PersistedDevnetPreparation>();
   private readonly commitments = new Map<string, DevnetSubmissionCommitmentRecord>();
+  private readonly observations = new Map<string, DevnetReconciliationObservation[]>();
   private queue: Promise<void> = Promise.resolve();
 
   persistPreparation(input: PersistDevnetPreparationInput) { return this.exclusive(() => {
@@ -42,6 +43,16 @@ export class InMemoryDevnetExecutionStateRepository implements DevnetExecutionSt
 
   async findPreparation(executionId: string, actorSubject: string) { const value=this.active(executionId); return value?.actorSubject===actorSubject ? clonePreparation(value) : undefined; }
   async findCommitment(executionId: string, actorSubject: string) { const preparation=this.active(executionId),value=this.commitments.get(executionId); return preparation?.actorSubject===actorSubject&&value ? Object.freeze({...value}) : undefined; }
+  recordReconciliationObservation(input:Parameters<DevnetExecutionStateRepository["recordReconciliationObservation"]>[0]) { return this.exclusive(() => {
+    assertReconciliationEvidence(input); const preparation=this.preparations.get(input.preparationId);
+    if(!preparation||preparation.executionId!==input.executionId||preparation.actorSubject!==input.actorSubject)throw new Error("Prepared artifact was not found for this owner.");
+    if(input.providerId!==preparation.artifact.reconciliationProviderId)throw new Error("Reconciliation provider does not match immutable preparation policy.");
+    const state=reconciliationLifecycle(preparation.state,input.outcome),list=this.observations.get(input.executionId)??[];
+    if(list.some(value=>value.observationId===input.observationId))throw new Error("Reconciliation observation ID already exists.");
+    const observation=Object.freeze({...input,sequence:list.length+1});list.push(observation);this.observations.set(input.executionId,list);
+    const updated=freezePreparation({...preparation,state});this.preparations.set(preparation.preparationId,updated);return Object.freeze({preparation:clonePreparation(updated),observation});
+  }); }
+  async listReconciliationObservations(executionId:string,actorSubject:string){const preparation=this.active(executionId);return preparation?.actorSubject===actorSubject?(this.observations.get(executionId)??[]).map(value=>Object.freeze({...value})):[];}
   async listPreparationEligible() { return [...this.preparations.values()].filter((value)=>value.state==="PREPARED_NOT_CONTACTED").map(clonePreparation); }
   async listReconciliationEligible() { return [...this.preparations.values()].filter((value)=>["SUBMISSION_COMMITTED_RECONCILE_ONLY","ACCEPTED_PENDING","UNKNOWN_RECONCILIATION_REQUIRED"].includes(value.state)).map(clonePreparation); }
 
