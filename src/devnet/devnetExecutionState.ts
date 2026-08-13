@@ -58,6 +58,13 @@ export type DevnetReconciliationObservation = Readonly<{
   providerId: string; outcome: DevnetReconciliationOutcome; observedAt: string;
   slot?: string; confirmationStatus?: string; errorCode?: string;
 }>;
+export type DevnetSubmissionOutcome = "ACCEPTED"|"SETTLED"|"REJECTED"|"UNKNOWN"|"VALIDATION_FAILED";
+export type DevnetProviderContactCertainty = "NOT_STARTED"|"MAY_HAVE_OCCURRED"|"ACCEPTED";
+export type DevnetSubmissionObservation = Readonly<{
+  observationId:string;executionId:string;preparationId:string;commitmentId:string;providerId:string;
+  signature:string;outcome:DevnetSubmissionOutcome;contactCertainty:DevnetProviderContactCertainty;observedAt:string;
+  providerErrorCode?:string;slot?:string;confirmationStatus?:string;
+}>;
 
 /** submissionAuthorized is deliberately return-only and is never a persisted field. */
 export type CommitDevnetSubmissionResult = Readonly<{
@@ -74,6 +81,8 @@ export interface DevnetExecutionStateRepository {
   findCommitment(executionId: string, actorSubject: string): Promise<DevnetSubmissionCommitmentRecord | undefined>;
   recordReconciliationObservation(input: Readonly<{ executionId: string; actorSubject: string; preparationId: string; observationId: string; providerId: string; outcome: DevnetReconciliationOutcome; observedAt: string; slot?: string; confirmationStatus?: string; errorCode?: string }>): Promise<Readonly<{ preparation: PersistedDevnetPreparation; observation: DevnetReconciliationObservation }>>;
   listReconciliationObservations(executionId: string, actorSubject: string): Promise<DevnetReconciliationObservation[]>;
+  recordSubmissionObservation(input: Readonly<{ observationId:string;executionId:string;actorSubject:string;preparationId:string;commitmentId:string;providerId:string;signature:string;outcome:DevnetSubmissionOutcome;contactCertainty:DevnetProviderContactCertainty;observedAt:string;providerErrorCode?:string;slot?:string;confirmationStatus?:string }>): Promise<Readonly<{preparation:PersistedDevnetPreparation;observation:DevnetSubmissionObservation}>>;
+  listSubmissionObservations(executionId:string,actorSubject:string):Promise<DevnetSubmissionObservation[]>;
   listPreparationEligible(): Promise<PersistedDevnetPreparation[]>;
   listReconciliationEligible(): Promise<PersistedDevnetPreparation[]>;
 }
@@ -111,4 +120,17 @@ export function assertReconciliationEvidence(input: Readonly<{ providerId: strin
   if (input.slot !== undefined && !/^(0|[1-9]\d*)$/.test(input.slot)) throw new Error("Reconciliation slot is invalid.");
   if (input.confirmationStatus !== undefined && !/^[A-Za-z0-9_-]{1,32}$/.test(input.confirmationStatus)) throw new Error("Reconciliation confirmation status is invalid.");
   if ((input.outcome === "FAILED") !== (input.errorCode !== undefined) || (input.errorCode !== undefined && !/^[A-Za-z0-9_.:-]{1,64}$/.test(input.errorCode))) throw new Error("Reconciliation failure evidence is invalid.");
+}
+
+export function submissionLifecycle(current:DevnetLifecycleState,outcome:DevnetSubmissionOutcome):DevnetLifecycleState{
+  if(current==="PREPARED_NOT_CONTACTED"||current==="ABANDONED_PRE_CONTACT")throw new Error("Submission evidence requires the durable reconciliation-only commitment.");
+  if(current==="SETTLED"||current==="FAILED")throw new Error("Terminal Devnet settlement truth cannot be changed by submission evidence.");
+  if(outcome==="SETTLED")return"SETTLED";if(outcome==="REJECTED")return"FAILED";if(outcome==="ACCEPTED")return"ACCEPTED_PENDING";
+  return current==="ACCEPTED_PENDING"?current:"UNKNOWN_RECONCILIATION_REQUIRED";
+}
+export function assertSubmissionEvidence(input:Readonly<{providerId:string;signature:string;outcome:DevnetSubmissionOutcome;contactCertainty:DevnetProviderContactCertainty;providerErrorCode?:string;slot?:string;confirmationStatus?:string}>):void{
+  if(!input.providerId||input.providerId.trim()!==input.providerId||input.providerId.length>128||!input.signature||input.signature.trim()!==input.signature)throw new Error("Submission provider evidence identity is invalid.");
+  if(input.providerErrorCode!==undefined&&!/^[A-Za-z0-9_.:-]{1,64}$/.test(input.providerErrorCode))throw new Error("Submission provider error code is invalid.");
+  if(input.slot!==undefined&&!/^(0|[1-9]\d*)$/.test(input.slot))throw new Error("Submission slot is invalid.");if(input.confirmationStatus!==undefined&&!/^[A-Za-z0-9_-]{1,32}$/.test(input.confirmationStatus))throw new Error("Submission confirmation status is invalid.");
+  if((input.outcome==="VALIDATION_FAILED")!==(input.contactCertainty==="NOT_STARTED")||(input.outcome==="ACCEPTED"||input.outcome==="SETTLED")!==(input.contactCertainty==="ACCEPTED"))throw new Error("Submission outcome contact certainty is contradictory.");
 }
