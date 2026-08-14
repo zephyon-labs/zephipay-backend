@@ -12,6 +12,7 @@
     "migrate": "tsx scripts/run-migrations.ts",
     "migrate:validate": "tsx scripts/validate-migrations.ts",
     "devnet:e6a:validate": "tsx scripts/validate-e6a-read-only.ts",
+    "devnet:e6b:prepare": "tsx scripts/prepare-e6b-only.ts",
     "r4:stage0": "npm run build && tsx scripts/r4/run-local.ts stage0",
     "r4:smoke": "npm run build && tsx scripts/r4/run-local.ts smoke",
     "r4:baseline:read": "npm run build && tsx scripts/r4/run-local.ts baseline-read",
