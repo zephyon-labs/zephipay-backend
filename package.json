@@ -14,6 +14,7 @@
     "devnet:e6a:validate": "tsx scripts/validate-e6a-read-only.ts",
     "devnet:e6b:prepare": "tsx scripts/prepare-e6b-only.ts",
     "devnet:e6b:provision-local": "tsx scripts/provision-e6b-local.ts",
+    "devnet:e6b:refresh": "tsx scripts/refresh-e6b-preparation-only.ts",
     "devnet:e6c:submit": "tsx scripts/submit-e6c-operator-only.ts",
     "r4:stage0": "npm run build && tsx scripts/r4/run-local.ts stage0",
     "r4:smoke": "npm run build && tsx scripts/r4/run-local.ts smoke",
