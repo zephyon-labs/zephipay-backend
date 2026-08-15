@@ -4,11 +4,39 @@ CREATE TABLE synthetic_beta_identities (
   display_name text NOT NULL CHECK(octet_length(display_name) BETWEEN 1 AND 64),
   created_at timestamptz NOT NULL DEFAULT now()
 );
-CREATE OR REPLACE FUNCTION protect_payment_identity_linkage() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
- IF NEW.recipient_type IS DISTINCT FROM OLD.recipient_type OR NEW.recipient_address IS DISTINCT FROM OLD.recipient_address OR NEW.recipient_account_id IS DISTINCT FROM OLD.recipient_account_id OR NEW.recipient_synthetic_id IS DISTINCT FROM OLD.recipient_synthetic_id OR NEW.recipient_snapshot IS DISTINCT FROM OLD.recipient_snapshot OR NEW.recipient_snapshot_version IS DISTINCT FROM OLD.recipient_snapshot_version OR NEW.trust_confirmation_outcome IS DISTINCT FROM OLD.trust_confirmation_outcome THEN RAISE EXCEPTION 'payment recipient linkage is immutable'; END IF; RETURN NEW; END; $$;
 
 ALTER TABLE payments ADD COLUMN recipient_synthetic_id uuid REFERENCES synthetic_beta_identities(synthetic_id) ON DELETE RESTRICT;
+
+-- Migration 004 deliberately makes recipient linkage immutable at runtime. Drop
+-- only that guard while this migration performs its owned historical backfill.
+DROP TRIGGER payments_protect_recipient_linkage ON payments;
+
 UPDATE payments SET recipient_snapshot=jsonb_set(recipient_snapshot,'{identitySource}','"RECIPIENT_DIRECTORY"'::jsonb,true) WHERE recipient_type='PAYMENT_IDENTITY';
+
+-- Resolve the existing deferred payment integrity checks before the later
+-- ALTER TABLE; PostgreSQL rejects table alteration with pending trigger events.
+SET CONSTRAINTS ALL IMMEDIATE;
+
+CREATE OR REPLACE FUNCTION protect_payment_identity_linkage() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.recipient_type IS DISTINCT FROM OLD.recipient_type OR
+     NEW.recipient_address IS DISTINCT FROM OLD.recipient_address OR
+     NEW.recipient_account_id IS DISTINCT FROM OLD.recipient_account_id OR
+     NEW.recipient_synthetic_id IS DISTINCT FROM OLD.recipient_synthetic_id OR
+     NEW.recipient_snapshot IS DISTINCT FROM OLD.recipient_snapshot OR
+     NEW.recipient_snapshot_version IS DISTINCT FROM OLD.recipient_snapshot_version OR
+     NEW.trust_confirmation_outcome IS DISTINCT FROM OLD.trust_confirmation_outcome THEN
+    RAISE EXCEPTION 'payment recipient linkage is immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER payments_protect_recipient_linkage
+  BEFORE UPDATE ON payments
+  FOR EACH ROW EXECUTE FUNCTION protect_payment_identity_linkage();
+
 ALTER TABLE payments DROP CONSTRAINT payments_recipient_identity_shape;
 ALTER TABLE payments ADD CONSTRAINT payments_recipient_identity_shape CHECK (
  (recipient_type='DIRECT_WALLET' AND recipient_account_id IS NULL AND recipient_synthetic_id IS NULL AND recipient_snapshot IS NULL AND recipient_snapshot_version IS NULL AND trust_confirmation_outcome IS NULL) OR
