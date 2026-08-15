@@ -16,6 +16,7 @@
     "devnet:e6b:provision-local": "tsx scripts/provision-e6b-local.ts",
     "devnet:e6b:refresh": "tsx scripts/refresh-e6b-preparation-only.ts",
     "devnet:e6c:submit": "tsx scripts/submit-e6c-operator-only.ts",
+    "devnet:e6:final": "tsx scripts/run-e6-final-refresh-and-submit.ts",
     "r4:stage0": "npm run build && tsx scripts/r4/run-local.ts stage0",
     "r4:smoke": "npm run build && tsx scripts/r4/run-local.ts smoke",
     "r4:baseline:read": "npm run build && tsx scripts/r4/run-local.ts baseline-read",
