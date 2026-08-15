@@ -1,0 +1,64 @@
+import { randomUUID } from "node:crypto";
+import type { Pool } from "pg";
+import { classifyDevnetBlockhash, signedTransactionDigest, type DevnetTransactionSigner, type SolanaSubmissionRpc } from "zephyon-protocol";
+import { SingleAttemptDevnetJsonRpc, type JsonRpcFetch } from "../adapters/solana/devnetJsonRpc";
+import { HeliusDevnetSubmissionRpc, IndependentDevnetReconciliationRpc, ReconciliationDevnetBlockDataSource } from "../adapters/solana/liveDevnetProviders";
+import { PostgresDevnetExecutionStateRepository } from "../storage/postgres/postgresDevnetExecutionStateRepository";
+import { CIRCLE_SOLANA_DEVNET_USDC_DECIMALS, CIRCLE_SOLANA_DEVNET_USDC_MINT } from "./canonicalDevnetAsset";
+import { parseDevnetLiveConfiguration, type DevnetLiveConfiguration } from "./devnetLiveConfiguration";
+import type { DevnetExecutionStateRepository, PersistedDevnetPreparation } from "./devnetExecutionState";
+import { DevnetOrchestrationService } from "./devnetOrchestrationService";
+import { Aes256GcmPreparedTransactionCipher } from "./preparedTransactionCipher";
+
+type Environment = Readonly<Record<string, string | undefined>>;
+export type E6cExecutionContract = Readonly<{ paymentIntentId:string;actorSubject:string;executionMode:string;rail:string;network:string;policyHash:string;providerIdempotencyKey:string }>;
+export type E6cRequest = Readonly<{config:DevnetLiveConfiguration;databaseUrl:string;actorSubject:string;paymentIntentId:string;executionId:string;preparationId:string;generation:number;policyHash:string;signedTransactionDigest:string;transactionSignature:string;mint:string;decimals:number;sourceTokenAccount:string;destination:string;rawAmount:string;commitmentId:string;providerIdempotencyKey:string}>;
+export type E6cResult = Readonly<{verdict:"SUBMISSION_ATTEMPTED"|"PREPARATION_EXPIRED"|"RECONCILIATION_ONLY";executionId:string;preparationId:string;generation:number;digest:string;transactionSignature:string;providerIdentity:string;durableCommitmentResult:"CREATED"|"NOT_CREATED"|"ALREADY_EXISTS";typedSubmissionOutcome:"ACCEPTED"|"REJECTED"|"UNKNOWN_RECONCILIATION_REQUIRED"|"NOT_ATTEMPTED";contactCertainty:"ACCEPTED"|"MAY_HAVE_OCCURRED"|"NOT_STARTED";resultingDurableState:string;reconciliationRequired:boolean;sendTransactionCalls:number;providerStatus:string}>;
+export type E6cDependencies = Readonly<{repository:DevnetExecutionStateRepository;loadExecutionContract():Promise<E6cExecutionContract|undefined>;fetch:JsonRpcFetch;clock?:()=>string;idFactory?:()=>string}>;
+
+const CONFIRMATION = "SUBMIT_EXACT_E6C_DEVNET_TRANSACTION_ONCE";
+const SUBMISSION_PROVIDER = "helius-devnet-submit";
+const RECONCILIATION_PROVIDER = "solana-public-devnet-reconcile";
+
+export function parseE6cRequest(env:Environment=process.env):E6cRequest {
+  if(env.E6C_OPERATOR_CONFIRMATION!==CONFIRMATION)throw new Error("E6C exact operator confirmation is required.");
+  const config=parseDevnetLiveConfiguration(env);
+  if(!config.enabled||!config.preparationEnabled||!config.submissionEnabled||!config.reconciliationEnabled)throw new Error("E6C requires integration, preparation, submission, and reconciliation capabilities enabled.");
+  if(config.submissionProviderId!==SUBMISSION_PROVIDER||config.reconciliationProviderId!==RECONCILIATION_PROVIDER)throw new Error("E6C provider identities do not match the controlled operator policy.");
+  if(!config.submissionUrl||!config.submissionApiKey||!config.reconciliationUrl||!config.encryptionKey||!config.encryptionKeyVersion||!config.mint||config.decimals===undefined||!config.sourceTokenAccount)throw new Error("E6C configuration is incomplete.");
+  const databaseUrl=localDatabaseUrl(required(env,"E6C_DATABASE_URL"));
+  const generation=integer(required(env,"E6C_EXPECTED_PREPARATION_GENERATION"),"generation"),decimals=integer(required(env,"E6C_EXPECTED_DECIMALS"),"decimals");
+  const request=Object.freeze({config,databaseUrl,actorSubject:required(env,"E6C_ACTOR_SUBJECT"),paymentIntentId:required(env,"E6C_PAYMENT_ID"),executionId:required(env,"E6C_EXECUTION_ID"),preparationId:required(env,"E6C_PREPARATION_ID"),generation,policyHash:hex(required(env,"E6C_EXPECTED_POLICY_HASH")),signedTransactionDigest:hex(required(env,"E6C_EXPECTED_SIGNED_TRANSACTION_DIGEST")),transactionSignature:required(env,"E6C_EXPECTED_TRANSACTION_SIGNATURE"),mint:required(env,"E6C_EXPECTED_MINT"),decimals,sourceTokenAccount:required(env,"E6C_EXPECTED_SOURCE_ATA"),destination:required(env,"E6C_EXPECTED_DESTINATION"),rawAmount:positive(required(env,"E6C_EXPECTED_RAW_AMOUNT")),commitmentId:required(env,"E6C_COMMITMENT_ID"),providerIdempotencyKey:required(env,"E6C_PROVIDER_IDEMPOTENCY_KEY")});
+  if(request.mint!==CIRCLE_SOLANA_DEVNET_USDC_MINT||request.decimals!==CIRCLE_SOLANA_DEVNET_USDC_DECIMALS||config.mint!==request.mint||config.decimals!==request.decimals||config.sourceTokenAccount!==request.sourceTokenAccount)throw new Error("E6C requires the exact canonical configured Circle Solana Devnet USDC economics.");
+  return request;
+}
+
+export async function runE6cOperatorSubmission(request:E6cRequest,deps:E6cDependencies):Promise<E6cResult>{
+  const execution=await deps.loadExecutionContract();
+  assertExecution(request,execution);
+  const preparation=await deps.repository.findPreparation(request.executionId,request.actorSubject),commitment=await deps.repository.findCommitment(request.executionId,request.actorSubject),observations=await deps.repository.listSubmissionObservations(request.executionId,request.actorSubject);
+  if(!preparation)throw new Error("E6C preparation was not found for the supplied owner.");
+  assertPreparation(request,preparation);
+  const cipher=new Aes256GcmPreparedTransactionCipher(request.config.encryptionKey!,request.config.encryptionKeyVersion!);
+  authenticate(cipher,preparation,request.signedTransactionDigest);
+  if(commitment||preparation.state!=="PREPARED_NOT_CONTACTED"||observations.length>0)return result(request,preparation,"RECONCILIATION_ONLY",commitment?"ALREADY_EXISTS":"NOT_CREATED","NOT_ATTEMPTED","NOT_STARTED",0,"RECONCILIATION_ONLY");
+  if(!request.config.submissionEnabled)return result(request,preparation,"RECONCILIATION_ONLY","NOT_CREATED","NOT_ATTEMPTED","NOT_STARTED",0,"SUBMISSION_DISABLED");
+  const reconciliationRpc=new SingleAttemptDevnetJsonRpc(request.config.reconciliationUrl!,request.config.requestTimeoutMs,deps.fetch),blocks=new ReconciliationDevnetBlockDataSource(reconciliationRpc),height=await blocks.getCurrentDevnetBlockHeight();
+  if(classifyDevnetBlockhash(preparation.state,preparation.artifact.lastValidBlockHeight,height)!=="VALID")return result(request,preparation,"PREPARATION_EXPIRED","NOT_CREATED","NOT_ATTEMPTED","NOT_STARTED",0,"REPLACEMENT_REQUIRED");
+  let sendTransactionCalls=0;const submissionRpc=new SingleAttemptDevnetJsonRpc(request.config.submissionUrl!,request.config.requestTimeoutMs,deps.fetch,request.config.submissionApiKey),helius=new HeliusDevnetSubmissionRpc(SUBMISSION_PROVIDER,submissionRpc),counted:SolanaSubmissionRpc=Object.freeze({identity:helius.identity,async submitExactSignedTransaction(bytes:Uint8Array){sendTransactionCalls++;return helius.submitExactSignedTransaction(bytes);}}),reconciliation=new IndependentDevnetReconciliationRpc(RECONCILIATION_PROVIDER,reconciliationRpc),signer:DevnetTransactionSigner=Object.freeze({keyId:preparation.artifact.signerKeyId,keyVersion:preparation.artifact.signerKeyVersion,publicKey:preparation.artifact.signerPublicKey,async signTransaction():Promise<never>{throw new Error("E6C submission harness cannot sign or regenerate transactions.");}}),service=new DevnetOrchestrationService(deps.repository,cipher,{cluster:"solana-devnet",asset:"USDC",mint:request.mint,decimals:request.decimals,sourceTokenAccount:request.sourceTokenAccount,policyHash:request.policyHash,submissionProviderId:SUBMISSION_PROVIDER,reconciliationProviderId:RECONCILIATION_PROVIDER},blocks,signer,blocks,reconciliation,counted,{submissionEnabled:true,reconciliationEnabled:true},deps.clock,deps.idFactory??randomUUID);
+  const submitted=await service.submitPrepared({executionId:request.executionId,actorSubject:request.actorSubject,commitmentId:request.commitmentId,providerIdempotencyKey:request.providerIdempotencyKey});
+  if(!submitted.attempted)return result(request,submitted.preparation,"RECONCILIATION_ONLY","ALREADY_EXISTS","NOT_ATTEMPTED","NOT_STARTED",sendTransactionCalls,String(submitted.reason));
+  const outcome=submitted.observation.outcome==="ACCEPTED"||submitted.observation.outcome==="SETTLED"?"ACCEPTED":submitted.observation.outcome==="REJECTED"?"REJECTED":"UNKNOWN_RECONCILIATION_REQUIRED";
+  return result(request,submitted.preparation,"SUBMISSION_ATTEMPTED","CREATED",outcome,submitted.observation.contactCertainty,sendTransactionCalls,submitted.observation.providerErrorCode??outcome);
+}
+
+export function postgresE6cDependencies(pool:Pool,request:E6cRequest,fetch:JsonRpcFetch=globalThis.fetch as JsonRpcFetch):E6cDependencies{return{repository:new PostgresDevnetExecutionStateRepository(pool),fetch,async loadExecutionContract(){const query=await pool.query("SELECT payment_intent_id,actor_subject,execution_mode,selected_rail,settlement_network,policy_hash,provider_idempotency_key FROM payment_executions WHERE execution_id=$1",[request.executionId]),row=query.rows[0];return row?Object.freeze({paymentIntentId:String(row.payment_intent_id),actorSubject:String(row.actor_subject),executionMode:String(row.execution_mode),rail:String(row.selected_rail),network:String(row.settlement_network),policyHash:Buffer.from(row.policy_hash??[]).toString("hex"),providerIdempotencyKey:String(row.provider_idempotency_key)}):undefined;}};}
+function assertExecution(r:E6cRequest,e:E6cExecutionContract|undefined){if(!e||e.actorSubject!==r.actorSubject||e.paymentIntentId!==r.paymentIntentId||e.executionMode!=="devnet_validation"||e.rail!=="solana"||e.network!=="solana-devnet"||e.policyHash!==r.policyHash||e.providerIdempotencyKey!==r.providerIdempotencyKey)throw new Error("E6C persisted execution contract does not exactly match operator expectations.");}
+function assertPreparation(r:E6cRequest,p:PersistedDevnetPreparation){const a=p.artifact;if(p.preparationId!==r.preparationId||p.paymentIntentId!==r.paymentIntentId||p.generation!==r.generation||a.cluster!=="solana-devnet"||a.policyHash!==r.policyHash||a.signedTransactionDigest!==r.signedTransactionDigest||a.signature!==r.transactionSignature||a.mint!==r.mint||a.decimals!==r.decimals||a.sourceTokenAccount!==r.sourceTokenAccount||a.destination!==r.destination||a.rawAmount!==r.rawAmount||a.submissionProviderId!==SUBMISSION_PROVIDER||a.reconciliationProviderId!==RECONCILIATION_PROVIDER)throw new Error("E6C persisted preparation does not exactly match operator expectations.");}
+function authenticate(cipher:Aes256GcmPreparedTransactionCipher,p:PersistedDevnetPreparation,digest:string){const base64=cipher.decrypt(p.encryptedSignedTransaction,{executionId:p.executionId,preparationId:p.preparationId,keyVersion:p.encryptedSignedTransaction.keyVersion});if(signedTransactionDigest(base64)!==digest)throw new Error("E6C authenticated signed bytes do not match the expected digest.");}
+function result(r:E6cRequest,p:PersistedDevnetPreparation,verdict:E6cResult["verdict"],durable:E6cResult["durableCommitmentResult"],outcome:E6cResult["typedSubmissionOutcome"],certainty:E6cResult["contactCertainty"],calls:number,status:string):E6cResult{return Object.freeze({verdict,executionId:r.executionId,preparationId:r.preparationId,generation:r.generation,digest:r.signedTransactionDigest,transactionSignature:r.transactionSignature,providerIdentity:SUBMISSION_PROVIDER,durableCommitmentResult:durable,typedSubmissionOutcome:outcome,contactCertainty:certainty,resultingDurableState:p.state,reconciliationRequired:p.state!=="PREPARED_NOT_CONTACTED",sendTransactionCalls:calls,providerStatus:status.slice(0,128)});}
+function required(env:Environment,name:string){const value=env[name]?.trim();if(!value)throw new Error(`${name} is required for E6C.`);return value;}
+function integer(value:string,name:string){const parsed=Number(value);if(!Number.isSafeInteger(parsed)||parsed<0)throw new Error(`E6C expected ${name} is invalid.`);return parsed;}
+function positive(value:string){if(!/^[1-9]\d*$/.test(value))throw new Error("E6C expected raw amount is invalid.");return value;}
+function hex(value:string){if(!/^[a-f0-9]{64}$/.test(value))throw new Error("E6C expected digest or policy hash is invalid.");return value;}
+function localDatabaseUrl(value:string){let url:URL;try{url=new URL(value);}catch{throw new Error("E6C database URL is invalid.");}const host=url.hostname.replace(/^\[|\]$/g,"");if(!["127.0.0.1","localhost","::1"].includes(host)||!["postgres:","postgresql:"].includes(url.protocol)||!url.pathname.slice(1))throw new Error("E6C requires an explicit loopback PostgreSQL database URL.");return value;}
