@@ -119,7 +119,7 @@ export function assertReconciliationEvidence(input: Readonly<{ providerId: strin
   if (!input.providerId || input.providerId.trim() !== input.providerId || input.providerId.length > 128) throw new Error("Reconciliation provider ID is invalid.");
   if (input.slot !== undefined && !/^(0|[1-9]\d*)$/.test(input.slot)) throw new Error("Reconciliation slot is invalid.");
   if (input.confirmationStatus !== undefined && !/^[A-Za-z0-9_-]{1,32}$/.test(input.confirmationStatus)) throw new Error("Reconciliation confirmation status is invalid.");
-  if ((input.outcome === "FAILED") !== (input.errorCode !== undefined) || (input.errorCode !== undefined && !/^[A-Za-z0-9_.:-]{1,64}$/.test(input.errorCode))) throw new Error("Reconciliation failure evidence is invalid.");
+  if ((input.outcome === "FAILED" && input.errorCode === undefined) || (input.errorCode !== undefined && input.outcome !== "FAILED" && input.outcome !== "UNKNOWN") || (input.errorCode !== undefined && !/^[A-Za-z0-9_.:-]{1,64}$/.test(input.errorCode))) throw new Error("Reconciliation failure evidence is invalid.");
 }
 
 export function submissionLifecycle(current:DevnetLifecycleState,outcome:DevnetSubmissionOutcome):DevnetLifecycleState{
