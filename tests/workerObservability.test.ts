@@ -7,7 +7,7 @@ describe("Mock worker observability boundary",()=>{
     const source=await readFile(new URL("../src/server.ts",import.meta.url),"utf8");
     assert.match(source,/new AdaptiveWorkerLoop\(async \(\) =>/);
     assert.match(source,/executionLoop\.start\(\)/);
-    assert.match(source,/server\.on\("close",\(\)=>executionLoop\?\.stop\(\)\)/);
+    assert.match(source,/server\.on\("close",\(\)=>\{executionLoop\?\.stop\(\);devnetComposition\?\.workerLoop\.stop\(\);\}\)/);
     assert.match(source,/recordCounter\("worker\.tick"\)/);
     assert.match(source,/recordTiming\("worker\.operation\.duration"/);
     assert.match(source,/recordCounter\("worker\.claim"/);

@@ -56,10 +56,19 @@ import { ReadinessService } from "./health/readiness";
 import { createHealthRouter } from "./routes/health";
 import { GracefulShutdownCoordinator } from "./lifecycle/gracefulShutdown";
 import { localHarnessAuth } from "./auth/localHarnessAuth";
+import { parseDevnetLiveConfiguration } from "./devnet/devnetLiveConfiguration";
+import { createLiveDevnetComposition, type LiveDevnetComposition } from "./devnet/liveDevnetComposition";
+import { PostgresDevnetExecutionStateRepository } from "./storage/postgres/postgresDevnetExecutionStateRepository";
+import { PostgresDevnetRecoveryRepository } from "./storage/postgres/postgresDevnetRecoveryRepository";
+import { PostgresBrowserDevnetExecutionStore } from "./storage/postgres/postgresBrowserDevnetExecutionStore";
+import { BrowserDevnetExecutionService } from "./devnet/browserDevnetExecution";
+import { createBrowserDevnetExecutionsRouter } from "./routes/browserDevnetExecutions";
+import { devnetPreparationPolicy, hashDevnetPolicy } from "./devnet/devnetPreparationPolicy";
 
 const app = express();
 const harnessAuth = localHarnessAuth();
 let executionLoop: AdaptiveWorkerLoop | undefined;
+let devnetComposition: LiveDevnetComposition | undefined;
 const postgresPool = environment.postgresEnabled
   ? createPaymentPostgresPool(environment.databaseUrl as string)
   : undefined;
@@ -141,6 +150,16 @@ if (environment.authEnabled) {
   const paymentIntentService = new PaymentIntentService(accountService, paymentPersistence, {syntheticIdentityStore});
   const executionRepository = new PostgresExecutionRepository(pool);
   const executionService = new PaymentExecutionService(accountService, paymentPersistence, executionRepository,undefined,undefined,new PostgresActivityRepository(pool));
+  const devnetConfig=parseDevnetLiveConfiguration();
+  let browserDevnetService:BrowserDevnetExecutionService|undefined;
+  if(devnetConfig.enabled){
+    const executionState=new PostgresDevnetExecutionStateRepository(pool),recoveryRepository=new PostgresDevnetRecoveryRepository(pool,executionState);let composition:LiveDevnetComposition|undefined;
+    const recoveryHandlers={async currentBlockHeight(){if(!composition?.blockDataSource)throw new Error("Devnet block data source is unavailable.");return composition.blockDataSource.getCurrentDevnetBlockHeight();},async prepare(candidate:Readonly<{paymentIntentId:string;actorSubject:string}>){return browserDevnetService?.recoverPreparation(candidate.paymentIntentId,candidate.actorSubject)??false;},async reconcile(candidate:Readonly<{paymentIntentId:string;actorSubject:string}>){return browserDevnetService?.reconcileOwned(candidate.paymentIntentId,candidate.actorSubject)??false;}};
+    composition=createLiveDevnetComposition(devnetConfig,{executionState,recoveryRepository,recoveryHandlers,workerId:`browser-devnet-${randomUUID()}`});devnetComposition=composition;
+    const policyHash=devnetConfig.preparationEnabled?hashDevnetPolicy(devnetPreparationPolicy({mint:devnetConfig.mint!,decimals:devnetConfig.decimals!,sourceTokenAccount:devnetConfig.sourceTokenAccount!,signerKeyId:devnetConfig.signerKeyId!,signerKeyVersion:devnetConfig.signerKeyVersion!,signerPublicKey:devnetConfig.signerPublicKey!,submissionProviderId:devnetConfig.submissionProviderId!,reconciliationProviderId:devnetConfig.reconciliationProviderId!})):"0".repeat(64);
+    browserDevnetService=new BrowserDevnetExecutionService(accountService,paymentPersistence,new PostgresBrowserDevnetExecutionStore(pool),executionState,composition.orchestration,{exposureEnabled:devnetConfig.browserApiEnabled===true,preparationEnabled:devnetConfig.preparationEnabled,submissionEnabled:devnetConfig.submissionEnabled,reconciliationEnabled:devnetConfig.reconciliationEnabled,policyHash,maxRawAmount:BigInt(Math.floor(environment.paymentMaxUsdc*1_000_000))});
+    if(devnetConfig.preparationEnabled||devnetConfig.reconciliationEnabled)composition.workerLoop.start();
+  }
   const paymentRequestRepository = new PostgresPaymentRequestRepository(pool);
   const paymentRequestService = new PaymentRequestService(accountService,paymentPersistence,paymentRequestRepository,recipientDirectoryService,paymentIntentService,executionRepository);
   const executionWorker = new PaymentExecutionWorker(paymentPersistence, executionRepository, `backend-${randomUUID()}`,harnessAuth?.mockScenario);
@@ -226,6 +245,7 @@ if (environment.authEnabled) {
     readAuth: executionReadAuth,
     writeAuth: createAuthPipeline({ ...authConfiguration, requiredScope: environment.auth0WritePaymentsScope }),
   }));
+  if(browserDevnetService)app.use("/api/payment-intents",createBrowserDevnetExecutionsRouter({service:browserDevnetService,mutationLimiter:paymentMutationRateLimiter,readLimiter:authenticatedReadRateLimiter,readAuth:executionReadAuth,writeAuth:createAuthPipeline({...authConfiguration,requiredScope:environment.auth0WritePaymentsScope})}));
   app.use("/api/activity", createActivityRouter({ service: executionService, readAuth: executionReadAuth, readLimiter: authenticatedReadRateLimiter }));
   app.use("/api/payment-requests", createPaymentRequestsRouter({service:paymentRequestService,mutationLimiter:paymentMutationRateLimiter,readLimiter:authenticatedReadRateLimiter,readAuth:executionReadAuth,writeAuth:createAuthPipeline({...authConfiguration,requiredScope:environment.auth0WritePaymentsScope})}));
 } else {
@@ -353,10 +373,10 @@ const server = app.listen(environment.port, () => {
       environment.corsAllowedOrigins.length,
   });
 });
-server.on("close",()=>executionLoop?.stop());
+server.on("close",()=>{executionLoop?.stop();devnetComposition?.workerLoop.stop();});
 const shutdownCoordinator=new GracefulShutdownCoordinator(
   readinessService,
-  executionLoop??{stopAndDrain:async()=>undefined},
+  {stopAndDrain:async()=>{await Promise.all([executionLoop?.stopAndDrain(),devnetComposition?.workerLoop.stopAndDrain()]);}},
   server,
   postgresPool,
   (event,signal)=>{

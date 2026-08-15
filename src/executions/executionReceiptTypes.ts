@@ -6,7 +6,7 @@ export type ExecutionReceipt = Readonly<{
   executionId: string;
   actorSubject: string;
   runtimeTransactionId: string;
-  rail: "mock";
+  rail: "mock" | "solana";
   asset: "USDC";
   amountUnits: string;
   amountDecimals?: number;
@@ -35,7 +35,7 @@ export type PublicExecutionReceipt = Readonly<{
   sender: Readonly<{ displayName: "You" }>;
   recipient: Readonly<{ type: "payment_identity"; displayName: string; username: string; verificationState: string; trustOutcome: string } | { type: "direct_wallet"; displayName: "Wallet recipient" }>;
   memo: string | null;
-  rail: Readonly<{ id: "mock"; label: "Mock Rail" }>;
+  rail: Readonly<{ id: "mock"; label: "Mock Rail" } | { id: "solana"; label: "Solana Devnet" }>;
   settledAt: string;
   providerReference?: string;
   verification: Readonly<{ receiptSchemaVersion: 1; evidenceType: string; evidenceVersion: number; requestHash: string }>;
@@ -49,7 +49,7 @@ export function toPublicReceipt(receipt: ExecutionReceipt): PublicExecutionRecei
     : Object.freeze({ type: "direct_wallet" as const, displayName: "Wallet recipient" as const });
   return Object.freeze({ receiptId: receipt.receiptId, paymentIntentId: receipt.paymentIntentId, executionId: receipt.executionId,
     status: "settled", amountRaw: receipt.amountUnits, amount, asset: receipt.asset, sender: Object.freeze({ displayName: "You" as const }),
-    recipient, memo: receipt.memo, rail: Object.freeze({ id: "mock" as const, label: "Mock Rail" as const }), settledAt: receipt.settledAt,
+    recipient, memo: receipt.memo, rail: receipt.rail === "solana" ? Object.freeze({ id: "solana" as const, label: "Solana Devnet" as const }) : Object.freeze({ id: "mock" as const, label: "Mock Rail" as const }), settledAt: receipt.settledAt,
     ...(receipt.providerReference ? { providerReference: receipt.providerReference } : {}),
     verification: Object.freeze({ receiptSchemaVersion: 1 as const, evidenceType: receipt.evidenceType,
       evidenceVersion: receipt.evidenceVersion, requestHash: receipt.requestHash }) });
