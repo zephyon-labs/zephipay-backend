@@ -33,10 +33,18 @@ npm run e2e:devnet:provision
 
 The destination relation means only “configured test destination”; it is not account ownership. The backend signer remains server-owned and neither synthetic actor receives custody.
 
-After separate transaction authorization, the first command is:
+Live operators use exactly one external, mode-0600 env file. The repository never searches for `.env` files and the helper does not evaluate the file as shell code. It accepts only the documented keys, rejects forensic/test database variables, validates the canonical local database and migration/actors without constructing providers, and passes the loaded environment to the same child process that launches the harness.
+
+Readiness is provider-free and creates no payment:
 
 ```sh
-npm run e2e:devnet -- --scenario human-to-human-happy-path --live-devnet
+npm run e2e:devnet:ready
+```
+
+The fixed path is `~/.zephipay/devnet/canary.env`; an operator may instead provide exactly one reviewed path with `-- --env-file /absolute/reviewed/path`. After separate transaction authorization, the live command is:
+
+```sh
+npm run e2e:devnet:live -- --scenario human-to-human-happy-path
 ```
 
 Pure preflight completes before network-capable provider objects are constructed. Preparation is bounded to 30 seconds, reconciliation polls every 2 seconds for at most 120 seconds, and the intended overall operator window is 180 seconds. Timeout after commitment never enables resubmission; the durable execution remains reconciliation-only.

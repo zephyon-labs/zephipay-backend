@@ -12,6 +12,8 @@
     "migrate": "tsx scripts/run-migrations.ts",
     "migrate:validate": "tsx scripts/validate-migrations.ts",
     "e2e:devnet": "NODE_ENV=test tsx scripts/run-devnet-e2e.ts",
+    "e2e:devnet:ready": "tsx scripts/run-live-devnet-canary.ts ready",
+    "e2e:devnet:live": "tsx scripts/run-live-devnet-canary.ts live",
     "e2e:devnet:provision": "NODE_ENV=test tsx scripts/provision-e2e-live-actors.ts",
     "devnet:e6a:validate": "tsx scripts/validate-e6a-read-only.ts",
     "devnet:e6b:prepare": "tsx scripts/prepare-e6b-only.ts",
