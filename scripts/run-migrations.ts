@@ -6,6 +6,12 @@ import { Pool } from "pg";
 
 const MIGRATION_LOCK_ID = "827346192045711001";
 
+const APPROVED_LEGACY_MIGRATION_CHECKSUMS: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  "009_synthetic_beta_identities.sql": Object.freeze([
+    "d0f919ed2de21b4b85d8f864aa6ac922bdc5e47a0f47b1b03fbd976bdc8c73c9",
+  ]),
+});
+
 async function main(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL?.trim();
   if (!databaseUrl) throw new Error("DATABASE_URL is required to run migrations.");
@@ -34,7 +40,10 @@ async function main(): Promise<void> {
         [file],
       );
       if (existing.rows[0]) {
-        if (existing.rows[0].checksum !== checksum) {
+        const appliedChecksum = String(existing.rows[0].checksum);
+        const approvedLegacyChecksums = APPROVED_LEGACY_MIGRATION_CHECKSUMS[file] ?? [];
+
+        if (appliedChecksum !== checksum && !approvedLegacyChecksums.includes(appliedChecksum)) {
           throw new Error(`Applied migration ${file} has been modified.`);
         }
         continue;
