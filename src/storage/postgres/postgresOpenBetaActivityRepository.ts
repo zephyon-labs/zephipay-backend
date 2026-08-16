@@ -2,6 +2,7 @@ import type { Pool } from "pg";
 
 import {
   type OpenBetaActivityAggregate,
+  type DevnetQaAggregate,
   type OpenBetaActivityRepository,
   type OPEN_BETA_EPOCH,
 } from "../../telemetry/openBetaActivity";
@@ -58,6 +59,45 @@ export class PostgresOpenBetaActivityRepository implements OpenBetaActivityRepos
       durableReceipts: count(row.durable_receipts, "durableReceipts"),
       executionsInitiated: count(row.executions_initiated, "executionsInitiated"),
       executionsSettled: count(row.executions_settled, "executionsSettled"),
+    });
+  }
+
+  async aggregateDevnetQa(): Promise<DevnetQaAggregate> {
+    const result = await this.pool.query(`
+      WITH eligible AS (
+        SELECT result, actor_flow, canonical_payment_flow, invariant_violations,
+               duration_ms, COALESCE(completed_at, started_at) AS latest_at
+        FROM e2e_test_runs
+        WHERE test_origin='codex_e2e' AND mode='LIVE_DEVNET_CANARY'
+      ), latest AS (
+        SELECT result,actor_flow,canonical_payment_flow,duration_ms,latest_at
+        FROM eligible ORDER BY latest_at DESC LIMIT 1
+      )
+      SELECT
+        (SELECT count(*) FROM eligible) total_live_runs,
+        (SELECT count(*) FROM eligible WHERE result='PASSED') passed,
+        (SELECT count(*) FROM eligible WHERE result='FAILED') failed,
+        (SELECT COALESCE(sum(jsonb_array_length(invariant_violations)),0) FROM eligible) invariant_violation_count,
+        latest.result latest_result,latest.actor_flow latest_actor_flow,
+        latest.canonical_payment_flow latest_canonical_payment_flow,
+        latest.duration_ms latest_duration_ms,latest.latest_at
+      FROM (SELECT 1) singleton LEFT JOIN latest ON true
+    `);
+    const row = result.rows[0];
+    const latestResult = row.latest_result === null ? null : String(row.latest_result);
+    if (latestResult !== null && !["RUNNING", "PASSED", "FAILED"].includes(latestResult)) throw new Error("Devnet QA latest result is invalid.");
+    if (row.latest_actor_flow !== null && row.latest_actor_flow !== "H2H") throw new Error("Devnet QA actor flow is invalid.");
+    if (row.latest_canonical_payment_flow !== null && row.latest_canonical_payment_flow !== "P2P") throw new Error("Devnet QA payment flow is invalid.");
+    return Object.freeze({
+      totalLiveRuns: count(row.total_live_runs, "totalLiveRuns"),
+      passed: count(row.passed, "passed"),
+      failed: count(row.failed, "failed"),
+      latestResult: latestResult as DevnetQaAggregate["latestResult"],
+      latestActorFlow: row.latest_actor_flow as DevnetQaAggregate["latestActorFlow"],
+      latestCanonicalPaymentFlow: row.latest_canonical_payment_flow as DevnetQaAggregate["latestCanonicalPaymentFlow"],
+      invariantViolationCount: count(row.invariant_violation_count, "invariantViolationCount"),
+      latestDurationMs: row.latest_duration_ms === null ? null : count(row.latest_duration_ms, "latestDurationMs"),
+      latestAt: row.latest_at === null ? null : new Date(row.latest_at).toISOString(),
     });
   }
 }

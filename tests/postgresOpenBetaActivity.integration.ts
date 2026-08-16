@@ -66,6 +66,17 @@ test("synthetic source accounts remain operationally durable but do not incremen
   assert.equal((await pool.query("SELECT count(*)::int count FROM payment_executions")).rows[0].count, 2);
 });
 
+test("live Codex QA aggregates separately without changing human Mock metrics", async () => {
+  const source = await account(), destination = await account();
+  await pool.query("INSERT INTO synthetic_test_actors(synthetic_actor_id,account_id,actor_kind,test_origin,devnet_destination_address,destination_relationship,created_at) VALUES('synthetic-human-a',$1,'human','codex_e2e',NULL,NULL,$3),('synthetic-human-b',$2,'human','codex_e2e','11111111111111111111111111111111','configured_test_destination_not_ownership',$3)", [source.slice("zp:account:".length), destination.slice("zp:account:".length), EPOCH]);
+  const insert = async (mode: "LIVE_DEVNET_CANARY" | "OFFLINE", result: "PASSED" | "FAILED", at: string, violations: string[]) => pool.query("INSERT INTO e2e_test_runs(run_id,scenario_name,test_origin,mode,source_actor_id,destination_actor_id,source_actor_kind,destination_actor_kind,actor_flow,started_at,completed_at,result,invariant_violations,duration_ms) VALUES($1,'human-to-human-happy-path','codex_e2e',$2,'synthetic-human-a','synthetic-human-b','human','human','H2H',$3,$3,$4,$5,11000)", [randomUUID(), mode, at, result, JSON.stringify(violations)]);
+  await insert("LIVE_DEVNET_CANARY", "PASSED", "2026-08-16T05:20:52Z", []);
+  await insert("LIVE_DEVNET_CANARY", "FAILED", "2026-08-16T05:21:52Z", ["receipt_count"]);
+  await insert("OFFLINE", "PASSED", "2026-08-16T05:22:52Z", []);
+  assert.deepEqual(await repository.aggregateDevnetQa(), { totalLiveRuns: 2, passed: 1, failed: 1, latestResult: "FAILED", latestActorFlow: "H2H", latestCanonicalPaymentFlow: "P2P", invariantViolationCount: 1, latestDurationMs: 11000, latestAt: "2026-08-16T05:21:52.000Z" });
+  assert.deepEqual(await repository.aggregate("OPEN_BETA"), { betaTesters: 0, paymentsCompleted: 0, mockUsdcAmountRaw: "0", durableReceipts: 0, executionsInitiated: 0, executionsSettled: 0 });
+});
+
 async function account(): Promise<string> {
   const id = randomUUID();
   await identities.createAccount({ accountId: id, createdAt: EPOCH });

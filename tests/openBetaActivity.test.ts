@@ -14,6 +14,7 @@ const ZERO: OpenBetaActivityAggregate = Object.freeze({
   betaTesters: 0, paymentsCompleted: 0, mockUsdcAmountRaw: "0", durableReceipts: 0,
   executionsInitiated: 0, executionsSettled: 0,
 });
+const ZERO_QA = Object.freeze({ totalLiveRuns: 0, passed: 0, failed: 0, latestResult: null, latestActorFlow: null, latestCanonicalPaymentFlow: null, invariantViolationCount: 0, latestDurationMs: null, latestAt: null });
 
 describe("Open Beta activity service", () => {
   it("projects exact aggregate values and an honest null rate", async () => {
@@ -23,6 +24,7 @@ describe("Open Beta activity service", () => {
       betaTesters: 0, paymentsCompleted: 0,
       mockUsdcProcessed: { amountRaw: "0", decimals: 6 }, durableReceipts: 0,
       paymentCompletionRate: { completed: 0, initiated: 0, basisPoints: null },
+      devnetQa: ZERO_QA,
     });
   });
 
@@ -33,12 +35,12 @@ describe("Open Beta activity service", () => {
 
   it("caches successful snapshots for thirty seconds and never caches failures", async () => {
     let milliseconds = NOW.getTime(), calls = 0;
-    const good = new OpenBetaActivityService({ aggregate: async () => { calls++; return ZERO; } }, () => new Date(milliseconds));
+    const good = new OpenBetaActivityService({ aggregate: async () => { calls++; return ZERO; }, aggregateDevnetQa: async () => ZERO_QA }, () => new Date(milliseconds));
     await good.read(); milliseconds += 29_999; await good.read(); assert.equal(calls, 1);
     milliseconds += 1; await good.read(); assert.equal(calls, 2);
 
     let failures = 0;
-    const bad = new OpenBetaActivityService({ aggregate: async () => { failures++; throw new Error("private database detail"); } }, () => NOW);
+    const bad = new OpenBetaActivityService({ aggregate: async () => { failures++; throw new Error("private database detail"); }, aggregateDevnetQa: async () => ZERO_QA }, () => NOW);
     await assert.rejects(() => bad.read()); await assert.rejects(() => bad.read()); assert.equal(failures, 2);
   });
 });
@@ -59,13 +61,13 @@ describe("Open Beta activity HTTP projection", () => {
     const response = await fetch(`${base}/api/telemetry/open-beta`); const body = await response.json() as any;
     assert.equal(response.status, 200); assert.equal(response.headers.get("cache-control"), "public, max-age=30, stale-while-revalidate=120");
     assert.deepEqual(Object.keys(body).sort(), ["data", "ok"]);
-    assert.deepEqual(Object.keys(body.data).sort(), ["betaTesters", "durableReceipts", "generatedAt", "mockUsdcProcessed", "paymentCompletionRate", "paymentsCompleted", "rail", "scope", "settlement"]);
+    assert.deepEqual(Object.keys(body.data).sort(), ["betaTesters", "devnetQa", "durableReceipts", "generatedAt", "mockUsdcProcessed", "paymentCompletionRate", "paymentsCompleted", "rail", "scope", "settlement"]);
     const serialized = JSON.stringify(body);
     for (const privateName of ["actorSubject", "accountId", "username", "recipient", "paymentIntentId", "executionId", "receiptId", "providerReference", "requestHash", "evidence", "requestId"]) assert.equal(serialized.includes(privateName), false);
   });
 
   it("returns a generic unavailable response without caching failures", async () => {
-    const app = express(); app.use("/api/telemetry", createOpenBetaActivityRouter(new OpenBetaActivityService({ aggregate: async () => { throw new Error("password=secret"); } })));
+    const app = express(); app.use("/api/telemetry", createOpenBetaActivityRouter(new OpenBetaActivityService({ aggregate: async () => { throw new Error("password=secret"); }, aggregateDevnetQa: async () => ZERO_QA })));
     const server = app.listen(0); await new Promise<void>((resolve) => server.once("listening", resolve)); const address = server.address(); assert.ok(address && typeof address === "object");
     try { const response = await fetch(`http://127.0.0.1:${address.port}/api/telemetry/open-beta`); assert.equal(response.status, 503); assert.equal(response.headers.get("cache-control"), "no-store"); assert.deepEqual(await response.json(), { ok: false, error: "Open Beta activity is temporarily unavailable." }); }
     finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
@@ -73,5 +75,5 @@ describe("Open Beta activity HTTP projection", () => {
 });
 
 function repository(value: OpenBetaActivityAggregate): OpenBetaActivityRepository {
-  return { aggregate: async (epoch) => { assert.equal(epoch, "OPEN_BETA"); return value; } };
+  return { aggregate: async (epoch) => { assert.equal(epoch, "OPEN_BETA"); return value; }, aggregateDevnetQa: async () => ZERO_QA };
 }

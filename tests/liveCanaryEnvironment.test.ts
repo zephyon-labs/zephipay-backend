@@ -7,7 +7,7 @@ import test from "node:test";
 import { Keypair } from "@solana/web3.js";
 
 import { CIRCLE_SOLANA_DEVNET_USDC_MINT } from "../src/devnet/canonicalDevnetAsset";
-import { assertLiveCanaryDatabaseReady, buildLiveCanaryProcessEnvironment, LIVE_CANARY_ENV_KEYS, liveCanaryLaunch, loadLiveCanaryEnvironment } from "../src/e2e/liveCanaryEnvironment";
+import { assertLiveCanaryDatabaseReady, buildLiveCanaryProcessEnvironment, executeLiveCanaryBatch, LIVE_CANARY_ENV_KEYS, liveCanaryLaunch, loadLiveCanaryEnvironment, parseLiveCanaryInvocation } from "../src/e2e/liveCanaryEnvironment";
 
 const signer = Keypair.fromSeed(Buffer.alloc(32, 31)), destination = Keypair.fromSeed(Buffer.alloc(32, 32)).publicKey.toBase58();
 function values(): Record<string, string> {
@@ -64,4 +64,20 @@ test("readiness checks only migration and actors and cannot create providers or 
   assert.equal(queries.length, 1); assert.equal(/INSERT|UPDATE|DELETE|payment_intents/i.test(queries[0]), false);
   await assert.rejects(() => assertLiveCanaryDatabaseReady({ async query() { return { rows: [{ migration_019: false, actor_count: 2, destination }] }; } } as never, values()), /Migration 019/);
   await assert.rejects(() => assertLiveCanaryDatabaseReady({ async query() { return { rows: [{ migration_019: true, actor_count: 1, destination: null }] }; } } as never, values()), /actors/);
+});
+
+test("live batch accepts only explicit counts one through five", () => {
+  for (let count = 1; count <= 5; count++) assert.deepEqual(parseLiveCanaryInvocation(["--scenario", "human-to-human-happy-path", "--count", String(count)]), { scenario: "human-to-human-happy-path", count });
+  assert.deepEqual(parseLiveCanaryInvocation(["--scenario", "human-to-human-happy-path"]), { scenario: "human-to-human-happy-path", count: 1 });
+  for (const count of ["0", "6", "100", "1.5", "-1"]) assert.throws(() => parseLiveCanaryInvocation(["--scenario", "human-to-human-happy-path", "--count", count]), /count/);
+  assert.throws(() => parseLiveCanaryInvocation(["--scenario", "duplicate-confirm", "--count", "5"]), /human-to-human/);
+});
+
+test("live batch is sequential, records each run independently, and stops after first failure without retry", async () => {
+  const invoked: number[] = [], audited: string[][] = [];
+  const passed = await executeLiveCanaryBatch(3, async item => { invoked.push(item); return { runId: `run-${item}`, result: "PASSED", exitCode: 0 }; }, async ids => { audited.push([...ids]); });
+  assert.deepEqual(passed, ["run-1", "run-2", "run-3"]); assert.deepEqual(invoked, [1, 2, 3]); assert.deepEqual(audited, [["run-1", "run-2", "run-3"]]);
+  invoked.length = 0;
+  await assert.rejects(() => executeLiveCanaryBatch(5, async item => { invoked.push(item); return { runId: `failed-${item}`, result: item === 3 ? "FAILED" : "PASSED", exitCode: item === 3 ? 1 : 0 }; }, async () => assert.fail("failed batches must not reach aggregate audit")), /item 3 failed/);
+  assert.deepEqual(invoked, [1, 2, 3]);
 });

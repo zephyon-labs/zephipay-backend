@@ -47,6 +47,12 @@ The fixed path is `~/.zephipay/devnet/canary.env`; an operator may instead provi
 npm run e2e:devnet:live -- --scenario human-to-human-happy-path
 ```
 
+An explicitly authorized bounded batch may add `--count N`, where `N` is an integer from one through five. Items run sequentially, each creates an independent E2E run and payment, and the launcher stops without retry after the first non-passing item. After all items pass, a read-only durable batch assertion requires one payment, execution, commitment, submission observation, receipt, and settlement event per run:
+
+```sh
+npm run e2e:devnet:live -- --scenario human-to-human-happy-path --count 5
+```
+
 Pure preflight completes before network-capable provider objects are constructed. Preparation is bounded to 30 seconds, reconciliation polls every 2 seconds for at most 120 seconds, and the intended overall operator window is 180 seconds. Timeout after commitment never enables resubmission; the durable execution remains reconciliation-only.
 
 A run is inserted as `RUNNING` before economic work and terminalized as `PASSED` or `FAILED`. A process crash leaves `RUNNING`, never `PASSED`. Diagnose abandoned rows with a read-only query for `result='RUNNING'` ordered by `started_at`; inspect linked payment/execution and commitment state. If committed, restart only a reconciliation-capable, submission-disabled recovery path using the persisted signature.

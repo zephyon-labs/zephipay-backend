@@ -9,8 +9,21 @@ export type OpenBetaActivityAggregate = Readonly<{
   executionsSettled: number;
 }>;
 
+export type DevnetQaAggregate = Readonly<{
+  totalLiveRuns: number;
+  passed: number;
+  failed: number;
+  latestResult: "RUNNING" | "PASSED" | "FAILED" | null;
+  latestActorFlow: "H2H" | null;
+  latestCanonicalPaymentFlow: "P2P" | null;
+  invariantViolationCount: number;
+  latestDurationMs: number | null;
+  latestAt: string | null;
+}>;
+
 export interface OpenBetaActivityRepository {
   aggregate(epochName: typeof OPEN_BETA_EPOCH): Promise<OpenBetaActivityAggregate>;
+  aggregateDevnetQa(): Promise<DevnetQaAggregate>;
 }
 
 export type PublicOpenBetaActivity = Readonly<{
@@ -27,6 +40,7 @@ export type PublicOpenBetaActivity = Readonly<{
     initiated: number;
     basisPoints: number | null;
   }>;
+  devnetQa: DevnetQaAggregate;
 }>;
 
 export class OpenBetaActivityService {
@@ -42,7 +56,10 @@ export class OpenBetaActivityService {
     const now = this.now();
     if (this.cached && this.cached.expiresAt > now.getTime()) return this.cached.value;
 
-    const aggregate = await this.repository.aggregate(OPEN_BETA_EPOCH);
+    const [aggregate, devnetQa] = await Promise.all([
+      this.repository.aggregate(OPEN_BETA_EPOCH),
+      this.repository.aggregateDevnetQa(),
+    ]);
     const basisPoints = aggregate.executionsInitiated === 0
       ? null
       : Math.floor((aggregate.executionsSettled * 10_000) / aggregate.executionsInitiated);
@@ -60,6 +77,7 @@ export class OpenBetaActivityService {
         initiated: aggregate.executionsInitiated,
         basisPoints,
       }),
+      devnetQa,
     });
     this.cached = Object.freeze({ expiresAt: now.getTime() + this.ttlMs, value });
     return value;

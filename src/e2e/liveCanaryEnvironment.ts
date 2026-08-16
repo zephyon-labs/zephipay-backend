@@ -24,7 +24,17 @@ export const LIVE_CANARY_ENV_KEYS = Object.freeze([
   "DEVNET_SOURCE_TOKEN_ACCOUNT",
 ] as const);
 export const FORBIDDEN_CANARY_DATABASE_KEYS = Object.freeze(["E6_DATABASE_URL", "E6B_DATABASE_URL", "TEST_DATABASE_URL"] as const);
+export const MAX_LIVE_CANARY_BATCH_COUNT = 5;
 type Environment = Record<string, string | undefined>;
+
+export function parseLiveCanaryInvocation(values: readonly string[]): { scenario: "human-to-human-happy-path"; count: number } {
+  const args = [...values], scenarioAt = args.indexOf("--scenario"), countAt = args.indexOf("--count");
+  if (scenarioAt < 0 || args[scenarioAt + 1] !== "human-to-human-happy-path") throw new Error("Live launch requires --scenario human-to-human-happy-path.");
+  if (args.filter(value => value === "--scenario").length !== 1 || args.filter(value => value === "--count").length > 1) throw new Error("Live launch arguments must not be repeated.");
+  const countText = countAt < 0 ? "1" : args[countAt + 1], expectedLength = countAt < 0 ? 2 : 4;
+  if (args.length !== expectedLength || !countText || !/^[1-5]$/.test(countText)) throw new Error(`Live canary count must be an integer from 1 through ${MAX_LIVE_CANARY_BATCH_COUNT}.`);
+  return Object.freeze({ scenario: "human-to-human-happy-path", count: Number(countText) });
+}
 
 export async function loadLiveCanaryEnvironment(filePath = DEFAULT_LIVE_CANARY_ENV_FILE): Promise<Record<string, string>> {
   const path = resolve(filePath);
@@ -106,4 +116,43 @@ export function liveCanaryLaunch(env: Environment, scenario: string) {
     arguments: Object.freeze([require.resolve("tsx/cli"), "scripts/run-devnet-e2e.ts", "--scenario", scenario, "--live-devnet"]),
     environment: env,
   });
+}
+
+export async function assertLiveCanaryBatch(pool: Pick<Pool, "query">, runIds: readonly string[], expectedCount: number): Promise<void> {
+  if (runIds.length !== expectedCount || new Set(runIds).size !== expectedCount) throw new Error("Live batch did not produce the expected distinct run IDs.");
+  const result = await pool.query(`SELECT r.run_id,r.result,r.invariant_violations,p.status payment_status,e.status execution_status,
+    prep.lifecycle_state,
+    (SELECT count(*)::int FROM payments xp WHERE xp.idempotency_key='codex-live-canary:'||r.run_id::text) payment_count,
+    (SELECT count(*)::int FROM payment_executions xe WHERE xe.execution_id=r.execution_id) execution_count,
+    (SELECT count(*)::int FROM devnet_submission_commitments c WHERE c.execution_id=r.execution_id) commitment_count,
+    (SELECT count(*)::int FROM devnet_submission_observations s WHERE s.execution_id=r.execution_id) submission_count,
+    (SELECT count(*)::int FROM payment_execution_receipts x WHERE x.execution_id=r.execution_id) receipt_count,
+    (SELECT count(*)::int FROM payment_events pe WHERE pe.payment_id=r.payment_intent_id AND pe.event_type='SETTLEMENT_CONFIRMED') settlement_event_count
+    FROM e2e_test_runs r JOIN payments p ON p.id=r.payment_intent_id JOIN payment_executions e ON e.execution_id=r.execution_id
+    JOIN devnet_execution_preparations prep ON prep.execution_id=e.execution_id AND prep.lifecycle_state<>'ABANDONED_PRE_CONTACT'
+    WHERE r.run_id=ANY($1::uuid[])`, [runIds]);
+  if (result.rows.length !== expectedCount) throw new Error("Live batch durable run count does not match the requested count.");
+  for (const row of result.rows) {
+    const valid = row.result === "PASSED" && row.payment_status === "COMPLETED" && row.execution_status === "SETTLED" && row.lifecycle_state === "SETTLED" &&
+      [row.payment_count,row.execution_count,row.commitment_count,row.submission_count,row.receipt_count,row.settlement_event_count].every(value => Number(value) === 1) &&
+      Array.isArray(row.invariant_violations) && row.invariant_violations.length === 0;
+    if (!valid) throw new Error(`Live batch invariant failed for run ${String(row.run_id)}.`);
+  }
+}
+
+export async function executeLiveCanaryBatch(
+  count: number,
+  runItem: (item: number) => Promise<Readonly<{ runId?: string; result?: string; exitCode: number }>>,
+  audit: (runIds: readonly string[], expectedCount: number) => Promise<void>,
+): Promise<readonly string[]> {
+  if (!Number.isInteger(count) || count < 1 || count > MAX_LIVE_CANARY_BATCH_COUNT) throw new Error(`Live canary count must be an integer from 1 through ${MAX_LIVE_CANARY_BATCH_COUNT}.`);
+  const runIds: string[] = [];
+  for (let item = 1; item <= count; item++) {
+    const run = await runItem(item);
+    if (!run.runId) throw new Error(`Live canary item ${item} did not return a durable run ID.`);
+    runIds.push(run.runId);
+    if (run.exitCode !== 0 || run.result !== "PASSED") throw new Error(`Live canary item ${item} failed; batch stopped without retry.`);
+  }
+  await audit(runIds, count);
+  return Object.freeze(runIds);
 }
