@@ -16,8 +16,13 @@ export class PostgresOpenBetaActivityRepository implements OpenBetaActivityRepos
       ), eligible_executions AS (
         SELECT e.execution_id, e.payment_intent_id, e.actor_subject, e.status
         FROM payment_executions e
+        JOIN accounts source_account ON source_account.actor_subject=e.actor_subject
         CROSS JOIN epoch
         WHERE e.selected_rail = 'mock' AND e.created_at >= epoch.starts_at
+          AND NOT EXISTS (
+            SELECT 1 FROM synthetic_test_actors synthetic
+            WHERE synthetic.account_id=source_account.account_id
+          )
       ), eligible_receipts AS (
         SELECT r.receipt_id, r.payment_intent_id, r.actor_subject, r.amount_units, r.amount_decimals
         FROM payment_execution_receipts r

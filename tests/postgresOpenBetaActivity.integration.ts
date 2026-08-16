@@ -54,6 +54,18 @@ test("epoch absence fails closed, duplicate epoch is prohibited, and non-Mock ex
   await assert.rejects(() => pool.query("INSERT INTO payment_executions(execution_id,payment_intent_id,actor_subject,selected_rail,provider_idempotency_key,created_at,updated_at) VALUES($1,$2,$3,'solana',$4,$5,$5)", [randomUUID(), paymentId, actor, randomUUID(), EPOCH]));
 });
 
+test("synthetic source accounts remain operationally durable but do not increment public human metrics", async () => {
+  const human = await account(), synthetic = await account();
+  await execution(human, EPOCH, "SETTLED", "2000000", true);
+  await execution(synthetic, EPOCH, "SETTLED", "3000000", true);
+  await pool.query("INSERT INTO synthetic_test_actors(synthetic_actor_id,account_id,actor_kind,test_origin,created_at) VALUES('synthetic-human-a',$1,'human','codex_e2e',$2)", [synthetic.slice("zp:account:".length), EPOCH]);
+  assert.deepEqual(await repository.aggregate("OPEN_BETA"), {
+    betaTesters: 1, paymentsCompleted: 1, mockUsdcAmountRaw: "2000000",
+    durableReceipts: 1, executionsInitiated: 1, executionsSettled: 1,
+  });
+  assert.equal((await pool.query("SELECT count(*)::int count FROM payment_executions")).rows[0].count, 2);
+});
+
 async function account(): Promise<string> {
   const id = randomUUID();
   await identities.createAccount({ accountId: id, createdAt: EPOCH });

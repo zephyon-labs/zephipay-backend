@@ -1,0 +1,3 @@
+import type{Pool}from"pg";
+export class PostgresE2eQaTelemetryRepository{constructor(private readonly pool:Pool){}async recent(limit=50){if(!Number.isInteger(limit)||limit<1||limit>500)throw new Error("QA telemetry limit must be 1..500.");const r=await this.pool.query(`SELECT run_id,scenario_name,test_origin,mode,source_actor_kind,destination_actor_kind,payment_intent_id,execution_id,result,final_payment_status,final_execution_status,receipt_count,submission_count,invariant_violations,duration_ms,failure_stage,failure_reason,started_at,completed_at FROM e2e_test_runs ORDER BY started_at DESC,run_id LIMIT $1`,[limit]);return r.rows.map(row=>Object.freeze({...row,invariant_violations:Object.freeze(row.invariant_violations)}));}}
+
