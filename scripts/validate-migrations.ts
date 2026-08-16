@@ -57,7 +57,7 @@ const DEVNET_STATE_REQUIRED_TOKENS=["CREATE TABLE devnet_execution_preparations"
 const DEVNET_RECONCILIATION_REQUIRED_TOKENS=["CREATE TABLE devnet_reconciliation_observations","devnet_reconciliation_observations_append_only","UNIQUE(execution_id,sequence_number)","devnet_reconciliation_outcome"];
 const DEVNET_SUBMISSION_REQUIRED_TOKENS=["CREATE TABLE devnet_submission_observations","devnet_submission_observations_append_only","devnet_provider_contact_certainty","VALIDATION_FAILED"];
 const DEVNET_RECOVERY_REQUIRED_TOKENS=["CREATE TYPE devnet_recovery_task_kind AS ENUM ('PREPARATION','RECONCILIATION')","CREATE TABLE devnet_recovery_leases","PRIMARY KEY(execution_id,task_kind)","lease_expires_at>claimed_at"];
-const E2E_RELIABILITY_REQUIRED_TOKENS=["CREATE TABLE synthetic_test_actors","synthetic_test_actors_immutable","CREATE TABLE e2e_test_runs","e2e_test_runs_monotonic","human-to-human-happy-path","agent-to-agent"];
+const E2E_RELIABILITY_REQUIRED_TOKENS=["CREATE TABLE synthetic_test_actors","synthetic_test_actors_immutable","configured_test_destination_not_ownership","CREATE TABLE e2e_test_runs","actor_flow","canonical_payment_flow","GENERATED ALWAYS","e2e_test_runs_monotonic","human-to-human-happy-path","agent-to-agent"];
 
 async function main(): Promise<void> {
   const directory = path.resolve(process.cwd(), "migrations");

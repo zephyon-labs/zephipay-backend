@@ -17,8 +17,30 @@ Runnable H2H scenarios are `human-to-human-happy-path`, `duplicate-confirm`, `du
 
 `human-to-agent`, `agent-to-human`, and `agent-to-agent` are `UNSUPPORTED`. Depending on direction, the missing primitives are an authenticated agent principal, agent-owned account authorization, payable agent identity and destination authorization, and execution API authorization. The harness does not fabricate them.
 
+## Flow normalization
+
+Actor shorthand is the stored classification and canonical payment flow is database-derived: `H2H→P2P`, `H2B→P2B`, `B2B→B2B`, `H2A→P2AI`, `A2H→AI2P`, `A2A→AI2AI`, and `A2B→AI2B`. The first canary is strictly human/H2H/P2P. Agent-direction scenarios remain unsupported even though their taxonomy is defined.
+
 ## Live canary boundary
 
 Live policy is disabled by default. The policy gate requires an explicit live flag and confirmation, `solana-devnet`, at most 1000 raw USDC units, two `codex_e2e` synthetic actors, explicit submission and reconciliation capabilities, and no existing commitment. Mainnet fails closed. Once a commitment exists the execution is observation/reconciliation-only; signing and submission authority must not be reconstructed.
 
-The first live canary must be separately reviewed and composed with environment-owned signer and provider configuration. This implementation does not execute it and the default CLI rejects `--live-devnet` before constructing provider infrastructure.
+Provisioning requires an explicitly supplied public destination and never generates a wallet:
+
+```sh
+npm run e2e:devnet:provision
+```
+
+The destination relation means only “configured test destination”; it is not account ownership. The backend signer remains server-owned and neither synthetic actor receives custody.
+
+After separate transaction authorization, the first command is:
+
+```sh
+npm run e2e:devnet -- --scenario human-to-human-happy-path --live-devnet
+```
+
+Pure preflight completes before network-capable provider objects are constructed. Preparation is bounded to 30 seconds, reconciliation polls every 2 seconds for at most 120 seconds, and the intended overall operator window is 180 seconds. Timeout after commitment never enables resubmission; the durable execution remains reconciliation-only.
+
+A run is inserted as `RUNNING` before economic work and terminalized as `PASSED` or `FAILED`. A process crash leaves `RUNNING`, never `PASSED`. Diagnose abandoned rows with a read-only query for `result='RUNNING'` ordered by `started_at`; inspect linked payment/execution and commitment state. If committed, restart only a reconciliation-capable, submission-disabled recovery path using the persisted signature.
+
+Failure stages are `PRECONDITION_FAILED`, `IDENTITY_FAILED`, `PAYMENT_INTENT_FAILED`, `CONFIRMATION_FAILED`, `PREPARATION_FAILED`, `COMMITMENT_FAILED`, `SUBMISSION_REJECTED`, `SUBMISSION_AMBIGUOUS`, `RECONCILIATION_FAILED`, `SETTLEMENT_TIMEOUT`, `RECEIPT_FAILED`, `COMPLETION_FAILED`, and `INVARIANT_FAILED`.

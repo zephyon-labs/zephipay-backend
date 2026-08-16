@@ -9,7 +9,10 @@ CREATE TABLE synthetic_test_actors (
   actor_class text NOT NULL DEFAULT 'synthetic_test' CHECK (actor_class='synthetic_test'),
   actor_kind synthetic_actor_kind NOT NULL,
   test_origin synthetic_test_origin NOT NULL,
+  devnet_destination_address text,
+  destination_relationship text CHECK (destination_relationship IS NULL OR destination_relationship='configured_test_destination_not_ownership'),
   created_at timestamptz NOT NULL DEFAULT now()
+  ,CHECK ((devnet_destination_address IS NULL)=(destination_relationship IS NULL))
 );
 
 CREATE FUNCTION protect_synthetic_test_actor() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -32,6 +35,11 @@ CREATE TABLE e2e_test_runs (
   destination_actor_id text REFERENCES synthetic_test_actors(synthetic_actor_id) ON DELETE RESTRICT,
   source_actor_kind synthetic_actor_kind NOT NULL,
   destination_actor_kind synthetic_actor_kind NOT NULL,
+  actor_flow text NOT NULL CHECK (actor_flow IN ('H2H','H2B','B2B','H2A','A2H','A2A','A2B')),
+  canonical_payment_flow text GENERATED ALWAYS AS (
+    CASE actor_flow WHEN 'H2H' THEN 'P2P' WHEN 'H2B' THEN 'P2B' WHEN 'B2B' THEN 'B2B'
+      WHEN 'H2A' THEN 'P2AI' WHEN 'A2H' THEN 'AI2P' WHEN 'A2A' THEN 'AI2AI' WHEN 'A2B' THEN 'AI2B' END
+  ) STORED,
   started_at timestamptz NOT NULL,
   completed_at timestamptz,
   result e2e_test_result NOT NULL DEFAULT 'RUNNING',
@@ -50,7 +58,11 @@ CREATE TABLE e2e_test_runs (
   CHECK (result='RUNNING' OR duration_ms IS NOT NULL),
   CHECK ((result='FAILED') OR (failure_stage IS NULL AND failure_reason IS NULL)),
   CHECK ((scenario_name IN ('human-to-agent','agent-to-human','agent-to-agent')) OR
-         (source_actor_kind='human' AND destination_actor_kind='human'))
+         (source_actor_kind='human' AND destination_actor_kind='human')),
+  CHECK ((scenario_name='human-to-agent' AND actor_flow='H2A') OR
+         (scenario_name='agent-to-human' AND actor_flow='A2H') OR
+         (scenario_name='agent-to-agent' AND actor_flow='A2A') OR
+         (scenario_name NOT IN ('human-to-agent','agent-to-human','agent-to-agent') AND actor_flow='H2H'))
 );
 
 CREATE FUNCTION protect_e2e_test_run() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -58,10 +70,10 @@ BEGIN
   IF OLD.result<>'RUNNING' THEN RAISE EXCEPTION 'terminal E2E test runs are immutable'; END IF;
   IF NEW.result='RUNNING' THEN RAISE EXCEPTION 'E2E test run updates must be terminal'; END IF;
   IF ROW(NEW.run_id,NEW.scenario_name,NEW.test_origin,NEW.mode,NEW.source_actor_id,
-         NEW.destination_actor_id,NEW.source_actor_kind,NEW.destination_actor_kind,NEW.started_at)
+         NEW.destination_actor_id,NEW.source_actor_kind,NEW.destination_actor_kind,NEW.actor_flow,NEW.started_at)
      IS DISTINCT FROM
      ROW(OLD.run_id,OLD.scenario_name,OLD.test_origin,OLD.mode,OLD.source_actor_id,
-         OLD.destination_actor_id,OLD.source_actor_kind,OLD.destination_actor_kind,OLD.started_at)
+         OLD.destination_actor_id,OLD.source_actor_kind,OLD.destination_actor_kind,OLD.actor_flow,OLD.started_at)
   THEN RAISE EXCEPTION 'E2E test run identity is immutable'; END IF;
   RETURN NEW;
 END $$;
@@ -72,4 +84,3 @@ CREATE TRIGGER e2e_test_runs_no_delete BEFORE DELETE ON e2e_test_runs
 
 CREATE INDEX e2e_test_runs_qa_activity ON e2e_test_runs(started_at DESC,scenario_name,result);
 CREATE INDEX synthetic_test_actors_classification ON synthetic_test_actors(account_id,test_origin,actor_kind);
-
