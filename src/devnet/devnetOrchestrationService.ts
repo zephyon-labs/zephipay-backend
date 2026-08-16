@@ -2,16 +2,15 @@ import { randomUUID } from "node:crypto";
 import {
   ProviderIndependentSolanaDevnetTransport, RailProviderOperationError, ReferenceSolanaDevnetTransactionPreparer, authorizeCommittedDevnetSubmission, classifyDevnetBlockhash, parseExecutionId, parseProviderIdempotencyKey, signedTransactionDigest,
   type DevnetBlockhashSource, type DevnetTransactionSigner, type RailExecutionCommand,
-  type ReferenceDevnetPreparationPolicy, type SolanaChainObservation, type SolanaDevnetPreparedTransaction, type SolanaSubmissionRpc,
+  type ReferenceDevnetPreparationPolicy, type SolanaDevnetPreparedTransaction, type SolanaSubmissionRpc,
 } from "zephyon-protocol";
 import type { DevnetExecutionStateRepository, PersistedDevnetPreparation } from "./devnetExecutionState";
 import { Aes256GcmPreparedTransactionCipher } from "./preparedTransactionCipher";
+import { DevnetReconciliationService, type DevnetReconciliationProvider } from "./devnetReconciliationService";
+
+export type { DevnetReconciliationProvider } from "./devnetReconciliationService";
 
 export interface DevnetBlockHeightSource { getCurrentDevnetBlockHeight(): Promise<string>; }
-export interface DevnetReconciliationProvider {
-  readonly identity: Readonly<{ providerId: string; network: "devnet"; role: "reconciliation" }>;
-  observeSignature(signature: string): Promise<SolanaChainObservation>;
-}
 export type DevnetCapabilityPolicy = Readonly<{ submissionEnabled?: boolean; reconciliationEnabled?: boolean }>;
 export type DevnetPreparationIdentityInput = Readonly<{ preparationId: string; executionId: string; paymentIntentId: string; actorSubject: string; generation: number }>;
 
@@ -21,6 +20,7 @@ export class DevnetOrchestrationService {
   private readonly submissionEnabled: boolean;
   private readonly reconciliationEnabled: boolean;
   private readonly transport:ProviderIndependentSolanaDevnetTransport;
+  private readonly reconciliation: DevnetReconciliationService;
 
   constructor(
     private readonly repository: DevnetExecutionStateRepository,
@@ -42,6 +42,7 @@ export class DevnetOrchestrationService {
     if (policy.submissionProviderId === policy.reconciliationProviderId) throw new Error("Submission and reconciliation providers must be independent.");
     this.preparer = new ReferenceSolanaDevnetTransactionPreparer(policy, blockhashSource, signer);
     this.transport=new ProviderIndependentSolanaDevnetTransport(this.preparer,submissionProvider,reconciliationProvider);
+    this.reconciliation = new DevnetReconciliationService(repository, reconciliationProvider, policy.reconciliationProviderId, clock, idFactory);
   }
 
   capabilities() { return Object.freeze({ submissionEnabled: this.submissionEnabled, reconciliationEnabled: this.reconciliationEnabled }); }
@@ -77,18 +78,7 @@ export class DevnetOrchestrationService {
 
   async reconcile(executionId:string,actorSubject:string){
     if(!this.reconciliationEnabled)return Object.freeze({attempted:false as const,reason:"RECONCILIATION_DISABLED" as const});
-    const preparation=await this.repository.findPreparation(executionId,actorSubject);const commitment=await this.repository.findCommitment(executionId,actorSubject);
-    if(!preparation||!commitment||commitment.preparationId!==preparation.preparationId)throw new Error("Committed Devnet preparation was not found for this owner.");
-    if(preparation.artifact.reconciliationProviderId!==this.reconciliationProvider.identity.providerId)throw new Error("Persisted reconciliation provider identity changed.");
-    let value:SolanaChainObservation;try{value=await this.reconciliationProvider.observeSignature(commitment.signature);}catch(error){return this.persistReconciliation(preparation,{executionId,actorSubject,preparationId:preparation.preparationId,providerId:this.reconciliationProvider.identity.providerId,outcome:"UNKNOWN",observedAt:this.clock(),errorCode:reconciliationErrorCode(error)});}
-    if(value.providerId!==undefined&&value.providerId!==this.reconciliationProvider.identity.providerId)throw new Error("Reconciliation observation provider identity mismatch.");const outcome=value.status.toUpperCase() as "MISSING"|"PENDING"|"SETTLED"|"FAILED";
-    return this.persistReconciliation(preparation,{executionId,actorSubject,preparationId:preparation.preparationId,providerId:this.reconciliationProvider.identity.providerId,outcome,observedAt:value.observedAt,...("slot" in value&&value.slot?{slot:value.slot}:{}),...("confirmationStatus" in value&&value.confirmationStatus?{confirmationStatus:value.confirmationStatus}:{}),...(value.status==="failed"?{errorCode:value.errorCode}:{})});
-  }
-
-  private async persistReconciliation(preparation:PersistedDevnetPreparation,input:Omit<Parameters<DevnetExecutionStateRepository["recordReconciliationObservation"]>[0],"observationId">){
-    const observations=await this.repository.listReconciliationObservations(input.executionId,input.actorSubject),prior=observations[observations.length-1];
-    if(prior&&sameReconciliation(prior,input))return Object.freeze({attempted:true as const,persisted:false as const,preparation,observation:prior});
-    return Object.freeze({attempted:true as const,persisted:true as const,...await this.repository.recordReconciliationObservation({...input,observationId:this.idFactory()})});
+    return this.reconciliation.reconcile(executionId, actorSubject);
   }
 
   private persistence(identity:DevnetPreparationIdentityInput,artifact:SolanaDevnetPreparedTransaction){const encryptedSignedTransaction=this.cipher.encrypt(artifact.signedTransactionBase64,{executionId:identity.executionId,preparationId:identity.preparationId,keyVersion:this.cipher.keyVersion});const{signedTransactionBase64:_,...economic}=artifact;return Object.freeze({...identity,encryptedSignedTransaction,artifact:Object.freeze(economic),preparedAt:this.clock()});}
@@ -96,5 +86,3 @@ export class DevnetOrchestrationService {
   private assertIdentity(identity:DevnetPreparationIdentityInput,command:RailExecutionCommand){if(identity.executionId!==command.executionId||identity.paymentIntentId!==command.paymentIntentId||command.rail!=="solana"||command.destination.type!=="wallet"||command.destination.network!=="solana-devnet"||command.amount.asset!==this.policy.asset||command.amount.decimals!==this.policy.decimals)throw new Error("Runtime command does not match server-authoritative Devnet execution identity or policy.");}
 }
 function conclusiveProviderCode(error:unknown){if(!(error instanceof RailProviderOperationError))return undefined;if(error.message==="Devnet RPC provider.")return"CONCLUSIVE_PROVIDER_REJECTION";const match=/^Devnet RPC provider: ([A-Z0-9_.:-]{1,64})\.$/.exec(error.message);return match?.[1];}
-function reconciliationErrorCode(error:unknown){if(typeof error==="object"&&error!==null){const value=error as{code?:unknown;providerErrorCode?:unknown};if(typeof value.providerErrorCode==="string"&&/^[A-Z0-9_.:-]{1,64}$/.test(value.providerErrorCode))return value.providerErrorCode;if(typeof value.code==="string"&&/^[A-Z0-9_]{1,48}$/.test(value.code))return`RPC_${value.code}`;}return"RPC_UNKNOWN";}
-function sameReconciliation(prior:Readonly<{providerId:string;outcome:string;slot?:string;confirmationStatus?:string;errorCode?:string}>,next:Readonly<{providerId:string;outcome:string;slot?:string;confirmationStatus?:string;errorCode?:string}>){return prior.providerId===next.providerId&&prior.outcome===next.outcome&&prior.slot===next.slot&&prior.confirmationStatus===next.confirmationStatus&&prior.errorCode===next.errorCode;}
