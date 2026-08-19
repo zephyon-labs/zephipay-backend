@@ -121,15 +121,28 @@ export class PaymentSettlementGrowthProjector {
        JOIN accounts sender
          ON sender.actor_subject = r.actor_subject
 
-       WHERE NOT EXISTS (
-         SELECT 1
-         FROM growth_events g
-         WHERE g.source_domain = 'PAYMENT'
-           AND g.source_id = r.payment_intent_id::text
-           AND g.source_event_id = r.receipt_id
-           AND g.event_type = 'PAYMENT_SETTLED_SENT'
-           AND g.actor_account_id = sender.account_id
-       )
+       WHERE
+         NOT EXISTS (
+           SELECT 1
+           FROM growth_events g
+           WHERE g.source_domain = 'PAYMENT'
+             AND g.source_id = r.payment_intent_id::text
+             AND g.source_event_id = r.receipt_id
+             AND g.event_type = 'PAYMENT_SETTLED_SENT'
+             AND g.actor_account_id = sender.account_id
+         )
+         OR (
+           p.recipient_account_id IS NOT NULL
+           AND NOT EXISTS (
+             SELECT 1
+             FROM growth_events g
+             WHERE g.source_domain = 'PAYMENT'
+               AND g.source_id = r.payment_intent_id::text
+               AND g.source_event_id = r.receipt_id
+               AND g.event_type = 'PAYMENT_SETTLED_RECEIVED'
+               AND g.actor_account_id = p.recipient_account_id
+           )
+         )
 
        ORDER BY r.settled_at, r.receipt_id
        LIMIT $1`,

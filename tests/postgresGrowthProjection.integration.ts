@@ -517,3 +517,82 @@ test("pending sweep projects durable receipts once", async () => {
 
   assert.equal(events.length, 2);
 });
+
+test("pending sweep repairs missing canonical recipient growth after partial projection", async () => {
+  const sender = await account();
+  const recipient = await account();
+
+  const payment = await settledPayment({
+    senderAccountId: sender,
+    recipientAccountId: recipient,
+  });
+
+  const receipt = await pool.query(
+    `SELECT
+       receipt_id,
+       execution_id,
+       asset,
+       amount_units,
+       amount_decimals,
+       rail,
+       settled_at
+     FROM payment_execution_receipts
+     WHERE payment_intent_id=$1`,
+    [payment.paymentId],
+  );
+
+  assert.ok(receipt.rows[0]);
+
+  const row = receipt.rows[0];
+
+  await growth.append({
+    eventType: "PAYMENT_SETTLED_SENT",
+    actorAccountId: sender,
+    sourceDomain: "PAYMENT",
+    sourceId: payment.paymentId,
+    sourceEventId: String(row.receipt_id),
+    occurredAt: new Date(row.settled_at).toISOString(),
+    synthetic: false,
+    schemaVersion: 1,
+    context: {
+      receiptId: String(row.receipt_id),
+      executionId: String(row.execution_id),
+      asset: String(row.asset),
+      amountRaw: String(row.amount_units),
+      amountDecimals: Number(row.amount_decimals),
+      rail: String(row.rail),
+    },
+  });
+
+  const beforeSender = await growth.listByActor(sender, 10);
+  const beforeRecipient = await growth.listByActor(recipient, 10);
+
+  assert.equal(beforeSender.length, 1);
+  assert.equal(beforeRecipient.length, 0);
+
+  const repaired = await projector.projectPending(100);
+
+  assert.equal(repaired.length, 1);
+  assert.equal(repaired[0].senderCreated, false);
+  assert.equal(repaired[0].recipientCreated, true);
+
+  const senderEvents = await growth.listByActor(sender, 10);
+  const recipientEvents = await growth.listByActor(recipient, 10);
+
+  assert.equal(senderEvents.length, 1);
+  assert.equal(recipientEvents.length, 1);
+  assert.equal(
+    recipientEvents[0].eventType,
+    "PAYMENT_SETTLED_RECEIVED",
+  );
+
+  const replay = await projector.projectPending(100);
+
+  assert.equal(replay.length, 0);
+
+  const count = await pool.query(
+    "SELECT count(*)::int count FROM growth_events",
+  );
+
+  assert.equal(count.rows[0].count, 2);
+});
