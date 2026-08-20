@@ -64,6 +64,9 @@ import { PostgresBrowserDevnetExecutionStore } from "./storage/postgres/postgres
 import { BrowserDevnetExecutionService } from "./devnet/browserDevnetExecution";
 import { createBrowserDevnetExecutionsRouter } from "./routes/browserDevnetExecutions";
 import { devnetPreparationPolicy, hashDevnetPolicy } from "./devnet/devnetPreparationPolicy";
+import { ZpProgressService } from "./growth/zpProgressService";
+import { createZpRouter } from "./routes/zp";
+import { PostgresZpStateRepository } from "./storage/postgres/postgresZpStateRepository";
 
 const app = express();
 const harnessAuth = localHarnessAuth();
@@ -144,6 +147,7 @@ if (environment.authEnabled) {
   const accountService = new AccountProvisioningService(identityPersistence);
   const economicIdentityPersistence = new PostgresEconomicIdentityPersistence(pool);
   const economicIdentityService = new EconomicIdentityService(accountService, economicIdentityPersistence);
+  const zpProgressService = new ZpProgressService(accountService, new PostgresZpStateRepository(pool));
   const syntheticIdentityStore = environment.syntheticBetaIdentitiesEnabled ? new PostgresSyntheticBetaIdentityStore(pool) : undefined;
   const recipientDirectoryService = new RecipientDirectoryService(identityPersistence, economicIdentityPersistence, syntheticIdentityStore);
   const paymentPersistence = new PostgresPaymentPersistence(pool);
@@ -205,6 +209,7 @@ if (environment.authEnabled) {
     authenticatedReadRateLimiter,
     createAccountRouter(accountService, paymentPersistence),
     createEconomicIdentityRouter(economicIdentityService),
+    createZpRouter(zpProgressService),
   );
   app.use(
     "/api/recipients",
