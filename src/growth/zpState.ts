@@ -23,6 +23,8 @@ export type ZpProjectionResult = Readonly<{
 export interface ZpStateRepository {
   find(accountId: string): Promise<AccountZpState | undefined>;
 
+  listPendingAccounts(limit: number): Promise<string[]>;
+
   projectAccount(
     accountId: string,
     limit?: number,

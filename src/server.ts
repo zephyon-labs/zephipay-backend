@@ -67,11 +67,18 @@ import { devnetPreparationPolicy, hashDevnetPolicy } from "./devnet/devnetPrepar
 import { ZpProgressService } from "./growth/zpProgressService";
 import { createZpRouter } from "./routes/zp";
 import { PostgresZpStateRepository } from "./storage/postgres/postgresZpStateRepository";
+import { PostgresGrowthEventRepository } from "./storage/postgres/postgresGrowthEventRepository";
+import { PaymentSettlementGrowthProjector } from "./growth/paymentSettlementGrowthProjector";
+import {
+  GrowthZpProjectionCoordinator,
+  GrowthZpProjectionWorker,
+} from "./growth/growthZpProjectionWorker";
 
 const app = express();
 const harnessAuth = localHarnessAuth();
 let executionLoop: AdaptiveWorkerLoop | undefined;
 let devnetComposition: LiveDevnetComposition | undefined;
+let growthZpProjectionWorker: GrowthZpProjectionWorker | undefined;
 const postgresPool = environment.postgresEnabled
   ? createPaymentPostgresPool(environment.databaseUrl as string)
   : undefined;
@@ -79,6 +86,57 @@ const readinessService=new ReadinessService(postgresPool,(result)=>recordCounter
 const openBetaActivityService = postgresPool
   ? new OpenBetaActivityService(new PostgresOpenBetaActivityRepository(postgresPool))
   : undefined;
+const zpStateRepository = postgresPool
+  ? new PostgresZpStateRepository(postgresPool)
+  : undefined;
+
+if (
+  postgresPool &&
+  zpStateRepository &&
+  (environment.growthProjectionEnabled || environment.zpProjectionEnabled)
+) {
+  const configuration = Object.freeze({
+    growthEnabled: environment.growthProjectionEnabled,
+    zpEnabled: environment.zpProjectionEnabled,
+  });
+  const growthRepository = new PostgresGrowthEventRepository(postgresPool);
+  const coordinator = new GrowthZpProjectionCoordinator(
+    new PaymentSettlementGrowthProjector(postgresPool, growthRepository),
+    zpStateRepository,
+    configuration,
+  );
+  growthZpProjectionWorker = new GrowthZpProjectionWorker(
+    coordinator,
+    configuration,
+    (outcome) => {
+      const failed =
+        outcome.growthFailed ||
+        outcome.zpDiscoveryFailed ||
+        outcome.zpFailedAccounts > 0;
+      recordCounter("growth_zp_projection.iteration", {
+        outcome: failed ? "failure" : "success",
+      });
+      recordTiming(
+        "growth_zp_projection.iteration.duration",
+        outcome.durationMs,
+        { outcome: failed ? "failure" : "success" },
+      );
+      if (failed) {
+        emitReliabilityLog("error", "growth_zp_projection_failed", {
+          phase: outcome.growthFailed
+            ? "growth"
+            : outcome.zpDiscoveryFailed
+            ? "zp_discovery"
+            : "zp_account",
+        });
+      }
+    },
+    (_delayMs, outcome) => {
+      recordCounter("growth_zp_projection.schedule", { outcome });
+    },
+  );
+  growthZpProjectionWorker.start();
+}
 
 if (environment.trustProxy) {
   app.set("trust proxy", 1);
@@ -147,7 +205,7 @@ if (environment.authEnabled) {
   const accountService = new AccountProvisioningService(identityPersistence);
   const economicIdentityPersistence = new PostgresEconomicIdentityPersistence(pool);
   const economicIdentityService = new EconomicIdentityService(accountService, economicIdentityPersistence);
-  const zpProgressService = new ZpProgressService(accountService, new PostgresZpStateRepository(pool));
+  const zpProgressService = new ZpProgressService(accountService, zpStateRepository!);
   const syntheticIdentityStore = environment.syntheticBetaIdentitiesEnabled ? new PostgresSyntheticBetaIdentityStore(pool) : undefined;
   const recipientDirectoryService = new RecipientDirectoryService(identityPersistence, economicIdentityPersistence, syntheticIdentityStore);
   const paymentPersistence = new PostgresPaymentPersistence(pool);
@@ -379,9 +437,10 @@ const server = app.listen(environment.port, () => {
   });
 });
 server.on("close",()=>{executionLoop?.stop();devnetComposition?.workerLoop.stop();});
+server.on("close",()=>growthZpProjectionWorker?.stop());
 const shutdownCoordinator=new GracefulShutdownCoordinator(
   readinessService,
-  {stopAndDrain:async()=>{await Promise.all([executionLoop?.stopAndDrain(),devnetComposition?.workerLoop.stopAndDrain()]);}},
+  {stopAndDrain:async()=>{await Promise.all([executionLoop?.stopAndDrain(),devnetComposition?.workerLoop.stopAndDrain(),growthZpProjectionWorker?.stopAndDrain()]);}},
   server,
   postgresPool,
   (event,signal)=>{

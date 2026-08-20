@@ -45,6 +45,28 @@ implements ZpStateRepository {
       : undefined;
   }
 
+  async listPendingAccounts(limit: number): Promise<string[]> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+      throw new Error(
+        "ZP pending account limit must be between 1 and 500.",
+      );
+    }
+
+    const result = await this.pool.query(
+      `SELECT g.actor_account_id
+       FROM growth_events g
+       LEFT JOIN account_zp_state z
+         ON z.account_id = g.actor_account_id
+       WHERE g.event_id > COALESCE(z.last_growth_event_id, 0)
+       GROUP BY g.actor_account_id
+       ORDER BY MIN(g.event_id), g.actor_account_id
+       LIMIT $1`,
+      [limit],
+    );
+
+    return result.rows.map((row) => String(row.actor_account_id));
+  }
+
   async projectAccount(
     accountId: string,
     limit = 100,

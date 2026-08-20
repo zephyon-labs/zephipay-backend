@@ -5,9 +5,11 @@ import { after, beforeEach, test } from "node:test";
 import { Pool } from "pg";
 
 import { PaymentSettlementGrowthProjector } from "../src/growth/paymentSettlementGrowthProjector";
+import { GrowthZpProjectionCoordinator } from "../src/growth/growthZpProjectionWorker";
 import { actorSubjectForAccount } from "../src/identity/identityTypes";
 import { PostgresGrowthEventRepository } from "../src/storage/postgres/postgresGrowthEventRepository";
 import { PostgresIdentityPersistence } from "../src/storage/postgres/postgresIdentityPersistence";
+import { PostgresZpStateRepository } from "../src/storage/postgres/postgresZpStateRepository";
 
 const url = process.env.TEST_DATABASE_URL?.trim();
 
@@ -23,12 +25,19 @@ const pool = new Pool({
 const identities = new PostgresIdentityPersistence(pool);
 const growth = new PostgresGrowthEventRepository(pool);
 const projector = new PaymentSettlementGrowthProjector(pool, growth);
+const zp = new PostgresZpStateRepository(pool, () => NOW);
+const downstream = new GrowthZpProjectionCoordinator(
+  projector,
+  zp,
+  { growthEnabled: true, zpEnabled: true },
+);
 
 const NOW = "2026-08-19T15:00:00.000Z";
 
 beforeEach(async () => {
   await pool.query(
     `TRUNCATE
+       account_zp_state,
        growth_events,
        e2e_test_runs,
        synthetic_test_actors,
@@ -595,4 +604,73 @@ test("pending sweep repairs missing canonical recipient growth after partial pro
   );
 
   assert.equal(count.rows[0].count, 2);
+});
+
+test("downstream coordinator converges canonical sender and recipient Growth into ZP", async () => {
+  const sender = await account();
+  const recipient = await account();
+
+  await settledPayment({
+    senderAccountId: sender,
+    recipientAccountId: recipient,
+  });
+
+  assert.equal((await pool.query(
+    "SELECT count(*)::int count FROM growth_events",
+  )).rows[0].count, 0);
+
+  const first = await downstream.runOnce();
+  assert.equal(first.growthProjectedReceipts, 1);
+  assert.equal(first.zpProjectedAccounts, 2);
+
+  const senderState = await zp.find(sender);
+  const recipientState = await zp.find(recipient);
+  assert.ok(senderState);
+  assert.ok(recipientState);
+  assert.equal(senderState.totalPoints, 10n);
+  assert.equal(senderState.sentCount, 1n);
+  assert.equal(recipientState.totalPoints, 5n);
+  assert.equal(recipientState.receivedCount, 1n);
+
+  const replay = await downstream.runOnce();
+  assert.equal(replay.growthProjectedReceipts, 0);
+  assert.equal(replay.zpDiscoveredAccounts, 0);
+  assert.equal((await pool.query(
+    "SELECT count(*)::int count FROM growth_events",
+  )).rows[0].count, 2);
+  assert.equal((await zp.find(sender))?.totalPoints, 10n);
+  assert.equal((await zp.find(recipient))?.totalPoints, 5n);
+});
+
+test("downstream coordinator projects direct-wallet sender only", async () => {
+  const sender = await account();
+
+  await settledPayment({ senderAccountId: sender });
+  const outcome = await downstream.runOnce();
+
+  assert.equal(outcome.growthProjectedReceipts, 1);
+  assert.equal(outcome.zpProjectedAccounts, 1);
+  assert.equal((await zp.find(sender))?.totalPoints, 10n);
+  assert.equal((await pool.query(
+    "SELECT count(*)::int count FROM growth_events",
+  )).rows[0].count, 1);
+});
+
+test("downstream coordinator advances synthetic Growth to durable zero ZP", async () => {
+  const sender = await account();
+
+  await settledPayment({
+    senderAccountId: sender,
+    recipientSyntheticId: randomUUID(),
+  });
+  const outcome = await downstream.runOnce();
+
+  assert.equal(outcome.growthProjectedReceipts, 1);
+  assert.equal(outcome.zpProjectedAccounts, 1);
+  const state = await zp.find(sender);
+  assert.ok(state);
+  assert.equal(state.totalPoints, 0n);
+  assert.equal(state.sentCount, 0n);
+  assert.ok(state.lastGrowthEventId > 0n);
+  assert.deepEqual(await zp.listPendingAccounts(100), []);
 });

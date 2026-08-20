@@ -118,6 +118,14 @@ const databaseUrl = parseDatabaseUrl(
 
 const authEnabled = parseBoolean(process.env.AUTH_ENABLED, false);
 const syntheticBetaIdentitiesRequested = parseBoolean(process.env.SYNTHETIC_BETA_IDENTITIES_ENABLED, false);
+const growthProjectionEnabled = parseBoolean(
+  process.env.GROWTH_PROJECTION_ENABLED,
+  false,
+);
+const zpProjectionEnabled = parseBoolean(
+  process.env.ZP_PROJECTION_ENABLED,
+  false,
+);
 const auth0Issuer = process.env.AUTH0_ISSUER?.trim();
 const auth0Audience = process.env.AUTH0_AUDIENCE?.trim();
 const auth0RequiredScope = process.env.AUTH0_REQUIRED_SCOPE?.trim() || "read:account";
@@ -129,6 +137,11 @@ if (authEnabled && (!auth0Issuer || !auth0Audience || !postgresEnabled)) {
 }
 if (syntheticBetaIdentitiesRequested && (!authEnabled || !postgresEnabled || parseBoolean(process.env.PAYMENTS_ENABLED,false))) {
   throw new Error("SYNTHETIC_BETA_IDENTITIES_ENABLED requires authenticated PostgreSQL Mock-only execution with PAYMENTS_ENABLED=false.");
+}
+if ((growthProjectionEnabled || zpProjectionEnabled) && !postgresEnabled) {
+  throw new Error(
+    "Growth/ZP projection requires POSTGRES_ENABLED=true.",
+  );
 }
 if (auth0Issuer) {
   const issuerUrl = new URL(auth0Issuer);
@@ -158,6 +171,8 @@ export const environment = Object.freeze({
     false,
   ),
   syntheticBetaIdentitiesEnabled: syntheticBetaIdentitiesRequested,
+  growthProjectionEnabled,
+  zpProjectionEnabled,
 
   postgresEnabled,
   databaseUrl,

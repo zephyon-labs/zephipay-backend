@@ -310,3 +310,58 @@ test(
     assert.equal(state.totalPoints, 0n);
   },
 );
+
+test("stale discovery excludes no-Growth and fully projected accounts", async () => {
+  const accountId = await account();
+
+  assert.deepEqual(await zp.listPendingAccounts(100), []);
+
+  await append(accountId, 1);
+  assert.deepEqual(await zp.listPendingAccounts(100), [accountId]);
+
+  await zp.projectAccount(accountId);
+  assert.deepEqual(await zp.listPendingAccounts(100), []);
+
+  await append(accountId, 2);
+  assert.deepEqual(await zp.listPendingAccounts(100), [accountId]);
+});
+
+test("stale discovery is deterministic, bounded, and validates limits", async () => {
+  const first = await account();
+  const second = await account();
+  const third = await account();
+
+  await append(second, 1);
+  await append(first, 2);
+  await append(third, 3);
+
+  assert.deepEqual(
+    await zp.listPendingAccounts(2),
+    [second, first],
+  );
+  assert.deepEqual(
+    await zp.listPendingAccounts(3),
+    [second, first, third],
+  );
+  await assert.rejects(() => zp.listPendingAccounts(0), /between 1 and 500/);
+  await assert.rejects(() => zp.listPendingAccounts(501), /between 1 and 500/);
+});
+
+test("synthetic-only and partial cursor projection remain pending until fully advanced", async () => {
+  const accountId = await account();
+
+  await append(accountId, 1, { synthetic: true });
+  await append(accountId, 2, { synthetic: true });
+
+  assert.deepEqual(await zp.listPendingAccounts(100), [accountId]);
+
+  const partial = await zp.projectAccount(accountId, 1);
+  assert.equal(partial.processedEvents, 1);
+  assert.equal(partial.totalPoints, 0n);
+  assert.deepEqual(await zp.listPendingAccounts(100), [accountId]);
+
+  const completed = await zp.projectAccount(accountId, 100);
+  assert.equal(completed.processedEvents, 1);
+  assert.equal(completed.totalPoints, 0n);
+  assert.deepEqual(await zp.listPendingAccounts(100), []);
+});
