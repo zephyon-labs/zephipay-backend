@@ -1,12 +1,18 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import type { Server } from "node:http";
 import { after, beforeEach, test } from "node:test";
 
+import express from "express";
 import { Pool } from "pg";
 
 import { PaymentSettlementGrowthProjector } from "../src/growth/paymentSettlementGrowthProjector";
 import { GrowthZpProjectionCoordinator } from "../src/growth/growthZpProjectionWorker";
+import { ZpProgressService } from "../src/growth/zpProgressService";
+import { AccountProvisioningService } from "../src/identity/accountProvisioningService";
 import { actorSubjectForAccount } from "../src/identity/identityTypes";
+import { requestContext } from "../src/middleware/requestContext";
+import { createZpRouter } from "../src/routes/zp";
 import { PostgresGrowthEventRepository } from "../src/storage/postgres/postgresGrowthEventRepository";
 import { PostgresIdentityPersistence } from "../src/storage/postgres/postgresIdentityPersistence";
 import { PostgresZpStateRepository } from "../src/storage/postgres/postgresZpStateRepository";
@@ -674,3 +680,153 @@ test("downstream coordinator advances synthetic Growth to durable zero ZP", asyn
   assert.ok(state.lastGrowthEventId > 0n);
   assert.deepEqual(await zp.listPendingAccounts(100), []);
 });
+
+test("bounded runs, restart, new activity, and synthetic backlog converge durably", async () => {
+  const sender = await account();
+  const unrelated = await account();
+
+  for (let index = 0; index < 101; index += 1) {
+    await settledPayment({ senderAccountId: sender });
+  }
+
+  const instanceA = new GrowthZpProjectionCoordinator(
+    projector,
+    zp,
+    { growthEnabled: true, zpEnabled: true },
+  );
+  const partial = await instanceA.runOnce();
+  assert.equal(partial.growthProjectedReceipts, 100);
+  assert.equal((await zp.find(sender))?.sentCount, 100n);
+  assert.equal(await zp.find(unrelated), undefined);
+
+  const instanceB = new GrowthZpProjectionCoordinator(
+    new PaymentSettlementGrowthProjector(pool, growth),
+    new PostgresZpStateRepository(pool, () => NOW),
+    { growthEnabled: true, zpEnabled: true },
+  );
+  const completed = await instanceB.runOnce();
+  assert.equal(completed.growthProjectedReceipts, 1);
+  assert.equal((await zp.find(sender))?.sentCount, 101n);
+  assert.deepEqual(await projector.projectPending(100), []);
+  assert.deepEqual(await zp.listPendingAccounts(100), []);
+
+  const stable = await zp.find(sender);
+  const idle = await instanceB.runOnce();
+  assert.equal(idle.growthProjectedReceipts, 0);
+  assert.equal(idle.zpDiscoveredAccounts, 0);
+  assert.deepEqual(await zp.find(sender), stable);
+  assert.equal(await zp.find(unrelated), undefined);
+
+  await settledPayment({ senderAccountId: sender });
+  const growthOnly = new GrowthZpProjectionCoordinator(
+    projector,
+    zp,
+    { growthEnabled: true, zpEnabled: false },
+  );
+  await growthOnly.runOnce();
+  assert.deepEqual(await zp.listPendingAccounts(100), [sender]);
+  assert.equal((await zp.find(sender))?.sentCount, 101n);
+
+  const zpOnly = new GrowthZpProjectionCoordinator(
+    projector,
+    zp,
+    { growthEnabled: false, zpEnabled: true },
+  );
+  await zpOnly.runOnce();
+  assert.equal((await zp.find(sender))?.sentCount, 102n);
+  assert.deepEqual(await zp.listPendingAccounts(100), []);
+
+  const synthetic = await account();
+  await settledPayment({
+    senderAccountId: synthetic,
+    recipientSyntheticId: randomUUID(),
+  });
+  await instanceB.runOnce();
+  const syntheticState = await zp.find(synthetic);
+  assert.ok(syntheticState);
+  assert.equal(syntheticState.totalPoints, 0n);
+  assert.equal(syntheticState.sentCount, 0n);
+  assert.ok(syntheticState.lastGrowthEventId > 0n);
+  assert.equal(await zp.find(unrelated), undefined);
+});
+
+test("authenticated current-account HTTP reads materialized ZP before and after convergence", async () => {
+  const accounts = new AccountProvisioningService(identities);
+  const senderPrincipal = principal("sender");
+  const recipientPrincipal = principal("recipient");
+  const sender = (await accounts.resolve(senderPrincipal)).account.accountId;
+  const recipient = (await accounts.resolve(recipientPrincipal)).account.accountId;
+
+  await settledPayment({
+    senderAccountId: sender,
+    recipientAccountId: recipient,
+  });
+
+  const service = new ZpProgressService(accounts, zp);
+  const before = await withZpServer(service, senderPrincipal, async (base) =>
+    fetch(`${base}/api/account/zp`));
+  assert.equal(before.status, 200);
+  assert.equal((await before.json() as any).zp.totalPoints, "0");
+
+  await downstream.runOnce();
+
+  const senderResponse = await withZpServer(service, senderPrincipal, async (base) =>
+    fetch(`${base}/api/account/zp`));
+  const recipientResponse = await withZpServer(service, recipientPrincipal, async (base) =>
+    fetch(`${base}/api/account/zp`));
+  const senderBody = await senderResponse.json() as any;
+  const recipientBody = await recipientResponse.json() as any;
+
+  assert.deepEqual(senderBody.zp, {
+    totalPoints: "10",
+    sentCount: "1",
+    receivedCount: "0",
+    policyVersion: 1,
+    unlockedMilestones: ["FIRST_PAYMENT_SENT"],
+    pendingMilestones: senderBody.zp.pendingMilestones,
+  });
+  assert.deepEqual(recipientBody.zp, {
+    totalPoints: "5",
+    sentCount: "0",
+    receivedCount: "1",
+    policyVersion: 1,
+    unlockedMilestones: ["FIRST_PAYMENT_RECEIVED"],
+    pendingMilestones: recipientBody.zp.pendingMilestones,
+  });
+  for (const body of [senderBody, recipientBody]) {
+    const serialized = JSON.stringify(body);
+    assert.doesNotMatch(serialized, /accountId|eventId|cursor|updatedAt|ZTS|ZERA|amount|money|reward/i);
+  }
+});
+
+function principal(subject: string) {
+  return Object.freeze({
+    issuer: "https://activation.test/",
+    providerSubject: `auth0|${subject}`,
+    scopes: Object.freeze(["read:account"]),
+  });
+}
+
+async function withZpServer<T>(
+  service: ZpProgressService,
+  currentPrincipal: ReturnType<typeof principal>,
+  operation: (baseUrl: string) => Promise<T>,
+): Promise<T> {
+  const app = express();
+  app.use(requestContext);
+  app.use((_req, res, next) => {
+    res.locals.externalPrincipal = currentPrincipal;
+    next();
+  });
+  app.use("/api/account", createZpRouter(service));
+  const server: Server = app.listen(0);
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    return await operation(`http://127.0.0.1:${address.port}`);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) =>
+      error ? reject(error) : resolve()));
+  }
+}

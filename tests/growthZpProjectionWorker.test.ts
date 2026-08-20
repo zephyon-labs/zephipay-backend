@@ -38,6 +38,32 @@ function growthResult() {
 }
 
 describe("downstream Growth/ZP projection coordinator", () => {
+  it("keeps the two projection switches independent", async () => {
+    for (const configuration of [
+      { growthEnabled: false, zpEnabled: false },
+      { growthEnabled: true, zpEnabled: false },
+      { growthEnabled: false, zpEnabled: true },
+      { growthEnabled: true, zpEnabled: true },
+    ]) {
+      let growthCalls = 0;
+      let discoveryCalls = 0;
+      let zpCalls = 0;
+      const coordinator = new GrowthZpProjectionCoordinator(
+        { async projectPending() { growthCalls += 1; return [growthResult()]; } },
+        {
+          async listPendingAccounts() { discoveryCalls += 1; return ["account"]; },
+          async projectAccount(accountId) { zpCalls += 1; return projectionResult(accountId); },
+        },
+        configuration,
+      );
+
+      await coordinator.runOnce();
+      assert.equal(growthCalls, configuration.growthEnabled ? 1 : 0);
+      assert.equal(discoveryCalls, configuration.zpEnabled ? 1 : 0);
+      assert.equal(zpCalls, configuration.zpEnabled ? 1 : 0);
+    }
+  });
+
   it("runs Growth first and independently discovers and projects stale ZP", async () => {
     const calls: string[] = [];
     const coordinator = new GrowthZpProjectionCoordinator(
@@ -301,7 +327,7 @@ describe("downstream Growth/ZP projection configuration", () => {
         "--import",
         "tsx",
         "--eval",
-        "import('./src/config/environment.ts').then((module) => { const environment = module.environment ?? module.default?.environment; console.log(JSON.stringify({growth:environment.growthProjectionEnabled,zp:environment.zpProjectionEnabled})); })",
+        "import('./src/config/environment.ts').then((module) => { const environment = module.environment ?? module.default?.environment; console.log(JSON.stringify({growth:environment.growthProjectionEnabled,zp:environment.zpProjectionEnabled,payments:environment.paymentsEnabled})); })",
       ],
       {
         cwd: process.cwd(),
@@ -321,20 +347,47 @@ describe("downstream Growth/ZP projection configuration", () => {
     assert.deepEqual(JSON.parse(result.stdout.trim()), {
       growth: false,
       zp: false,
+      payments: false,
     });
   });
 
-  it("fails closed for malformed or PostgreSQL-free enablement", () => {
-    const malformed = loadEnvironment({
-      GROWTH_PROJECTION_ENABLED: "sometimes",
-    });
-    assert.notEqual(malformed.status, 0);
-    assert.match(malformed.stderr, /Expected boolean environment value/);
+  it("accepts explicit false and every PostgreSQL-backed enablement combination", () => {
+    const cases = [
+      ["false", "false", false, false],
+      ["true", "false", true, false],
+      ["false", "true", false, true],
+      ["true", "true", true, true],
+    ] as const;
 
-    const withoutPostgres = loadEnvironment({
-      ZP_PROJECTION_ENABLED: "true",
-    });
-    assert.notEqual(withoutPostgres.status, 0);
-    assert.match(withoutPostgres.stderr, /requires POSTGRES_ENABLED=true/);
+    for (const [growth, zp, expectedGrowth, expectedZp] of cases) {
+      const result = loadEnvironment({
+        POSTGRES_ENABLED: "true",
+        DATABASE_URL: "postgresql://postgres:postgres@127.0.0.1:55432/zephipay_test",
+        GROWTH_PROJECTION_ENABLED: growth,
+        ZP_PROJECTION_ENABLED: zp,
+      });
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout.trim()), {
+        growth: expectedGrowth,
+        zp: expectedZp,
+        payments: false,
+      });
+    }
+  });
+
+  it("fails closed for malformed values", () => {
+    for (const key of ["GROWTH_PROJECTION_ENABLED", "ZP_PROJECTION_ENABLED"]) {
+      const malformed = loadEnvironment({ [key]: "sometimes" });
+      assert.notEqual(malformed.status, 0);
+      assert.match(malformed.stderr, /Expected boolean environment value/);
+    }
+  });
+
+  it("requires PostgreSQL independently for either projection capability", () => {
+    for (const key of ["GROWTH_PROJECTION_ENABLED", "ZP_PROJECTION_ENABLED"]) {
+      const withoutPostgres = loadEnvironment({ [key]: "true" });
+      assert.notEqual(withoutPostgres.status, 0);
+      assert.match(withoutPostgres.stderr, /requires POSTGRES_ENABLED=true/);
+    }
   });
 });
