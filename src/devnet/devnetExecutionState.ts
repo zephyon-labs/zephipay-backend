@@ -53,9 +53,10 @@ export type DevnetSubmissionCommitmentRecord = Readonly<{
 
 export const DEVNET_RECONCILIATION_OUTCOMES = ["MISSING", "PENDING", "SETTLED", "FAILED", "UNKNOWN"] as const;
 export type DevnetReconciliationOutcome = typeof DEVNET_RECONCILIATION_OUTCOMES[number];
+export type DevnetReconciliationPersistenceFence=Readonly<{leaseOwner:string;leaseClaimedAt:string}>;
 export type DevnetReconciliationObservation = Readonly<{
   observationId: string; executionId: string; preparationId: string; sequence: number;
-  providerId: string; outcome: DevnetReconciliationOutcome; observedAt: string;
+  providerId: string; signature?:string; outcome: DevnetReconciliationOutcome; observedAt: string;
   slot?: string; confirmationStatus?: string; errorCode?: string;
 }>;
 export type DevnetSubmissionOutcome = "ACCEPTED"|"SETTLED"|"REJECTED"|"UNKNOWN"|"VALIDATION_FAILED";
@@ -79,7 +80,7 @@ export interface DevnetExecutionStateRepository {
   commitSubmission(input: Readonly<{ executionId: string; actorSubject: string; preparationId: string; commitmentId: string; committedAt: string }>): Promise<CommitDevnetSubmissionResult>;
   findPreparation(executionId: string, actorSubject: string): Promise<PersistedDevnetPreparation | undefined>;
   findCommitment(executionId: string, actorSubject: string): Promise<DevnetSubmissionCommitmentRecord | undefined>;
-  recordReconciliationObservation(input: Readonly<{ executionId: string; actorSubject: string; preparationId: string; observationId: string; providerId: string; outcome: DevnetReconciliationOutcome; observedAt: string; slot?: string; confirmationStatus?: string; errorCode?: string }>): Promise<Readonly<{ preparation: PersistedDevnetPreparation; observation: DevnetReconciliationObservation }>>;
+  recordReconciliationObservation(input: Readonly<{ executionId: string; actorSubject: string; preparationId: string; observationId: string; providerId: string; signature:string; outcome: DevnetReconciliationOutcome; observedAt: string; slot?: string; confirmationStatus?: string; errorCode?: string; recoveryFence:DevnetReconciliationPersistenceFence }>): Promise<Readonly<{ preparation: PersistedDevnetPreparation; observation: DevnetReconciliationObservation }>>;
   listReconciliationObservations(executionId: string, actorSubject: string): Promise<DevnetReconciliationObservation[]>;
   recordSubmissionObservation(input: Readonly<{ observationId:string;executionId:string;actorSubject:string;preparationId:string;commitmentId:string;providerId:string;signature:string;outcome:DevnetSubmissionOutcome;contactCertainty:DevnetProviderContactCertainty;observedAt:string;providerErrorCode?:string;slot?:string;confirmationStatus?:string }>): Promise<Readonly<{preparation:PersistedDevnetPreparation;observation:DevnetSubmissionObservation}>>;
   listSubmissionObservations(executionId:string,actorSubject:string):Promise<DevnetSubmissionObservation[]>;
@@ -111,15 +112,20 @@ export function reconciliationLifecycle(current: DevnetLifecycleState, outcome: 
   if (outcome === "SETTLED") return "SETTLED";
   if (outcome === "FAILED") return "FAILED";
   if (outcome === "PENDING") return "ACCEPTED_PENDING";
-  if (current === "ACCEPTED_PENDING") return "ACCEPTED_PENDING";
   return "UNKNOWN_RECONCILIATION_REQUIRED";
 }
 
-export function assertReconciliationEvidence(input: Readonly<{ providerId: string; outcome: DevnetReconciliationOutcome; slot?: string; confirmationStatus?: string; errorCode?: string }>): void {
+export function assertReconciliationEvidence(input: Readonly<{ providerId: string; signature:string; outcome: DevnetReconciliationOutcome; observedAt?:string; slot?: string; confirmationStatus?: string; errorCode?:string;recoveryFence:DevnetReconciliationPersistenceFence }>): void {
   if (!input.providerId || input.providerId.trim() !== input.providerId || input.providerId.length > 128) throw new Error("Reconciliation provider ID is invalid.");
+  if (!input.signature || input.signature.trim() !== input.signature || input.signature.length > 256) throw new Error("Reconciliation signature evidence is invalid.");
+  if (!validTime(input.observedAt)) throw new Error("Reconciliation observation time is invalid.");
   if (input.slot !== undefined && !/^(0|[1-9]\d*)$/.test(input.slot)) throw new Error("Reconciliation slot is invalid.");
   if (input.confirmationStatus !== undefined && !/^[A-Za-z0-9_-]{1,32}$/.test(input.confirmationStatus)) throw new Error("Reconciliation confirmation status is invalid.");
   if ((input.outcome === "FAILED" && input.errorCode === undefined) || (input.errorCode !== undefined && input.outcome !== "FAILED" && input.outcome !== "UNKNOWN") || (input.errorCode !== undefined && !/^[A-Za-z0-9_.:-]{1,64}$/.test(input.errorCode))) throw new Error("Reconciliation failure evidence is invalid.");
+  if(input.outcome==="FAILED"&&input.errorCode!=="PROVIDER_REPORTED_FAILURE")throw new Error("Reconciliation terminal failure code is not authoritative chain evidence.");
+  if((input.outcome==="SETTLED"||input.outcome==="FAILED")&&(input.confirmationStatus!=="finalized"||input.slot===undefined))throw new Error("Terminal reconciliation requires finalized exact-signature evidence.");
+  if(input.outcome!=="SETTLED"&&input.outcome!=="FAILED"&&input.confirmationStatus==="finalized")throw new Error("Finalized reconciliation evidence must be represented as terminal truth.");
+  if(!input.recoveryFence||!input.recoveryFence.leaseOwner||input.recoveryFence.leaseOwner.trim()!==input.recoveryFence.leaseOwner||input.recoveryFence.leaseOwner.length>128||!validTime(input.recoveryFence.leaseClaimedAt))throw new Error("Reconciliation persistence requires fenced recovery lease authority.");
 }
 
 export function submissionLifecycle(current:DevnetLifecycleState,outcome:DevnetSubmissionOutcome):DevnetLifecycleState{
@@ -134,3 +140,4 @@ export function assertSubmissionEvidence(input:Readonly<{providerId:string;signa
   if(input.slot!==undefined&&!/^(0|[1-9]\d*)$/.test(input.slot))throw new Error("Submission slot is invalid.");if(input.confirmationStatus!==undefined&&!/^[A-Za-z0-9_-]{1,32}$/.test(input.confirmationStatus))throw new Error("Submission confirmation status is invalid.");
   if((input.outcome==="VALIDATION_FAILED")!==(input.contactCertainty==="NOT_STARTED")||(input.outcome==="ACCEPTED"||input.outcome==="SETTLED")!==(input.contactCertainty==="ACCEPTED"))throw new Error("Submission outcome contact certainty is contradictory.");
 }
+function validTime(value:unknown){return typeof value==="string"&&Number.isFinite(Date.parse(value));}

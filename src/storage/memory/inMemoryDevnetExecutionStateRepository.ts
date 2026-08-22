@@ -47,10 +47,10 @@ export class InMemoryDevnetExecutionStateRepository implements DevnetExecutionSt
   recordReconciliationObservation(input:Parameters<DevnetExecutionStateRepository["recordReconciliationObservation"]>[0]) { return this.exclusive(() => {
     assertReconciliationEvidence(input); const preparation=this.preparations.get(input.preparationId);
     if(!preparation||preparation.executionId!==input.executionId||preparation.actorSubject!==input.actorSubject)throw new Error("Prepared artifact was not found for this owner.");
-    if(input.providerId!==preparation.artifact.reconciliationProviderId)throw new Error("Reconciliation provider does not match immutable preparation policy.");
-    const state=reconciliationLifecycle(preparation.state,input.outcome),list=this.observations.get(input.executionId)??[];
+    if(input.providerId!==preparation.artifact.reconciliationProviderId)throw new Error("Reconciliation provider does not match immutable preparation policy.");const commitment=this.commitments.get(input.executionId);if(!commitment||input.signature!==preparation.artifact.signature||input.signature!==commitment.signature)throw new Error("Reconciliation signature does not match the immutable commitment.");
+    const list=this.observations.get(input.executionId)??[],latest=list[list.length-1];if(latest&&(["SETTLED","FAILED"].includes(preparation.state)||sameReconciliationObservation(latest,input)))return Object.freeze({preparation:clonePreparation(preparation),observation:Object.freeze({...latest})});const state=reconciliationLifecycle(preparation.state,input.outcome);
     if(list.some(value=>value.observationId===input.observationId))throw new Error("Reconciliation observation ID already exists.");
-    const observation=Object.freeze({...input,sequence:list.length+1});list.push(observation);this.observations.set(input.executionId,list);
+    const{recoveryFence:_,...evidence}=input,observation=Object.freeze({...evidence,sequence:list.length+1});list.push(observation);this.observations.set(input.executionId,list);
     const updated=freezePreparation({...preparation,state});this.preparations.set(preparation.preparationId,updated);return Object.freeze({preparation:clonePreparation(updated),observation});
   }); }
   async listReconciliationObservations(executionId:string,actorSubject:string){const preparation=this.active(executionId);return preparation?.actorSubject===actorSubject?(this.observations.get(executionId)??[]).map(value=>Object.freeze({...value})):[];}
@@ -66,3 +66,4 @@ export class InMemoryDevnetExecutionStateRepository implements DevnetExecutionSt
 
 function freezePreparation(value:any):PersistedDevnetPreparation{return Object.freeze({...value,encryptedSignedTransaction:Object.freeze({...value.encryptedSignedTransaction,initializationVector:Buffer.from(value.encryptedSignedTransaction.initializationVector),authenticationTag:Buffer.from(value.encryptedSignedTransaction.authenticationTag),ciphertext:Buffer.from(value.encryptedSignedTransaction.ciphertext)}),artifact:Object.freeze({...value.artifact})});}
 function clonePreparation(value:PersistedDevnetPreparation):PersistedDevnetPreparation{return freezePreparation(value);}
+function sameReconciliationObservation(prior:Readonly<{providerId:string;signature?:string;outcome:string;slot?:string;confirmationStatus?:string;errorCode?:string}>,next:Readonly<{providerId:string;signature:string;outcome:string;slot?:string;confirmationStatus?:string;errorCode?:string}>){return prior.providerId===next.providerId&&prior.signature===next.signature&&prior.outcome===next.outcome&&prior.slot===next.slot&&prior.confirmationStatus===next.confirmationStatus&&prior.errorCode===next.errorCode;}

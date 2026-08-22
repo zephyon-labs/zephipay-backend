@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
 import {
-  ProviderIndependentSolanaDevnetTransport, RailProviderOperationError, ReferenceSolanaDevnetTransactionPreparer, authorizeCommittedDevnetSubmission, classifyDevnetBlockhash, parseExecutionId, parseProviderIdempotencyKey, signedTransactionDigest,
+  ProviderIndependentSolanaDevnetTransport, ReferenceSolanaDevnetTransactionPreparer, authorizeCommittedDevnetSubmission, classifyDevnetBlockhash, parseExecutionId, parseProviderIdempotencyKey, signedTransactionDigest,
   type DevnetBlockhashSource, type DevnetTransactionSigner, type RailExecutionCommand,
   type ReferenceDevnetPreparationPolicy, type SolanaDevnetPreparedTransaction, type SolanaSubmissionRpc,
 } from "zephyon-protocol";
 import type { DevnetExecutionStateRepository, PersistedDevnetPreparation } from "./devnetExecutionState";
 import { Aes256GcmPreparedTransactionCipher } from "./preparedTransactionCipher";
-import { DevnetReconciliationService, type DevnetReconciliationProvider } from "./devnetReconciliationService";
+import { DevnetReconciliationService, type DevnetReconciliationLeaseControl, type DevnetReconciliationProvider } from "./devnetReconciliationService";
 
 export type { DevnetReconciliationProvider } from "./devnetReconciliationService";
 
@@ -73,16 +73,15 @@ export class DevnetOrchestrationService {
     let runtime:SolanaDevnetPreparedTransaction;try{runtime=this.reconstruct(committed.preparation);}catch{return Object.freeze({attempted:false as const,reason:"VALIDATION_FAILED" as const,...await this.repository.recordSubmissionObservation({observationId:this.idFactory(),executionId:input.executionId,actorSubject:input.actorSubject,preparationId:preparation.preparationId,commitmentId:committed.commitment.commitmentId,providerId:this.submissionProvider.identity.providerId,signature:committed.commitment.signature,outcome:"VALIDATION_FAILED",contactCertainty:"NOT_STARTED",observedAt:this.clock(),providerErrorCode:"PERSISTED_ARTIFACT_INVALID"})});}
     const prepared=authorizeCommittedDevnetSubmission(Object.freeze({schemaVersion:1,contractVersion:1,rail:"solana",executionId:parseExecutionId(input.executionId),providerIdempotencyKey:parseProviderIdempotencyKey(input.providerIdempotencyKey),payload:Object.freeze({...runtime})}),Object.freeze({state:"SUBMISSION_COMMITTED_RECONCILE_ONLY",commitmentId:committed.commitment.commitmentId,executionId:committed.commitment.executionId,signature:committed.commitment.signature,signedTransactionDigest:committed.commitment.signedTransactionDigest,committedAt:committed.commitment.committedAt}));
     try{const result=await this.transport.submitTransaction(prepared);const persisted=await this.repository.recordSubmissionObservation({observationId:this.idFactory(),executionId:input.executionId,actorSubject:input.actorSubject,preparationId:preparation.preparationId,commitmentId:committed.commitment.commitmentId,providerId:this.submissionProvider.identity.providerId,signature:committed.commitment.signature,outcome:result.outcome==="settled"?"SETTLED":"ACCEPTED",contactCertainty:"ACCEPTED",observedAt:result.outcome==="settled"?result.settledAt:result.submittedAt,...(result.outcome==="settled"?{slot:result.slot,confirmationStatus:result.confirmationStatus}:{})});return Object.freeze({attempted:true as const,...persisted});}
-    catch(error){const providerCode=conclusiveProviderCode(error),rejected=providerCode!==undefined;return Object.freeze({attempted:true as const,...await this.repository.recordSubmissionObservation({observationId:this.idFactory(),executionId:input.executionId,actorSubject:input.actorSubject,preparationId:preparation.preparationId,commitmentId:committed.commitment.commitmentId,providerId:this.submissionProvider.identity.providerId,signature:committed.commitment.signature,outcome:rejected?"REJECTED":"UNKNOWN",contactCertainty:"MAY_HAVE_OCCURRED",observedAt:this.clock(),providerErrorCode:providerCode??"SUBMISSION_RESPONSE_UNAVAILABLE"})});}
+    catch{return Object.freeze({attempted:true as const,...await this.repository.recordSubmissionObservation({observationId:this.idFactory(),executionId:input.executionId,actorSubject:input.actorSubject,preparationId:preparation.preparationId,commitmentId:committed.commitment.commitmentId,providerId:this.submissionProvider.identity.providerId,signature:committed.commitment.signature,outcome:"UNKNOWN",contactCertainty:"MAY_HAVE_OCCURRED",observedAt:this.clock(),providerErrorCode:"SUBMISSION_RESPONSE_UNAVAILABLE"})});}
   }
 
-  async reconcile(executionId:string,actorSubject:string){
+  async reconcile(executionId:string,actorSubject:string,lease:DevnetReconciliationLeaseControl){
     if(!this.reconciliationEnabled)return Object.freeze({attempted:false as const,reason:"RECONCILIATION_DISABLED" as const});
-    return this.reconciliation.reconcile(executionId, actorSubject);
+    return this.reconciliation.reconcile(executionId, actorSubject,lease);
   }
 
   private persistence(identity:DevnetPreparationIdentityInput,artifact:SolanaDevnetPreparedTransaction){const encryptedSignedTransaction=this.cipher.encrypt(artifact.signedTransactionBase64,{executionId:identity.executionId,preparationId:identity.preparationId,keyVersion:this.cipher.keyVersion});const{signedTransactionBase64:_,...economic}=artifact;return Object.freeze({...identity,encryptedSignedTransaction,artifact:Object.freeze(economic),preparedAt:this.clock()});}
   private reconstruct(stored:PersistedDevnetPreparation):SolanaDevnetPreparedTransaction{const signedTransactionBase64=this.cipher.decrypt(stored.encryptedSignedTransaction,{executionId:stored.executionId,preparationId:stored.preparationId,keyVersion:stored.encryptedSignedTransaction.keyVersion});if(signedTransactionDigest(signedTransactionBase64)!==stored.artifact.signedTransactionDigest)throw new Error("Persisted signed transaction digest does not match authenticated bytes.");return Object.freeze({...stored.artifact,signedTransactionBase64});}
   private assertIdentity(identity:DevnetPreparationIdentityInput,command:RailExecutionCommand){if(identity.executionId!==command.executionId||identity.paymentIntentId!==command.paymentIntentId||command.rail!=="solana"||command.destination.type!=="wallet"||command.destination.network!=="solana-devnet"||command.amount.asset!==this.policy.asset||command.amount.decimals!==this.policy.decimals)throw new Error("Runtime command does not match server-authoritative Devnet execution identity or policy.");}
 }
-function conclusiveProviderCode(error:unknown){if(!(error instanceof RailProviderOperationError))return undefined;if(error.message==="Devnet RPC provider.")return"CONCLUSIVE_PROVIDER_REJECTION";const match=/^Devnet RPC provider: ([A-Z0-9_.:-]{1,64})\.$/.exec(error.message);return match?.[1];}

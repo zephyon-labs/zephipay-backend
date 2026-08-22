@@ -28,8 +28,9 @@ type SafeFields = Readonly<{
   requestId?: string; processId?: string; routeFamily?: string; method?: string; status?: number;
   durationMs?: number; acquisitionMs?: number; queryMs?: number; transactionMs?: number;
   totalCount?: number; idleCount?: number; waitingCount?: number;
+  unresolvedCount?:number; oldestUnresolvedAgeMs?:number;
   dbOperation?: DatabaseOperationFamily; dbFailure?: DatabaseFailureCategory;
-  limiterCategory?: string; outcome?: string; phase?: string; event?: string;
+  limiterCategory?: string; outcome?: string; phase?: string; event?: string; backlog?:string;
 }>;
 
 type Timing = { count: number; totalMs: number; maxMs: number };
