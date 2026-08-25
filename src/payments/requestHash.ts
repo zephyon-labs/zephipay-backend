@@ -45,9 +45,25 @@ export function createPaymentIdentityRequestHash(input: CanonicalPaymentRequest 
     actorSubject: input.actorSubject, recipientType: "PAYMENT_IDENTITY",
     recipientAccountId: input.recipientAccountId, network: input.network,
     mintAddress: input.mintAddress, recipientAddress: input.recipientAddress,
-    recipientSnapshot: input.recipientSnapshot,
+    recipientSnapshot: canonicalPaymentIdentitySnapshot(input.recipientSnapshot),
     trustConfirmationOutcome: input.trustConfirmationOutcome,
     amountRaw: input.amountRaw.toString(), purpose: input.purpose,
   });
   return createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
+function canonicalPaymentIdentitySnapshot(snapshot: PaymentIdentitySnapshot): PaymentIdentitySnapshot {
+  return {
+    accountId: snapshot.accountId,
+    username: snapshot.username,
+    displayName: snapshot.displayName,
+    accountType: snapshot.accountType,
+    verificationState: snapshot.verificationState,
+    payabilityState: snapshot.payabilityState,
+    capturedAt: snapshot.capturedAt,
+    schemaVersion: snapshot.schemaVersion,
+    ...(snapshot.identitySource ? { identitySource: snapshot.identitySource } : {}),
+    resolutionSource: snapshot.resolutionSource,
+    trustOutcome: snapshot.trustOutcome,
+  };
 }

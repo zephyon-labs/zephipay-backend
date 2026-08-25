@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 
 import { parseDatabaseUrl } from "../src/config/environment";
 import { InvalidPaymentTransitionError, validatePaymentTransition } from "../src/payments/paymentLifecycle";
-import { createPaymentRequestHash, validateRequestHash } from "../src/payments/requestHash";
+import { createPaymentIdentityRequestHash, createPaymentRequestHash, validateRequestHash } from "../src/payments/requestHash";
 import type { CreatePaymentInput, PaymentStatus } from "../src/payments/paymentTypes";
 import { InMemoryPaymentPersistence } from "../src/storage/memory/inMemoryPaymentPersistence";
 
@@ -103,6 +103,24 @@ describe("request hashing and configuration", () => {
     validateRequestHash(hash);
     assert.equal(hash.length, 64);
     assert.throws(() => validateRequestHash("ABC"));
+  });
+
+  it("canonicalizes frozen Payment Identity snapshots independently of JSON object key order", () => {
+    const snapshot = {
+      accountId: "recipient-account", username: "recipient", displayName: "Recipient",
+      accountType: "PERSONAL" as const, verificationState: "VERIFIED" as const,
+      payabilityState: "AVAILABLE" as const, capturedAt: START, schemaVersion: 1 as const,
+      identitySource: "RECIPIENT_DIRECTORY" as const, resolutionSource: "RECIPIENT_DIRECTORY" as const,
+      trustOutcome: "NOT_REQUIRED" as const,
+    };
+    const reordered = JSON.parse(JSON.stringify(snapshot, Object.keys(snapshot).sort())) as typeof snapshot;
+    const canonical = { actorSubject: "actor-one", network: "solana-devnet" as const,
+      mintAddress: MINT, recipientAddress: RECIPIENT, amountRaw: 1_000_000n, purpose: null,
+      recipientAccountId: snapshot.accountId, trustConfirmationOutcome: "NOT_REQUIRED" as const };
+    assert.equal(
+      createPaymentIdentityRequestHash({ ...canonical, recipientSnapshot: snapshot }),
+      createPaymentIdentityRequestHash({ ...canonical, recipientSnapshot: reordered }),
+    );
   });
 
   it("requires a valid database URL only when PostgreSQL is enabled", () => {

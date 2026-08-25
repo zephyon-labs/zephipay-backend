@@ -11,6 +11,7 @@ import type {
   PaymentStatus,
 } from "../payments/paymentTypes";
 import type { CreatePaymentReceiptInput, PaymentReceipt } from "../receipts/paymentReceipt";
+import type { PaymentIdentityReplayRequest } from "../payments/paymentIdentityReplay";
 
 export type IdempotencyClaim =
   | Readonly<{ outcome: "CLAIMED"; payment: PaymentRecord }>
@@ -69,6 +70,7 @@ export interface AllowlistRepository {
 
 export interface PaymentRepository {
   claimIdempotencyKey(input: CreatePaymentInput): Promise<IdempotencyClaim>;
+  replayPaymentIdentityKey(input: PaymentIdentityReplayRequest): Promise<IdempotencyClaim | undefined>;
   claimPaymentIdentityKey(input: ClaimPaymentIdentityInput): Promise<IdempotencyClaim>;
   claimSyntheticPaymentIdentityKey(input: ClaimSyntheticPaymentIdentityInput): Promise<IdempotencyClaim>;
   findPayment(paymentId: string): Promise<PaymentRecord | undefined>;

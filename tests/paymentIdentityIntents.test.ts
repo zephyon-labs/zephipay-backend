@@ -31,12 +31,14 @@ describe("Payment Identity intents",()=>{
     assert.equal(created.paymentIntent.purpose,null);
     assert.equal((await payments.findPayment(created.paymentIntent.id))?.purpose,null);
   });
-  it("enforces trust, hides destination, converges, and conflicts on destination changes",async()=>{
+  it("enforces trust, hides destination, and preserves the frozen destination across replay",async()=>{
     const {service,setDestination}=await fixture(); await assert.rejects(()=>service.create(principal,request(false)),(e)=>e instanceof PaymentIntentApplicationError&&e.kind==="CONFLICT");
     const first=await service.create(principal,request()); const replay=await service.create(principal,request()); assert.equal(replay.created,false);
     assert.equal(first.paymentIntent.recipientType,"payment_identity"); assert.equal("recipient" in first.paymentIntent,false);
     setDestination("4Nd1mYwRkXkYtGT7dQz4FzRzCQXDpGfVv3YJz7drGqPv");
-    await assert.rejects(()=>service.create(principal,request()),(e)=>e instanceof PaymentIntentApplicationError&&e.kind==="CONFLICT");
+    const rotated=await service.create(principal,request());assert.equal(rotated.created,false);assert.equal(rotated.paymentIntent.id,first.paymentIntent.id);
+    await assert.rejects(()=>service.create(principal,{...request(),recipientAccountId:"00000000-0000-4000-8000-000000000903"}),(e)=>e instanceof PaymentIntentApplicationError&&e.kind==="CONFLICT");
+    const fresh=await service.create(principal,{...request(),idempotencyKey:"identity-key-00000002"});assert.notEqual(fresh.paymentIntent.id,first.paymentIntent.id);
   });
   it("uses NOT_REQUIRED for verified, blocks restricted, and derives only confirmed recents",async()=>{
     const verified=await fixture("VERIFIED"); const created=await verified.service.create(principal,request(false));

@@ -7,6 +7,8 @@ import {
 } from "../../payments/paymentLifecycle";
 import { validateRequestHash } from "../../payments/requestHash";
 import { createPaymentIdentityRequestHash } from "../../payments/requestHash";
+import { matchesFrozenPaymentIdentityRequest } from "../../payments/paymentIdentityReplay";
+import type { PaymentIdentityReplayRequest } from "../../payments/paymentIdentityReplay";
 import type {
   CreatePaymentInput,
   InformationalPaymentEventType,
@@ -133,20 +135,41 @@ export class InMemoryPaymentPersistence implements PaymentPersistence {
     });
   }
 
+  replayPaymentIdentityKey(input: PaymentIdentityReplayRequest): Promise<IdempotencyClaim | undefined> {
+    return this.exclusive(() => {
+      const existingId = this.idempotency.get(`${input.actorSubject}\u0000${input.idempotencyKey}`);
+      if (!existingId) return undefined;
+      const existing = this.requirePayment(existingId);
+      return {
+        outcome: matchesFrozenPaymentIdentityRequest(existing, input) ? "EXISTING" : "HASH_CONFLICT",
+        payment: clonePayment(existing),
+      };
+    });
+  }
+
   claimPaymentIdentityKey(input: ClaimPaymentIdentityInput): Promise<IdempotencyClaim> {
     return this.exclusive(async () => {
+      const indexKey = `${input.actorSubject}\u0000${input.idempotencyKey}`;
+      const existingId = this.idempotency.get(indexKey);
+      if (existingId) {
+        const existing = this.requirePayment(existingId);
+        return {
+          outcome: matchesFrozenPaymentIdentityRequest(existing, {
+            ...input,
+            recipientId: input.recipientAccountId,
+          }) ? "EXISTING" : "HASH_CONFLICT",
+          payment: clonePayment(existing),
+        };
+      }
       if (!this.resolvePaymentIdentity || input.senderAccountId === input.recipientAccountId) throw new Error("RECIPIENT_UNAVAILABLE");
       const resolved = await this.resolvePaymentIdentity(input);
       if (!resolved || resolved.payabilityState !== "AVAILABLE" || resolved.verificationState === "RESTRICTED") throw new Error("RECIPIENT_UNAVAILABLE");
       const trustOutcome = resolved.verificationState === "VERIFIED" ? "NOT_REQUIRED" as const : "ACKNOWLEDGED" as const;
       if (resolved.verificationState !== "VERIFIED" && !input.trustAcknowledged) throw new Error("TRUST_ACKNOWLEDGMENT_REQUIRED");
-      const indexKey = `${input.actorSubject}\u0000${input.idempotencyKey}`;
-      const existingId = this.idempotency.get(indexKey);
-      const prior = existingId ? this.requirePayment(existingId) : undefined;
       const snapshot: PaymentIdentitySnapshot = Object.freeze({
         accountId: input.recipientAccountId, username: resolved.username, displayName: resolved.displayName,
         accountType: resolved.accountType, verificationState: resolved.verificationState,
-        payabilityState: "AVAILABLE", capturedAt: prior?.recipientSnapshot?.capturedAt ?? input.capturedAt, schemaVersion: 1,
+        payabilityState: "AVAILABLE", capturedAt: input.capturedAt, schemaVersion: 1,
         identitySource: "RECIPIENT_DIRECTORY", resolutionSource: "RECIPIENT_DIRECTORY", trustOutcome,
       });
       const requestHash = createPaymentIdentityRequestHash({
@@ -155,10 +178,6 @@ export class InMemoryPaymentPersistence implements PaymentPersistence {
         recipientAccountId: input.recipientAccountId, recipientSnapshot: snapshot,
         trustConfirmationOutcome: trustOutcome,
       });
-      if (existingId) {
-        const existing = this.requirePayment(existingId);
-        return { outcome: existing.requestHash === requestHash ? "EXISTING" : "HASH_CONFLICT", payment: clonePayment(existing) };
-      }
       const now = this.clock();
       const payment: PaymentRecord = Object.freeze({
         id: input.id, actorSubject: input.actorSubject, idempotencyKey: input.idempotencyKey, requestHash,
@@ -175,7 +194,50 @@ export class InMemoryPaymentPersistence implements PaymentPersistence {
       return { outcome: "CLAIMED", payment: clonePayment(payment) };
     });
   }
-  claimSyntheticPaymentIdentityKey(input: import("../storageContracts").ClaimSyntheticPaymentIdentityInput): Promise<IdempotencyClaim>{return this.exclusive(async()=>{const indexKey=`${input.actorSubject}\u0000${input.idempotencyKey}`,existingId=this.idempotency.get(indexKey),prior=existingId?this.requirePayment(existingId):undefined;const snapshot:PaymentIdentitySnapshot=Object.freeze({accountId:input.syntheticId,username:input.username,displayName:input.displayName,accountType:"PERSONAL",verificationState:"UNVERIFIED",payabilityState:"AVAILABLE",capturedAt:prior?.recipientSnapshot?.capturedAt??input.capturedAt,schemaVersion:1,identitySource:"SYNTHETIC_BETA",resolutionSource:"SYNTHETIC_BETA",trustOutcome:"NOT_REQUIRED"}),recipientAddress=`synthetic:${input.syntheticId}`,requestHash=createPaymentIdentityRequestHash({actorSubject:input.actorSubject,network:input.network,mintAddress:input.mintAddress,recipientAddress,amountRaw:input.amountRaw,purpose:input.purpose,recipientAccountId:input.syntheticId,recipientSnapshot:snapshot,trustConfirmationOutcome:"NOT_REQUIRED"});if(prior)return{outcome:prior.requestHash===requestHash?"EXISTING":"HASH_CONFLICT",payment:clonePayment(prior)};const now=this.clock(),payment:PaymentRecord=Object.freeze({id:input.id,actorSubject:input.actorSubject,idempotencyKey:input.idempotencyKey,requestHash,status:"AWAITING_CONFIRMATION",version:0n,network:input.network,rail:input.rail,asset:input.asset,mintAddress:input.mintAddress,recipientAddress,amountRaw:input.amountRaw,purpose:input.purpose,recipientType:"PAYMENT_IDENTITY",recipientSyntheticId:input.syntheticId,recipientSnapshot:snapshot,recipientSnapshotVersion:1,trustConfirmationOutcome:"NOT_REQUIRED",createdAt:now,updatedAt:now});this.payments.set(payment.id,payment);this.idempotency.set(indexKey,payment.id);this.appendEventUnsafe({paymentId:payment.id,eventType:"CREATED",toStatus:"AWAITING_CONFIRMATION",occurredAt:now,details:{identitySource:"SYNTHETIC_BETA",trustConfirmationOutcome:"NOT_REQUIRED"}});return{outcome:"CLAIMED",payment:clonePayment(payment)}})}
+  claimSyntheticPaymentIdentityKey(input: import("../storageContracts").ClaimSyntheticPaymentIdentityInput): Promise<IdempotencyClaim> {
+    return this.exclusive(async () => {
+      const indexKey = `${input.actorSubject}\u0000${input.idempotencyKey}`;
+      const existingId = this.idempotency.get(indexKey);
+      if (existingId) {
+        const existing = this.requirePayment(existingId);
+        return {
+          outcome: matchesFrozenPaymentIdentityRequest(existing, {
+            ...input,
+            recipientId: input.syntheticId,
+            trustAcknowledged: false,
+          }) ? "EXISTING" : "HASH_CONFLICT",
+          payment: clonePayment(existing),
+        };
+      }
+      const snapshot: PaymentIdentitySnapshot = Object.freeze({
+        accountId: input.syntheticId, username: input.username, displayName: input.displayName,
+        accountType: "PERSONAL", verificationState: "UNVERIFIED", payabilityState: "AVAILABLE",
+        capturedAt: input.capturedAt, schemaVersion: 1, identitySource: "SYNTHETIC_BETA",
+        resolutionSource: "SYNTHETIC_BETA", trustOutcome: "NOT_REQUIRED",
+      });
+      const recipientAddress = `synthetic:${input.syntheticId}`;
+      const requestHash = createPaymentIdentityRequestHash({
+        actorSubject: input.actorSubject, network: input.network, mintAddress: input.mintAddress,
+        recipientAddress, amountRaw: input.amountRaw, purpose: input.purpose,
+        recipientAccountId: input.syntheticId, recipientSnapshot: snapshot,
+        trustConfirmationOutcome: "NOT_REQUIRED",
+      });
+      const now = this.clock();
+      const payment: PaymentRecord = Object.freeze({
+        id: input.id, actorSubject: input.actorSubject, idempotencyKey: input.idempotencyKey, requestHash,
+        status: "AWAITING_CONFIRMATION", version: 0n, network: input.network, rail: input.rail,
+        asset: input.asset, mintAddress: input.mintAddress, recipientAddress, amountRaw: input.amountRaw,
+        purpose: input.purpose, recipientType: "PAYMENT_IDENTITY", recipientSyntheticId: input.syntheticId,
+        recipientSnapshot: snapshot, recipientSnapshotVersion: 1, trustConfirmationOutcome: "NOT_REQUIRED",
+        createdAt: now, updatedAt: now,
+      });
+      this.payments.set(payment.id, payment);
+      this.idempotency.set(indexKey, payment.id);
+      this.appendEventUnsafe({ paymentId: payment.id, eventType: "CREATED", toStatus: "AWAITING_CONFIRMATION",
+        occurredAt: now, details: { identitySource: "SYNTHETIC_BETA", trustConfirmationOutcome: "NOT_REQUIRED" } });
+      return { outcome: "CLAIMED", payment: clonePayment(payment) };
+    });
+  }
 
   async findPayment(paymentId: string): Promise<PaymentRecord | undefined> {
     const payment = this.payments.get(paymentId);

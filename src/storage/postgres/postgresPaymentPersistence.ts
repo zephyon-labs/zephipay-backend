@@ -11,6 +11,8 @@ import {
 } from "../../payments/paymentLifecycle";
 import { validateRequestHash } from "../../payments/requestHash";
 import { createPaymentIdentityRequestHash } from "../../payments/requestHash";
+import { matchesFrozenPaymentIdentityRequest } from "../../payments/paymentIdentityReplay";
+import type { PaymentIdentityReplayRequest } from "../../payments/paymentIdentityReplay";
 import type {
   JsonObject,
   PaymentEvent,
@@ -27,7 +29,7 @@ import {
   cloneTerminalProof,
   terminalProofToJson,
 } from "../jsonValues";
-import type { AppendInformationalPaymentEventInput, ClaimPaymentIdentityInput, IdempotencyClaim, PaymentPersistence, RecentPaymentIdentity } from "../storageContracts";
+import type { AppendInformationalPaymentEventInput, ClaimPaymentIdentityInput, ClaimSyntheticPaymentIdentityInput, IdempotencyClaim, PaymentPersistence, RecentPaymentIdentity } from "../storageContracts";
 import { PaymentVersionConflictError } from "../storageContracts";
 
 type DatabaseExecutor = Pick<Pool | PoolClient, "query">;
@@ -87,9 +89,39 @@ export class PostgresPaymentPersistence implements PaymentPersistence {
     });
   }
 
+  async replayPaymentIdentityKey(input: PaymentIdentityReplayRequest): Promise<IdempotencyClaim | undefined> {
+    return this.transaction(async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${input.actorSubject.length}:${input.actorSubject}${input.idempotencyKey}`]);
+      const row = (await client.query(
+        "SELECT * FROM payments WHERE actor_subject=$1 AND idempotency_key=$2 FOR UPDATE",
+        [input.actorSubject, input.idempotencyKey],
+      )).rows[0];
+      if (!row) return undefined;
+      const payment = mapPayment(row);
+      return {
+        outcome: matchesFrozenPaymentIdentityRequest(payment, input) ? "EXISTING" : "HASH_CONFLICT",
+        payment,
+      };
+    });
+  }
+
   async claimPaymentIdentityKey(input: ClaimPaymentIdentityInput): Promise<IdempotencyClaim> {
     return this.transaction(async (client) => {
       await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`${input.actorSubject.length}:${input.actorSubject}${input.idempotencyKey}`]);
+      const priorRow = (await client.query(
+        "SELECT * FROM payments WHERE actor_subject=$1 AND idempotency_key=$2 FOR UPDATE",
+        [input.actorSubject, input.idempotencyKey],
+      )).rows[0];
+      if (priorRow) {
+        const prior = mapPayment(priorRow);
+        return {
+          outcome: matchesFrozenPaymentIdentityRequest(prior, {
+            ...input,
+            recipientId: input.recipientAccountId,
+          }) ? "EXISTING" : "HASH_CONFLICT",
+          payment: prior,
+        };
+      }
       if (input.senderAccountId === input.recipientAccountId) throw recipientUnavailable();
       const accounts = await client.query(
         `SELECT account_id,status FROM accounts WHERE account_id IN ($1,$2)
@@ -110,11 +142,6 @@ export class PostgresPaymentPersistence implements PaymentPersistence {
       );
       const row = resolved.rows[0];
       if (!row) throw recipientUnavailable();
-      const priorResult = await client.query(
-        "SELECT * FROM payments WHERE actor_subject=$1 AND idempotency_key=$2 FOR UPDATE",
-        [input.actorSubject,input.idempotencyKey],
-      );
-      const prior = priorResult.rows[0] ? mapPayment(priorResult.rows[0]) : undefined;
       const verificationState = String(row.verification_state) as PaymentIdentitySnapshot["verificationState"];
       const trustOutcome = verificationState === "VERIFIED" ? "NOT_REQUIRED" as const : "ACKNOWLEDGED" as const;
       if (verificationState !== "VERIFIED" && !input.trustAcknowledged) {
@@ -123,7 +150,7 @@ export class PostgresPaymentPersistence implements PaymentPersistence {
       const snapshot: PaymentIdentitySnapshot = Object.freeze({
         accountId: String(row.account_id), username: String(row.username), displayName: String(row.display_name),
         accountType: String(row.account_type) as PaymentIdentitySnapshot["accountType"], verificationState,
-        payabilityState: "AVAILABLE", capturedAt: prior?.recipientSnapshot?.capturedAt ?? input.capturedAt, schemaVersion: 1,
+        payabilityState: "AVAILABLE", capturedAt: input.capturedAt, schemaVersion: 1,
         identitySource: "RECIPIENT_DIRECTORY", resolutionSource: "RECIPIENT_DIRECTORY", trustOutcome,
       });
       const canonical = {
@@ -150,16 +177,87 @@ export class PostgresPaymentPersistence implements PaymentPersistence {
             recipientSnapshotVersion: 1, trustConfirmationOutcome: trustOutcome } });
         return { outcome: "CLAIMED", payment: mapPayment(inserted.rows[0]) };
       }
-      const payment = prior ?? mapPayment((await client.query(
+      const payment = mapPayment((await client.query(
         "SELECT * FROM payments WHERE actor_subject=$1 AND idempotency_key=$2 FOR UPDATE",
         [input.actorSubject,input.idempotencyKey],
       )).rows[0]);
-      return { outcome: payment.requestHash === requestHash ? "EXISTING" : "HASH_CONFLICT", payment };
+      return {
+        outcome: matchesFrozenPaymentIdentityRequest(payment, {
+          ...input,
+          recipientId: input.recipientAccountId,
+        }) ? "EXISTING" : "HASH_CONFLICT",
+        payment,
+      };
     });
   }
 
-  async claimSyntheticPaymentIdentityKey(input: import("../storageContracts").ClaimSyntheticPaymentIdentityInput): Promise<IdempotencyClaim> {
-    return this.transaction(async(client)=>{await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))",[`${input.actorSubject.length}:${input.actorSubject}${input.idempotencyKey}`]);const exists=(await client.query("SELECT synthetic_id FROM synthetic_beta_identities WHERE synthetic_id=$1 FOR SHARE",[input.syntheticId])).rows[0];if(!exists)throw recipientUnavailable();const priorRow=(await client.query("SELECT * FROM payments WHERE actor_subject=$1 AND idempotency_key=$2 FOR UPDATE",[input.actorSubject,input.idempotencyKey])).rows[0];const prior=priorRow?mapPayment(priorRow):undefined;const snapshot:PaymentIdentitySnapshot=Object.freeze({accountId:input.syntheticId,username:input.username,displayName:input.displayName,accountType:"PERSONAL",verificationState:"UNVERIFIED",payabilityState:"AVAILABLE",capturedAt:prior?.recipientSnapshot?.capturedAt??input.capturedAt,schemaVersion:1,identitySource:"SYNTHETIC_BETA",resolutionSource:"SYNTHETIC_BETA",trustOutcome:"NOT_REQUIRED"});const recipientAddress=`synthetic:${input.syntheticId}`,requestHash=createPaymentIdentityRequestHash({actorSubject:input.actorSubject,network:input.network,mintAddress:input.mintAddress,recipientAddress,amountRaw:input.amountRaw,purpose:input.purpose,recipientAccountId:input.syntheticId,recipientSnapshot:snapshot,trustConfirmationOutcome:"NOT_REQUIRED"});if(prior)return{outcome:prior.requestHash===requestHash?"EXISTING":"HASH_CONFLICT",payment:prior};const inserted=await client.query(`INSERT INTO payments(id,actor_subject,idempotency_key,request_hash,network,rail,asset,mint_address,recipient_address,amount_raw,purpose,recipient_type,recipient_synthetic_id,recipient_snapshot,recipient_snapshot_version,trust_confirmation_outcome) VALUES($1,$2,$3,decode($4,'hex'),$5,$6,$7,$8,$9,$10,$11,'PAYMENT_IDENTITY',$12,$13,1,'NOT_REQUIRED') RETURNING *`,[input.id,input.actorSubject,input.idempotencyKey,requestHash,input.network,input.rail,input.asset,input.mintAddress,recipientAddress,input.amountRaw.toString(),input.purpose,input.syntheticId,JSON.stringify(snapshot)]);await appendEvent(client,{paymentId:input.id,eventType:"CREATED",toStatus:"AWAITING_CONFIRMATION",details:{recipientType:"PAYMENT_IDENTITY",identitySource:"SYNTHETIC_BETA",recipientSnapshotVersion:1,trustConfirmationOutcome:"NOT_REQUIRED"}});return{outcome:"CLAIMED",payment:mapPayment(inserted.rows[0])}})
+  async claimSyntheticPaymentIdentityKey(input: ClaimSyntheticPaymentIdentityInput): Promise<IdempotencyClaim> {
+    return this.transaction(async (client) => {
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`${input.actorSubject.length}:${input.actorSubject}${input.idempotencyKey}`]);
+      const priorRow = (await client.query(
+        "SELECT * FROM payments WHERE actor_subject=$1 AND idempotency_key=$2 FOR UPDATE",
+        [input.actorSubject, input.idempotencyKey],
+      )).rows[0];
+      if (priorRow) {
+        const prior = mapPayment(priorRow);
+        return {
+          outcome: matchesFrozenPaymentIdentityRequest(prior, {
+            ...input,
+            recipientId: input.syntheticId,
+            trustAcknowledged: false,
+          }) ? "EXISTING" : "HASH_CONFLICT",
+          payment: prior,
+        };
+      }
+
+      const exists = (await client.query(
+        "SELECT synthetic_id FROM synthetic_beta_identities WHERE synthetic_id=$1 FOR SHARE",
+        [input.syntheticId],
+      )).rows[0];
+      if (!exists) throw recipientUnavailable();
+      const snapshot: PaymentIdentitySnapshot = Object.freeze({
+        accountId: input.syntheticId, username: input.username, displayName: input.displayName,
+        accountType: "PERSONAL", verificationState: "UNVERIFIED", payabilityState: "AVAILABLE",
+        capturedAt: input.capturedAt, schemaVersion: 1, identitySource: "SYNTHETIC_BETA",
+        resolutionSource: "SYNTHETIC_BETA", trustOutcome: "NOT_REQUIRED",
+      });
+      const recipientAddress = `synthetic:${input.syntheticId}`;
+      const requestHash = createPaymentIdentityRequestHash({
+        actorSubject: input.actorSubject, network: input.network, mintAddress: input.mintAddress,
+        recipientAddress, amountRaw: input.amountRaw, purpose: input.purpose,
+        recipientAccountId: input.syntheticId, recipientSnapshot: snapshot,
+        trustConfirmationOutcome: "NOT_REQUIRED",
+      });
+      const inserted = await client.query(
+        `INSERT INTO payments
+          (id,actor_subject,idempotency_key,request_hash,network,rail,asset,mint_address,
+           recipient_address,amount_raw,purpose,recipient_type,recipient_synthetic_id,
+           recipient_snapshot,recipient_snapshot_version,trust_confirmation_outcome)
+         VALUES($1,$2,$3,decode($4,'hex'),$5,$6,$7,$8,$9,$10,$11,'PAYMENT_IDENTITY',$12,$13,1,'NOT_REQUIRED')
+         ON CONFLICT(actor_subject,idempotency_key) DO NOTHING RETURNING *`,
+        [input.id,input.actorSubject,input.idempotencyKey,requestHash,input.network,input.rail,input.asset,
+          input.mintAddress,recipientAddress,input.amountRaw.toString(),input.purpose,input.syntheticId,
+          JSON.stringify(snapshot)],
+      );
+      if (inserted.rows[0]) {
+        await appendEvent(client, { paymentId: input.id, eventType: "CREATED", toStatus: "AWAITING_CONFIRMATION",
+          details: { recipientType: "PAYMENT_IDENTITY", identitySource: "SYNTHETIC_BETA",
+            recipientSnapshotVersion: 1, trustConfirmationOutcome: "NOT_REQUIRED" } });
+        return { outcome: "CLAIMED", payment: mapPayment(inserted.rows[0]) };
+      }
+      const concurrent = mapPayment((await client.query(
+        "SELECT * FROM payments WHERE actor_subject=$1 AND idempotency_key=$2 FOR UPDATE",
+        [input.actorSubject, input.idempotencyKey],
+      )).rows[0]);
+      return {
+        outcome: matchesFrozenPaymentIdentityRequest(concurrent, {
+          ...input,
+          recipientId: input.syntheticId,
+          trustAcknowledged: false,
+        }) ? "EXISTING" : "HASH_CONFLICT",
+        payment: concurrent,
+      };
+    });
   }
 
   async findPayment(paymentId: string): Promise<PaymentRecord | undefined> {

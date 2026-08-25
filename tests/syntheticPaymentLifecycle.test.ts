@@ -18,8 +18,15 @@ test("synthetic beta create, confirm, and execute uses trust-not-required and ex
   const account = (await accounts.resolve(principal)).account;
   await payments.createAllowlistEntry({ actorSubject: account.actorSubject });
   const synthetic = syntheticBetaIdentity("Nova Beta");
+  let currentSynthetic: typeof synthetic | undefined = synthetic;
+  let syntheticLookupCalls = 0;
+  let syntheticLookupUnavailable = false;
   const syntheticStore = {
-    findById: async (id: string) => id === synthetic.syntheticId ? synthetic : undefined,
+    findById: async (id: string) => {
+      syntheticLookupCalls += 1;
+      if (syntheticLookupUnavailable) throw new Error("Synthetic directory unavailable");
+      return id === currentSynthetic?.syntheticId ? currentSynthetic : undefined;
+    },
     findByName: async () => synthetic,
     claim: async () => synthetic,
   };
@@ -38,9 +45,12 @@ test("synthetic beta create, confirm, and execute uses trust-not-required and ex
   assert.equal(created.paymentIntent.recipientSnapshot.identitySource, "synthetic_beta");
   assert.equal(created.paymentIntent.recipientSnapshot.trustOutcome, "not_required");
 
+  currentSynthetic = undefined;
+  syntheticLookupUnavailable = true;
   const replay = await intents.create(principal, createInput);
   assert.equal(replay.created, false);
   assert.equal(replay.paymentIntent.id, created.paymentIntent.id);
+  assert.equal(syntheticLookupCalls, 1);
   await assert.rejects(() => intents.create(principal, { ...createInput, amount: "3" }), (error) =>
     error instanceof PaymentIntentApplicationError && error.kind === "CONFLICT");
 

@@ -87,6 +87,19 @@ export class PaymentIntentService {
     await this.requireActiveAllowlist(actorSubject);
     const amountRaw = usdcAmountToRaw(input.amount);
     if ("recipientType" in input) {
+      const replay = await this.payments.replayPaymentIdentityKey({
+        actorSubject,
+        idempotencyKey: input.idempotencyKey,
+        recipientId: input.recipientAccountId,
+        trustAcknowledged: input.trustAcknowledgment?.acknowledged === true,
+        network: "solana-devnet",
+        rail: "solana",
+        asset: "USDC",
+        mintAddress: this.mintAddress,
+        amountRaw,
+        purpose: input.purpose,
+      });
+      if (replay) return this.claimResult(replay);
       let claim;
       try {
         const synthetic=await this.syntheticIdentityStore?.findById(input.recipientAccountId);
@@ -109,8 +122,7 @@ export class PaymentIntentService {
         }
         throw error;
       }
-      if (claim.outcome === "HASH_CONFLICT") throw new PaymentIntentApplicationError("CONFLICT", "Idempotency key was already used for a different payment intent.");
-      return { paymentIntent: toPublicPaymentIntent(claim.payment), created: claim.outcome === "CLAIMED" };
+      return this.claimResult(claim);
     }
     const canonical = {
       actorSubject,
@@ -206,6 +218,11 @@ export class PaymentIntentService {
     if (!hasActivePaymentAccess(entry, this.clock())) {
       throw new PaymentIntentApplicationError("ACCESS_DENIED", "Beta payment access is unavailable.");
     }
+  }
+
+  private claimResult(claim: Awaited<ReturnType<PaymentPersistence["claimPaymentIdentityKey"]>>): Readonly<{ paymentIntent: PublicPaymentIntent; created: boolean }> {
+    if (claim.outcome === "HASH_CONFLICT") throw new PaymentIntentApplicationError("CONFLICT", "Idempotency key was already used for a different payment intent.");
+    return { paymentIntent: toPublicPaymentIntent(claim.payment), created: claim.outcome === "CLAIMED" };
   }
 
   private async requireOwnedPayment(paymentId: string, actorSubject: string): Promise<PaymentRecord> {

@@ -16,6 +16,7 @@ export type PaymentRequestClaim = Readonly<{outcome:"CLAIMED"|"EXISTING"|"HASH_C
 
 export interface PaymentRequestRepository {
   claim(input:CreatePaymentRequestRecord):Promise<PaymentRequestClaim>;
+  findByIdempotencyKey(requesterActorSubject:string,idempotencyKey:string):Promise<PaymentRequestRecord|undefined>;
   find(requestId:string):Promise<PaymentRequestRecord|undefined>;
   listVisible(accountId:string,limit:number):Promise<PaymentRequestRecord[]>;
   transition(input:Readonly<{requestId:string;expectedVersion:bigint;actorAccountId:string;toStatus:"ACCEPTED"|"DECLINED"|"CANCELLED";occurredAt:string;linkedPaymentIntentId?:string}>):Promise<PaymentRequestRecord>;
