@@ -6,6 +6,8 @@ import path from "node:path";
 import { after, before, test } from "node:test";
 import { Pool, type PoolClient } from "pg";
 
+import { PostgresPaymentPersistence } from "../src/storage/postgres/postgresPaymentPersistence";
+
 const databaseUrl = process.env.TEST_DATABASE_URL?.trim();
 if (!databaseUrl) throw new Error("TEST_DATABASE_URL is required.");
 
@@ -40,6 +42,27 @@ test("migration 009 supports fresh and historical upgrade paths without weakenin
     await seedAccount(client, sender);
     await seedAccount(client, recipient);
     const actor = `zp:account:${sender}`;
+    const idempotencyKey = `upgrade-${randomUUID()}`;
+    const historicalSnapshot = {
+      accountId: recipient,
+      username: "historical",
+      displayName: "Historical",
+      accountType: "PERSONAL",
+      verificationState: "UNVERIFIED",
+      payabilityState: "AVAILABLE",
+      capturedAt: "2026-08-01T00:00:00.000Z",
+      schemaVersion: 1,
+      resolutionSource: "RECIPIENT_DIRECTORY",
+      trustOutcome: "ACKNOWLEDGED",
+    } as const;
+    const historicalHash = preMigration009RequestHash({
+      actorSubject: actor,
+      recipientAccountId: recipient,
+      recipientAddress: "wallet",
+      recipientSnapshot: historicalSnapshot,
+      amountRaw: 1_000_000n,
+      purpose: null,
+    });
     await client.query("INSERT INTO beta_allowlist(actor_subject) VALUES($1)", [actor]);
     await client.query(
       `INSERT INTO payments(
@@ -48,14 +71,27 @@ test("migration 009 supports fresh and historical upgrade paths without weakenin
          recipient_snapshot,recipient_snapshot_version,trust_confirmation_outcome
        ) VALUES($1,$2,$3,decode($4,'hex'),'AWAITING_CONFIRMATION','solana-devnet','solana','USDC',$5,$6,1000000,NULL,
          'PAYMENT_IDENTITY',$7,$8::jsonb,1,'ACKNOWLEDGED')`,
-      [payment, actor, `upgrade-${randomUUID()}`, "a".repeat(64), "mint", "wallet", recipient,
-       JSON.stringify({ schemaVersion: 1, accountId: recipient, username: "historical", displayName: "Historical", accountType: "PERSONAL", verificationState: "UNVERIFIED", trustOutcome: "ACKNOWLEDGED", capturedAt: "2026-08-01T00:00:00.000Z" })],
+      [payment, actor, idempotencyKey, historicalHash, "mint", "wallet", recipient, JSON.stringify(historicalSnapshot)],
     );
 
     await migrate(client, files.slice(8));
     assert.deepEqual(await applied(client), files);
-    const backfilled = await client.query("SELECT recipient_snapshot->>'identitySource' AS source FROM payments WHERE id=$1", [payment]);
+    const backfilled = await client.query("SELECT recipient_snapshot->>'identitySource' AS source,encode(request_hash,'hex') AS request_hash FROM payments WHERE id=$1", [payment]);
     assert.equal(backfilled.rows[0].source, "RECIPIENT_DIRECTORY");
+    assert.equal(backfilled.rows[0].request_hash, historicalHash);
+    const replayPool = new Pool({ connectionString: databaseUrl, max: 2, options: `-c search_path=${upgradeSchema},public` });
+    try {
+      const payments = new PostgresPaymentPersistence(replayPool);
+      const replayInput = {id:randomUUID(),actorSubject:actor,senderAccountId:sender,idempotencyKey,recipientAccountId:recipient,trustAcknowledged:true,network:"solana-devnet" as const,rail:"solana" as const,asset:"USDC" as const,mintAddress:"mint",amountRaw:1_000_000n,purpose:null,capturedAt:"2026-08-09T00:00:00.000Z"};
+      const replay = await payments.claimPaymentIdentityKey(replayInput);
+      assert.equal(replay.outcome, "EXISTING");
+      assert.equal(replay.payment.id, payment);
+      assert.equal(replay.payment.requestHash, historicalHash);
+      assert.equal((await payments.claimPaymentIdentityKey({...replayInput,id:randomUUID(),recipientAccountId:sender})).outcome,"HASH_CONFLICT");
+      assert.equal((await payments.claimPaymentIdentityKey({...replayInput,id:randomUUID(),amountRaw:2_000_000n})).outcome,"HASH_CONFLICT");
+    } finally {
+      await replayPool.end();
+    }
     const trigger = await client.query("SELECT t.tgenabled FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=current_schema() AND t.tgname='payments_protect_recipient_linkage' AND NOT t.tgisinternal");
     assert.deepEqual(trigger.rows.map((row) => row.tgenabled), ["O"]);
 
@@ -65,6 +101,28 @@ test("migration 009 supports fresh and historical upgrade paths without weakenin
     await immutable(client, "UPDATE payments SET recipient_type='DIRECT_WALLET' WHERE id=$1", [payment]);
   });
 });
+
+function preMigration009RequestHash(input: Readonly<{
+  actorSubject: string;
+  recipientAccountId: string;
+  recipientAddress: string;
+  recipientSnapshot: Readonly<Record<string, unknown>>;
+  amountRaw: bigint;
+  purpose: string | null;
+}>): string {
+  return createHash("sha256").update(JSON.stringify({
+    actorSubject: input.actorSubject,
+    recipientType: "PAYMENT_IDENTITY",
+    recipientAccountId: input.recipientAccountId,
+    network: "solana-devnet",
+    mintAddress: "mint",
+    recipientAddress: input.recipientAddress,
+    recipientSnapshot: input.recipientSnapshot,
+    trustConfirmationOutcome: "ACKNOWLEDGED",
+    amountRaw: input.amountRaw.toString(),
+    purpose: input.purpose,
+  }), "utf8").digest("hex");
+}
 
 async function withSchema(schema: string, action: (client: PoolClient) => Promise<void>) {
   const client = await pool.connect();

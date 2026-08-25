@@ -1,5 +1,8 @@
-import { createPaymentIdentityRequestHash } from "./requestHash";
-import type { PaymentRecord } from "./paymentTypes";
+import {
+  createLegacyPreMigration009PaymentIdentityRequestHash,
+  createPaymentIdentityRequestHash,
+} from "./requestHash";
+import type { PaymentIdentitySnapshot, PaymentRecord } from "./paymentTypes";
 
 export type PaymentIdentityReplayRequest = Readonly<{
   actorSubject: string;
@@ -46,7 +49,7 @@ export function matchesFrozenPaymentIdentityRequest(
 
   if (trustOutcome === "ACKNOWLEDGED" && !input.trustAcknowledged) return false;
 
-  const reconstructedHash = createPaymentIdentityRequestHash({
+  const hashInput = {
     actorSubject: input.actorSubject,
     network: input.network,
     mintAddress: input.mintAddress,
@@ -56,6 +59,39 @@ export function matchesFrozenPaymentIdentityRequest(
     recipientAccountId: input.recipientId,
     recipientSnapshot: snapshot,
     trustConfirmationOutcome: trustOutcome,
-  });
-  return payment.requestHash === reconstructedHash;
+  };
+  if (payment.requestHash === createPaymentIdentityRequestHash(hashInput)) return true;
+
+  if (!isKnownMigration009CanonicalBackfill(payment, snapshot)) return false;
+  return payment.requestHash === createLegacyPreMigration009PaymentIdentityRequestHash(hashInput);
+}
+
+const MIGRATION_009_CANONICAL_SNAPSHOT_KEYS = [
+  "accountId", "accountType", "capturedAt", "displayName", "identitySource", "payabilityState",
+  "resolutionSource", "schemaVersion", "trustOutcome", "username", "verificationState",
+] as const;
+const CANONICAL_ACCOUNT_TYPES = new Set<unknown>(["PERSONAL", "CREATOR", "BUSINESS", "AI_AGENT"]);
+const CANONICAL_VERIFICATION_STATES = new Set<unknown>(["UNVERIFIED", "PENDING", "VERIFIED"]);
+
+function isKnownMigration009CanonicalBackfill(
+  payment: PaymentRecord,
+  snapshot: PaymentIdentitySnapshot,
+): boolean {
+  if (
+    !payment.recipientAccountId ||
+    payment.recipientSyntheticId !== undefined ||
+    snapshot.identitySource !== "RECIPIENT_DIRECTORY" ||
+    snapshot.resolutionSource !== "RECIPIENT_DIRECTORY" ||
+    snapshot.schemaVersion !== 1 ||
+    snapshot.payabilityState !== "AVAILABLE" ||
+    typeof snapshot.username !== "string" || !snapshot.username ||
+    typeof snapshot.displayName !== "string" || !snapshot.displayName ||
+    typeof snapshot.capturedAt !== "string" || !Number.isFinite(Date.parse(snapshot.capturedAt)) ||
+    !CANONICAL_ACCOUNT_TYPES.has(snapshot.accountType) ||
+    !CANONICAL_VERIFICATION_STATES.has(snapshot.verificationState)
+  ) return false;
+
+  const keys = Object.keys(snapshot).sort();
+  return keys.length === MIGRATION_009_CANONICAL_SNAPSHOT_KEYS.length &&
+    keys.every((key, index) => key === MIGRATION_009_CANONICAL_SNAPSHOT_KEYS[index]);
 }

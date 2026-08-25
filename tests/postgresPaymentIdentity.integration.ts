@@ -18,7 +18,7 @@ const economic=new PostgresEconomicIdentityPersistence(pool); const payments=new
 const synthetics=new PostgresSyntheticBetaIdentityStore(pool);
 const SENDER="00000000-0000-4000-8000-000000000801", RECIPIENT="00000000-0000-4000-8000-000000000802";
 const ACTOR=`zp:account:${SENDER}`, WALLET="2w2nqMemQzjwKMk3jEmtXnBqGBXGJLs8FNfb5Khb8E7J";
-const OTHER_RECIPIENT="00000000-0000-4000-8000-000000000803", ROTATED_WALLET="4Nd1mYwRkXkYtGT7dQz4FzRzCQXDpGfVv3YJz7drGqPv";
+const OTHER_RECIPIENT="00000000-0000-4000-8000-000000000803", ROTATED_WALLET="4Nd1mYwRkXkYtGT7dQz4FzRzCQXDpGfVv3YJz7drGqPv", OTHER_WALLET="7YttLkHDoNj9wyDur5L6e4wR9HkT5QEdW8ZVQ7L7d7Jy";
 const NOW="2026-08-05T12:00:00.000Z"; const execFileAsync=promisify(execFile);
 
 before(async()=>{
@@ -29,11 +29,14 @@ before(async()=>{
 });
 beforeEach(async()=>{
   await pool.query("TRUNCATE payment_events,payment_receipts,payments,beta_allowlist,synthetic_beta_identities,economic_identities,payment_destinations,account_security_events,account_sessions,external_identities,accounts RESTART IDENTITY CASCADE");
-  await accounts.createAccount({accountId:SENDER,createdAt:NOW}); await accounts.createAccount({accountId:RECIPIENT,createdAt:NOW});
+  await accounts.createAccount({accountId:SENDER,createdAt:NOW}); await accounts.createAccount({accountId:RECIPIENT,createdAt:NOW}); await accounts.createAccount({accountId:OTHER_RECIPIENT,createdAt:NOW});
   await payments.createAllowlistEntry({actorSubject:ACTOR});
   const identity=(await economic.upsertEconomicIdentity({accountId:RECIPIENT,accountType:"CREATOR",username:"recent_01",normalizedUsername:"recent_01",displayName:"Recent Creator",discoverability:"USERNAME_ONLY",occurredAt:NOW})).identity;
   await economic.updateEconomicIdentityState({accountId:RECIPIENT,expectedVersion:identity.version,publicIdentityStatus:"ACTIVE",verificationState:"UNVERIFIED",payabilityState:"AVAILABLE",occurredAt:NOW});
   await economic.upsertSolanaDestination({destinationId:randomUUID(),accountId:RECIPIENT,address:WALLET,primary:true,occurredAt:NOW});
+  const other=(await economic.upsertEconomicIdentity({accountId:OTHER_RECIPIENT,accountType:"PERSONAL",username:"other_01",normalizedUsername:"other_01",displayName:"Other Recipient",discoverability:"PUBLIC",occurredAt:NOW})).identity;
+  await economic.updateEconomicIdentityState({accountId:OTHER_RECIPIENT,expectedVersion:other.version,publicIdentityStatus:"ACTIVE",verificationState:"VERIFIED",payabilityState:"AVAILABLE",occurredAt:NOW});
+  await economic.upsertSolanaDestination({destinationId:randomUUID(),accountId:OTHER_RECIPIENT,address:OTHER_WALLET,primary:true,occurredAt:NOW});
 });
 after(async()=>pool.end());
 
@@ -47,6 +50,18 @@ describe("PostgreSQL Payment Identity linkage",()=>{
     assert.equal(payment.recipientSnapshot?.trustOutcome,"ACKNOWLEDGED"); assert.equal(payment.recipientSnapshotVersion,1);
     const events=await payments.listPaymentEvents(payment.id); assert.deepEqual(Object.keys(events[0].details).sort(),["recipientAccountId","recipientSnapshotVersion","recipientType","trustConfirmationOutcome"]);
     await assert.rejects(()=>pool.query("UPDATE payments SET recipient_snapshot=recipient_snapshot || '{\"displayName\":\"Changed\"}'::jsonb WHERE id=$1",[payment.id]),/immutable/);
+  });
+  it("conflicts concurrent first claims with differing recipient or amount semantics",async()=>{
+    for(const scenario of[
+      [input({id:randomUUID(),idempotencyKey:"recipient-race-key-0001"}),input({id:randomUUID(),idempotencyKey:"recipient-race-key-0001",recipientAccountId:OTHER_RECIPIENT})],
+      [input({id:randomUUID(),idempotencyKey:"amount-race-key-000001"}),input({id:randomUUID(),idempotencyKey:"amount-race-key-000001",amountRaw:2_000_000n})],
+    ]){
+      const results=await Promise.all(scenario.map(value=>payments.claimPaymentIdentityKey(value as ReturnType<typeof input>)));
+      assert.deepEqual(results.map(({outcome})=>outcome).sort(),["CLAIMED","HASH_CONFLICT"]);
+      assert.equal(results[0].payment.id,results[1].payment.id);
+      const count=await pool.query("SELECT count(*)::int AS count FROM payments WHERE actor_subject=$1 AND idempotency_key=$2",[ACTOR,scenario[0].idempotencyKey]);
+      assert.equal(count.rows[0].count,1);
+    }
   });
   it("requires trust, conflicts on canonical changes, and derives recents only after confirmation",async()=>{
     await assert.rejects(()=>payments.claimPaymentIdentityKey(input({trustAcknowledged:false})),/TRUST_ACKNOWLEDGMENT_REQUIRED/);

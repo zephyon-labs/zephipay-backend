@@ -40,12 +40,36 @@ export function createPaymentIdentityRequestHash(input: CanonicalPaymentRequest 
   recipientSnapshot: PaymentIdentitySnapshot;
   trustConfirmationOutcome: "NOT_REQUIRED" | "ACKNOWLEDGED";
 }>): string {
+  return hashPaymentIdentityRequest(input, canonicalPaymentIdentitySnapshot(input.recipientSnapshot));
+}
+
+/**
+ * Replay-only compatibility for canonical Payment Identity rows created before
+ * migration 009 added identitySource to their stored snapshots. New payments
+ * must always use createPaymentIdentityRequestHash.
+ */
+export function createLegacyPreMigration009PaymentIdentityRequestHash(input: CanonicalPaymentRequest & Readonly<{
+  recipientAccountId: string;
+  recipientSnapshot: PaymentIdentitySnapshot;
+  trustConfirmationOutcome: "NOT_REQUIRED" | "ACKNOWLEDGED";
+}>): string {
+  return hashPaymentIdentityRequest(input, canonicalPreMigration009Snapshot(input.recipientSnapshot));
+}
+
+function hashPaymentIdentityRequest(
+  input: CanonicalPaymentRequest & Readonly<{
+    recipientAccountId: string;
+    recipientSnapshot: PaymentIdentitySnapshot;
+    trustConfirmationOutcome: "NOT_REQUIRED" | "ACKNOWLEDGED";
+  }>,
+  recipientSnapshot: Omit<PaymentIdentitySnapshot, "identitySource"> | PaymentIdentitySnapshot,
+): string {
   if (input.amountRaw <= 0n) throw new Error("Payment amountRaw must be positive.");
   const canonical = JSON.stringify({
     actorSubject: input.actorSubject, recipientType: "PAYMENT_IDENTITY",
     recipientAccountId: input.recipientAccountId, network: input.network,
     mintAddress: input.mintAddress, recipientAddress: input.recipientAddress,
-    recipientSnapshot: canonicalPaymentIdentitySnapshot(input.recipientSnapshot),
+    recipientSnapshot,
     trustConfirmationOutcome: input.trustConfirmationOutcome,
     amountRaw: input.amountRaw.toString(), purpose: input.purpose,
   });
@@ -63,6 +87,21 @@ function canonicalPaymentIdentitySnapshot(snapshot: PaymentIdentitySnapshot): Pa
     capturedAt: snapshot.capturedAt,
     schemaVersion: snapshot.schemaVersion,
     ...(snapshot.identitySource ? { identitySource: snapshot.identitySource } : {}),
+    resolutionSource: snapshot.resolutionSource,
+    trustOutcome: snapshot.trustOutcome,
+  };
+}
+
+function canonicalPreMigration009Snapshot(snapshot: PaymentIdentitySnapshot): Omit<PaymentIdentitySnapshot, "identitySource"> {
+  return {
+    accountId: snapshot.accountId,
+    username: snapshot.username,
+    displayName: snapshot.displayName,
+    accountType: snapshot.accountType,
+    verificationState: snapshot.verificationState,
+    payabilityState: snapshot.payabilityState,
+    capturedAt: snapshot.capturedAt,
+    schemaVersion: snapshot.schemaVersion,
     resolutionSource: snapshot.resolutionSource,
     trustOutcome: snapshot.trustOutcome,
   };

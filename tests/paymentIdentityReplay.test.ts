@@ -2,7 +2,15 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { PaymentExecutionWorker } from "../src/executions/executionWorker";
-import type { PaymentRecord } from "../src/payments/paymentTypes";
+import {
+  matchesFrozenPaymentIdentityRequest,
+  type PaymentIdentityReplayRequest,
+} from "../src/payments/paymentIdentityReplay";
+import {
+  createLegacyPreMigration009PaymentIdentityRequestHash,
+  createPaymentIdentityRequestHash,
+} from "../src/payments/requestHash";
+import type { PaymentIdentitySnapshot, PaymentRecord } from "../src/payments/paymentTypes";
 import type { ClaimPaymentIdentityInput } from "../src/storage/storageContracts";
 import { InMemoryExecutionRepository } from "../src/storage/memory/inMemoryExecutionRepository";
 import { InMemoryPaymentPersistence } from "../src/storage/memory/inMemoryPaymentPersistence";
@@ -15,6 +23,20 @@ const RECIPIENT_A = "00000000-0000-4000-8000-000000000801";
 const RECIPIENT_B = "00000000-0000-4000-8000-000000000802";
 const DESTINATION_D1 = "2w2nqMemQzjwKMk3jEmtXnBqGBXGJLs8FNfb5Khb8E7J";
 const DESTINATION_D2 = "4Nd1mYwRkXkYtGT7dQz4FzRzCQXDpGfVv3YJz7drGqPv";
+
+const CANONICAL_SNAPSHOT: PaymentIdentitySnapshot = Object.freeze({
+  accountId: RECIPIENT_A,
+  username: "recipient_a",
+  displayName: "Recipient A",
+  accountType: "PERSONAL",
+  verificationState: "UNVERIFIED",
+  payabilityState: "AVAILABLE",
+  capturedAt: NOW,
+  schemaVersion: 1,
+  identitySource: "RECIPIENT_DIRECTORY",
+  resolutionSource: "RECIPIENT_DIRECTORY",
+  trustOutcome: "ACKNOWLEDGED",
+});
 
 type Resolution = Readonly<{
   username: string;
@@ -67,6 +89,113 @@ function fixture() {
     setResolution: (value: Resolution | undefined) => { resolution = value; },
   };
 }
+
+function replayInput(overrides: Partial<PaymentIdentityReplayRequest> = {}): PaymentIdentityReplayRequest {
+  return {
+    actorSubject: ACTOR,
+    idempotencyKey: "legacy-replay-key-0001",
+    recipientId: RECIPIENT_A,
+    trustAcknowledged: true,
+    network: "solana-devnet",
+    rail: "solana",
+    asset: "USDC",
+    mintAddress: "mint-usdc-devnet",
+    amountRaw: 1_000_000n,
+    purpose: "Historical recipient",
+    ...overrides,
+  };
+}
+
+function frozenRecord(requestHash: string, overrides: Partial<PaymentRecord> = {}): PaymentRecord {
+  return Object.freeze({
+    id: "00000000-0000-4000-8000-000000000951",
+    actorSubject: ACTOR,
+    idempotencyKey: "legacy-replay-key-0001",
+    requestHash,
+    status: "AWAITING_CONFIRMATION",
+    version: 0n,
+    network: "solana-devnet",
+    rail: "solana",
+    asset: "USDC",
+    mintAddress: "mint-usdc-devnet",
+    recipientAddress: DESTINATION_D1,
+    amountRaw: 1_000_000n,
+    purpose: "Historical recipient",
+    recipientType: "PAYMENT_IDENTITY",
+    recipientAccountId: RECIPIENT_A,
+    recipientSnapshot: CANONICAL_SNAPSHOT,
+    recipientSnapshotVersion: 1,
+    trustConfirmationOutcome: "ACKNOWLEDGED",
+    createdAt: NOW,
+    updatedAt: NOW,
+    ...overrides,
+  });
+}
+
+function hashInput(snapshot: PaymentIdentitySnapshot = CANONICAL_SNAPSHOT) {
+  return {
+    actorSubject: ACTOR,
+    network: "solana-devnet" as const,
+    mintAddress: "mint-usdc-devnet",
+    recipientAddress: DESTINATION_D1,
+    amountRaw: 1_000_000n,
+    purpose: "Historical recipient",
+    recipientAccountId: RECIPIENT_A,
+    recipientSnapshot: snapshot,
+    trustConfirmationOutcome: "ACKNOWLEDGED" as const,
+  };
+}
+
+describe("IDENT-R001 historical Payment Identity hash compatibility", () => {
+  it("accepts the current canonical hash before considering compatibility", () => {
+    const currentHash = createPaymentIdentityRequestHash(hashInput());
+    assert.equal(matchesFrozenPaymentIdentityRequest(frozenRecord(currentHash), replayInput()), true);
+  });
+
+  it("accepts only the known pre-migration-009 canonical snapshot hash", () => {
+    const currentHash = createPaymentIdentityRequestHash(hashInput());
+    const legacyHash = createLegacyPreMigration009PaymentIdentityRequestHash(hashInput());
+    assert.notEqual(legacyHash, currentHash);
+    assert.equal(matchesFrozenPaymentIdentityRequest(frozenRecord(legacyHash), replayInput()), true);
+  });
+
+  it("rejects changed caller semantics before legacy hash compatibility", () => {
+    const payment = frozenRecord(createLegacyPreMigration009PaymentIdentityRequestHash(hashInput()));
+    assert.equal(matchesFrozenPaymentIdentityRequest(payment, replayInput({ recipientId: RECIPIENT_B })), false);
+    assert.equal(matchesFrozenPaymentIdentityRequest(payment, replayInput({ amountRaw: 2_000_000n })), false);
+    assert.equal(matchesFrozenPaymentIdentityRequest(payment, replayInput({ purpose: "Changed" })), false);
+  });
+
+  it("rejects arbitrary hashes and non-historical snapshot shapes", () => {
+    assert.equal(matchesFrozenPaymentIdentityRequest(frozenRecord("b".repeat(64)), replayInput()), false);
+    const expandedSnapshot = Object.freeze({ ...CANONICAL_SNAPSHOT, unexpectedField: "not-historical" }) as PaymentIdentitySnapshot;
+    const legacyHash = createLegacyPreMigration009PaymentIdentityRequestHash(hashInput(expandedSnapshot));
+    assert.equal(matchesFrozenPaymentIdentityRequest(frozenRecord(legacyHash, { recipientSnapshot: expandedSnapshot }), replayInput()), false);
+  });
+
+  it("does not apply canonical legacy compatibility to synthetic records", () => {
+    const syntheticSnapshot: PaymentIdentitySnapshot = Object.freeze({
+      ...CANONICAL_SNAPSHOT,
+      identitySource: "SYNTHETIC_BETA",
+      resolutionSource: "SYNTHETIC_BETA",
+      trustOutcome: "NOT_REQUIRED",
+    });
+    const syntheticHashInput = {
+      ...hashInput(syntheticSnapshot),
+      recipientAddress: `synthetic:${RECIPIENT_A}`,
+      trustConfirmationOutcome: "NOT_REQUIRED" as const,
+    };
+    const forgedLegacyHash = createLegacyPreMigration009PaymentIdentityRequestHash(syntheticHashInput);
+    const synthetic = frozenRecord(forgedLegacyHash, {
+      recipientAddress: syntheticHashInput.recipientAddress,
+      recipientAccountId: undefined,
+      recipientSyntheticId: RECIPIENT_A,
+      recipientSnapshot: syntheticSnapshot,
+      trustConfirmationOutcome: "NOT_REQUIRED",
+    });
+    assert.equal(matchesFrozenPaymentIdentityRequest(synthetic, replayInput()), false);
+  });
+});
 
 describe("IDENT-001 frozen Payment Identity replay", () => {
   it("returns the existing payment without consulting changed metadata, trust, visibility, or destination", async () => {
@@ -174,5 +303,55 @@ describe("IDENT-001 frozen Payment Identity replay", () => {
     assert.equal((await worker.processNext())?.status, "PROCESSING");
     assert.equal((await f.payments.findPayment(confirmed.id))?.recipientAddress, DESTINATION_D1);
     assert.equal(f.resolutionCalls(), 1);
+  });
+});
+
+describe("IDENT-R002 in-memory differing-semantic first claims", () => {
+  function concurrentPayments() {
+    return new InMemoryPaymentPersistence({
+      clock: () => NOW,
+      resolvePaymentIdentity: async (request) => ({
+        username: request.recipientAccountId === RECIPIENT_A ? "recipient_a" : "recipient_b",
+        displayName: request.recipientAccountId === RECIPIENT_A ? "Recipient A" : "Recipient B",
+        accountType: "PERSONAL",
+        verificationState: "VERIFIED",
+        payabilityState: "AVAILABLE",
+        destinationAddress: request.recipientAccountId === RECIPIENT_A ? DESTINATION_D1 : DESTINATION_D2,
+      }),
+    });
+  }
+
+  async function assertOneWinner(
+    payments: InMemoryPaymentPersistence,
+    left: ClaimPaymentIdentityInput,
+    right: ClaimPaymentIdentityInput,
+  ) {
+    const results = await Promise.all([
+      payments.claimPaymentIdentityKey(left),
+      payments.claimPaymentIdentityKey(right),
+    ]);
+    assert.deepEqual(results.map(({ outcome }) => outcome).sort(), ["CLAIMED", "HASH_CONFLICT"]);
+    assert.equal(results[0].payment.id, results[1].payment.id);
+    const winner = results.find(({ outcome }) => outcome === "CLAIMED")!;
+    const loserId = winner.payment.id === left.id ? right.id : left.id;
+    assert.equal(await payments.findPayment(loserId), undefined);
+  }
+
+  it("establishes exactly one recipient meaning for a concurrent actor/key race", async () => {
+    const payments = concurrentPayments();
+    await assertOneWinner(
+      payments,
+      input({ id: "00000000-0000-4000-8000-000000000961", idempotencyKey: "recipient-race-key-0001" }),
+      input({ id: "00000000-0000-4000-8000-000000000962", idempotencyKey: "recipient-race-key-0001", recipientAccountId: RECIPIENT_B }),
+    );
+  });
+
+  it("establishes exactly one amount meaning for a concurrent actor/key race", async () => {
+    const payments = concurrentPayments();
+    await assertOneWinner(
+      payments,
+      input({ id: "00000000-0000-4000-8000-000000000963", idempotencyKey: "amount-race-key-000001" }),
+      input({ id: "00000000-0000-4000-8000-000000000964", idempotencyKey: "amount-race-key-000001", amountRaw: 2_000_000n }),
+    );
   });
 });
