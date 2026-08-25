@@ -88,8 +88,7 @@ before(async () => {
   app.use(requestContext, express.json({ strict: true }));
   app.use(
     "/api/account",
-    ...auth,
-    createZpRouter(new ZpProgressService(accounts, states)),
+    createZpRouter({ service: new ZpProgressService(accounts, states), readAuth: auth }),
   );
   app.use(
     (

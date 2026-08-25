@@ -58,7 +58,7 @@ describe("account provisioning", () => {
       };
       const app = express();
       app.use((_req, res, next) => { res.locals.externalPrincipal = { issuer, providerSubject: `auth0|${name}`, scopes: [] }; next(); });
-      app.use("/api/account", createAccountRouter(accounts, repository, () => now));
+      app.use("/api/account", createAccountRouter({ service: accounts, allowlist: repository, readAuth: [], clock: () => now }));
       const server = app.listen(0);
       await new Promise<void>((resolve) => server.once("listening", resolve));
       try {

@@ -1,5 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
-import { auth, requiredScopes, type PublicKeyInput } from "express-oauth2-jwt-bearer";
+import { auth, InsufficientScopeError, requiredScopes, type PublicKeyInput } from "express-oauth2-jwt-bearer";
 
 import type { ExternalPrincipal } from "./externalPrincipal";
 
@@ -34,7 +34,14 @@ export function createAuthPipeline(configuration: AuthConfiguration) {
     cacheMaxAge: 600_000,
   });
   const scope = requiredScopes(configuration.requiredScope);
-  return [verify, scope, normalizePrincipal] as const;
+  const authoritativeScopeClaim = (req: Request, _res: Response, next: NextFunction) => {
+    if (typeof req.auth?.payload.scope !== "string") {
+      next(new InsufficientScopeError([configuration.requiredScope], "Missing or malformed 'scope' claim"));
+      return;
+    }
+    next();
+  };
+  return [verify, authoritativeScopeClaim, scope, normalizePrincipal] as const;
 }
 
 function normalizePrincipal(req: Request, res: Response, next: NextFunction): void {

@@ -98,6 +98,28 @@ describe("payment intent HTTP boundary", () => {
     })).status, 403);
   });
 
+  it("does not treat account scopes as payment creation, confirmation, or execution authority", async () => {
+    const paymentWrite = await jwt("auth0|owner", "write:payments");
+    const created = await createIntent(paymentWrite, "http-account-scope-separation-0001");
+    assert.equal(created.status, 201);
+    const intent = (await created.json() as { paymentIntent: { id: string; requestHash: string } }).paymentIntent;
+
+    for (const scope of ["read:account", "write:account"]) {
+      const accountToken = await jwt("auth0|owner", scope);
+      assert.equal((await createIntent(accountToken, `http-${scope.replace(":", "-")}-denied-0001`)).status, 403);
+      assert.equal((await fetch(`${baseUrl}/api/payment-intents/${intent.id}/confirm`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${accountToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ requestHash: intent.requestHash, expectedVersion: "0" }),
+      })).status, 403);
+      assert.equal((await fetch(`${baseUrl}/api/payment-intents/${intent.id}/execute`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${accountToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ requestHash: intent.requestHash, expectedVersion: "0" }),
+      })).status, 403);
+    }
+  });
+
   it("creates, replays, conflicts, reads, confirms, and preserves request IDs", async () => {
     const write = await jwt("auth0|owner", "write:payments");
     const read = await jwt("auth0|owner", "read:payments");

@@ -129,6 +129,7 @@ const zpProjectionEnabled = parseBoolean(
 const auth0Issuer = process.env.AUTH0_ISSUER?.trim();
 const auth0Audience = process.env.AUTH0_AUDIENCE?.trim();
 const auth0RequiredScope = process.env.AUTH0_REQUIRED_SCOPE?.trim() || "read:account";
+const auth0WriteAccountScope = process.env.AUTH0_WRITE_ACCOUNT_SCOPE?.trim() || "write:account";
 const auth0ReadPaymentsScope = process.env.AUTH0_READ_PAYMENTS_SCOPE?.trim() || "read:payments";
 const auth0WritePaymentsScope = process.env.AUTH0_WRITE_PAYMENTS_SCOPE?.trim() || "write:payments";
 
@@ -181,6 +182,7 @@ export const environment = Object.freeze({
   auth0Issuer,
   auth0Audience,
   auth0RequiredScope,
+  auth0WriteAccountScope,
   auth0ReadPaymentsScope,
   auth0WritePaymentsScope,
 

@@ -1,4 +1,4 @@
-import { Router, type Request, type Response } from "express";
+import { Router, type NextFunction, type Request, type RequestHandler, type Response } from "express";
 
 import { externalPrincipalFrom } from "../auth/authMiddleware";
 import { EconomicIdentityInputError } from "../economicIdentity/economicIdentityValidation";
@@ -16,39 +16,45 @@ import { PaymentIntentApplicationError, type PaymentIntentService } from "../ser
 
 type RecipientRequest = Request & { recipientRequesterAccountId?: string };
 
-export function createRecipientsRouter(accounts: AccountProvisioningService, directory: RecipientDirectoryService, payments?: PaymentIntentService): Router {
+export function createRecipientsRouter(input: Readonly<{
+  accounts: AccountProvisioningService;
+  directory: RecipientDirectoryService;
+  payments?: PaymentIntentService;
+  directoryReadAuth: readonly RequestHandler[];
+  historyReadAuth: readonly RequestHandler[];
+}>): Router {
   const router = Router();
   router.use((_req, res, next) => {
     res.set("Cache-Control", "no-store, private"); res.set("Pragma", "no-cache"); next();
   });
-  router.use(async (req: RecipientRequest, res, next) => {
+  const resolveRequester = async (req: RecipientRequest, res: Response, next: NextFunction) => {
     try {
-      req.recipientRequesterAccountId = (await accounts.resolve(externalPrincipalFrom(res))).account.accountId;
+      req.recipientRequesterAccountId = (await input.accounts.resolve(externalPrincipalFrom(res))).account.accountId;
       next();
     } catch (error) {
       if (error instanceof AccountAccessDeniedError) return res.status(403).json({ ok: false, error: "Recipient access is unavailable.", requestId: res.locals.requestId });
       next(error);
     }
-  });
-  router.use(createRecipientDirectoryAccountRateLimiter());
+  };
+  const accountLimiter = createRecipientDirectoryAccountRateLimiter();
 
-  router.post("/search", async (req: RecipientRequest, res) => {
+  router.post("/search", ...input.directoryReadAuth, resolveRequester, accountLimiter, async (req: RecipientRequest, res) => {
     try {
-      const recipients = await directory.searchExactUsername(requireRequester(req), parseExactSearchRequest(req.body));
+      const recipients = await input.directory.searchExactUsername(requireRequester(req), parseExactSearchRequest(req.body));
       return res.json({ ok: true, recipients: recipients.map(serializePublicRecipient) });
     } catch (error) { return handle(error, res); }
   });
 
-  router.get("/recent", async (_req: RecipientRequest, res) => {
-    if (!payments) return res.status(503).json({ ok: false, error: "Recent recipients are unavailable.", requestId: res.locals.requestId });
+  router.get("/recent", ...input.historyReadAuth, resolveRequester, accountLimiter, async (_req: RecipientRequest, res) => {
+    if (!input.payments) return res.status(503).json({ ok: false, error: "Recent recipients are unavailable.", requestId: res.locals.requestId });
     try {
-      return res.json({ ok: true, recipients: await payments.recent(externalPrincipalFrom(res)) });
+      return res.json({ ok: true, recipients: await input.payments.recent(externalPrincipalFrom(res)) });
     } catch (error) { return handle(error, res); }
   });
 
-  router.get("/:accountId", async (req: RecipientRequest, res) => {
+  router.get("/:accountId", ...input.directoryReadAuth, resolveRequester, accountLimiter, async (req: RecipientRequest, res) => {
     try {
-      const recipient = await directory.resolvePublicRecipient(requireRequester(req), String(req.params.accountId));
+      const recipient = await input.directory.resolvePublicRecipient(requireRequester(req), String(req.params.accountId));
       return res.json({ ok: true, recipient: serializePublicRecipient(recipient) });
     } catch (error) { return handle(error, res); }
   });

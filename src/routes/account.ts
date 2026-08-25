@@ -1,24 +1,26 @@
-import { Router } from "express";
+import { Router, type RequestHandler } from "express";
 
 import { hasActivePaymentAccess } from "../allowlist/allowlistEntry";
 import { externalPrincipalFrom } from "../auth/authMiddleware";
 import { AccountAccessDeniedError, AccountProvisioningService } from "../identity/accountProvisioningService";
 import type { AllowlistRepository } from "../storage/storageContracts";
 
-export function createAccountRouter(
-  service: AccountProvisioningService,
-  allowlist: AllowlistRepository,
-  clock: () => string = () => new Date().toISOString(),
-): Router {
+export function createAccountRouter(input: Readonly<{
+  service: AccountProvisioningService;
+  allowlist: AllowlistRepository;
+  readAuth: readonly RequestHandler[];
+  readLimiter?: RequestHandler;
+  clock?: () => string;
+}>): Router {
   const router = Router();
-  router.get("/me", async (_req, res) => {
+  router.get("/me", ...input.readAuth, ...(input.readLimiter ? [input.readLimiter] : []), async (_req, res) => {
     res.set("Cache-Control", "no-store, private");
     res.set("Pragma", "no-cache");
     try {
-      const result = await service.resolve(externalPrincipalFrom(res));
+      const result = await input.service.resolve(externalPrincipalFrom(res));
       const paymentAccess = hasActivePaymentAccess(
-        await allowlist.findAllowlistEntry(result.account.actorSubject),
-        clock(),
+        await input.allowlist.findAllowlistEntry(result.account.actorSubject),
+        input.clock?.() ?? new Date().toISOString(),
       );
       return res.json({
         ok: true,

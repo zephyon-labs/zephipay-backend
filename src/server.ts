@@ -257,34 +257,38 @@ if (environment.authEnabled) {
     }
   },(delayMs,outcome)=>{recordCounter("worker.schedule",{outcome,phase:delayMs===2_000?"max_backoff":"backoff"});});
   executionLoop.start();
-  app.use(
-    "/api/account",
-    ...createAuthPipeline({
-      issuer: environment.auth0Issuer as string,
-      audience: environment.auth0Audience as string,
-      requiredScope: environment.auth0RequiredScope,
-      ...(harnessAuth?{publicKey:harnessAuth.publicKey}:{}),
-    }),
-    authenticatedReadRateLimiter,
-    createAccountRouter(accountService, paymentPersistence),
-    createEconomicIdentityRouter(economicIdentityService),
-    createZpRouter(zpProgressService),
-  );
-  app.use(
-    "/api/recipients",
-    ...createAuthPipeline({
-      issuer: environment.auth0Issuer as string,
-      audience: environment.auth0Audience as string,
-      requiredScope: environment.auth0RequiredScope,
-      ...(harnessAuth?{publicKey:harnessAuth.publicKey}:{}),
-    }),
-    createRecipientsRouter(accountService, recipientDirectoryService, paymentIntentService),
-  );
   const authConfiguration = {
     issuer: environment.auth0Issuer as string,
     audience: environment.auth0Audience as string,
     ...(harnessAuth?{publicKey:harnessAuth.publicKey}:{}),
   };
+  const accountReadAuth = createAuthPipeline({ ...authConfiguration, requiredScope: environment.auth0RequiredScope });
+  const accountWriteAuth = createAuthPipeline({ ...authConfiguration, requiredScope: environment.auth0WriteAccountScope });
+  const paymentReadAuth = createAuthPipeline({ ...authConfiguration, requiredScope: environment.auth0ReadPaymentsScope });
+  app.use("/api/account", createAccountRouter({
+    service: accountService,
+    allowlist: paymentPersistence,
+    readAuth: accountReadAuth,
+    readLimiter: authenticatedReadRateLimiter,
+  }));
+  app.use("/api/account", createEconomicIdentityRouter({
+    service: economicIdentityService,
+    readAuth: accountReadAuth,
+    writeAuth: accountWriteAuth,
+    limiter: authenticatedReadRateLimiter,
+  }));
+  app.use("/api/account", createZpRouter({
+    service: zpProgressService,
+    readAuth: accountReadAuth,
+    readLimiter: authenticatedReadRateLimiter,
+  }));
+  app.use("/api/recipients", createRecipientsRouter({
+    accounts: accountService,
+    directory: recipientDirectoryService,
+    payments: paymentIntentService,
+    directoryReadAuth: accountReadAuth,
+    historyReadAuth: paymentReadAuth,
+  }));
   app.use(
     "/api/payment-intents",
     createPaymentIntentsRouter({
@@ -301,7 +305,7 @@ if (environment.authEnabled) {
       }),
     }),
   );
-  const executionReadAuth = createAuthPipeline({ ...authConfiguration, requiredScope: environment.auth0ReadPaymentsScope });
+  const executionReadAuth = paymentReadAuth;
   app.use("/api/payment-intents", createPaymentExecutionsRouter({
     service: executionService,
     mutationLimiter: paymentMutationRateLimiter,
@@ -396,7 +400,7 @@ app.use(
     }
 
     if (error instanceof InsufficientScopeError) {
-      return res.status(403).set("Cache-Control", "no-store").json({
+      return res.status(403).set(error.headers).set("Cache-Control", "no-store").json({
         ok: false, error: "Account access is not permitted.", requestId,
       });
     }
