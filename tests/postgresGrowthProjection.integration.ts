@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { Server } from "node:http";
 import { after, beforeEach, test } from "node:test";
 
-import express from "express";
+import express, { type RequestHandler } from "express";
 import { Pool } from "pg";
 
 import { PaymentSettlementGrowthProjector } from "../src/growth/paymentSettlementGrowthProjector";
@@ -814,11 +814,15 @@ async function withZpServer<T>(
 ): Promise<T> {
   const app = express();
   app.use(requestContext);
-  app.use((_req, res, next) => {
+  const readAuth: RequestHandler = (_req, res, next) => {
     res.locals.externalPrincipal = currentPrincipal;
     next();
-  });
-  app.use("/api/account", createZpRouter(service));
+  };
+  app.use("/api/account", createZpRouter({
+    service,
+    projectionEnabled: true,
+    readAuth: [readAuth],
+  }));
   const server: Server = app.listen(0);
   await new Promise<void>((resolve) => server.once("listening", resolve));
   const address = server.address();

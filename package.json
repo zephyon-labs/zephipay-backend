@@ -9,6 +9,7 @@
     "lint": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
     "test:postgres": "tsx --test --test-concurrency=1 tests/postgresPaymentFoundation.integration.ts tests/postgresIdentityFoundation.integration.ts tests/postgresEconomicIdentity.integration.ts tests/postgresPaymentIdentity.integration.ts tests/postgresExecution.integration.ts tests/postgresDevnetExecutionState.integration.ts tests/postgresBrowserDevnetExecution.integration.ts tests/postgresPaymentRequests.integration.ts tests/postgresOpenBetaActivity.integration.ts tests/postgresActivity.integration.ts tests/r4Invariants.integration.ts tests/postgresE2eReliability.integration.ts",
+    "test:postgres:growth": "tsx --test --test-concurrency=1 tests/postgresGrowthEvents.integration.ts tests/postgresGrowthProjection.integration.ts tests/postgresZpState.integration.ts",
     "migrate": "tsx scripts/run-migrations.ts",
     "migrate:validate": "tsx scripts/validate-migrations.ts",
     "e2e:devnet": "NODE_ENV=test tsx scripts/run-devnet-e2e.ts",
