@@ -279,6 +279,7 @@ if (environment.authEnabled) {
   }));
   app.use("/api/account", createZpRouter({
     service: zpProgressService,
+    projectionEnabled: environment.zpProjectionEnabled,
     readAuth: accountReadAuth,
     readLimiter: authenticatedReadRateLimiter,
   }));

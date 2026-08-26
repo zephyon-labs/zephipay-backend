@@ -6,6 +6,7 @@ import { AccountAccessDeniedError } from "../identity/accountProvisioningService
 
 export function createZpRouter(input: Readonly<{
   service: ZpProgressService;
+  projectionEnabled: boolean;
   readAuth: readonly RequestHandler[];
   readLimiter?: RequestHandler;
 }>): Router {
@@ -18,6 +19,15 @@ export function createZpRouter(input: Readonly<{
   });
 
   router.get("/zp", ...input.readAuth, ...(input.readLimiter ? [input.readLimiter] : []), async (_req, res) => {
+    if (!input.projectionEnabled) {
+      return res.status(503).json({
+        ok: false,
+        code: "ZP_PROJECTION_UNAVAILABLE",
+        error: "ZP projection is unavailable.",
+        requestId: res.locals.requestId,
+      });
+    }
+
     try {
       const zp = await input.service.getCurrent(externalPrincipalFrom(res));
 

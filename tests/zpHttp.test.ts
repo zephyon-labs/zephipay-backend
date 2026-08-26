@@ -6,6 +6,7 @@ import { after, before, describe, it } from "node:test";
 import express, {
   type NextFunction,
   type Request,
+  type RequestHandler,
   type Response,
 } from "express";
 import {
@@ -31,17 +32,23 @@ const { privateKey, publicKey } = generateKeyPairSync("rsa", {
 });
 
 let baseUrl = "";
-let closeServer: (() => Promise<void>) | undefined;
+let disabledBaseUrl = "";
+const closeServers: Array<() => Promise<void>> = [];
 let identities: InMemoryIdentityPersistence;
 let states: FakeZpStateReader;
 let ownerAccountId = "";
 let otherAccountId = "";
+let disabledEmptyAccountId = "";
+let disabledZeroAccountId = "";
+let disabledPositiveAccountId = "";
 
 class FakeZpStateReader {
   readonly values = new Map<string, AccountZpState>();
+  readCount = 0;
   failureAccountId?: string;
 
   async find(accountId: string): Promise<AccountZpState | undefined> {
+    this.readCount += 1;
     if (accountId === this.failureAccountId) {
       throw new Error("private database host and query detail");
     }
@@ -57,6 +64,9 @@ before(async () => {
 
   ownerAccountId = (await accounts.resolve(principal("owner"))).account.accountId;
   otherAccountId = (await accounts.resolve(principal("other"))).account.accountId;
+  disabledEmptyAccountId = (await accounts.resolve(principal("disabled-empty"))).account.accountId;
+  disabledZeroAccountId = (await accounts.resolve(principal("disabled-zero"))).account.accountId;
+  disabledPositiveAccountId = (await accounts.resolve(principal("disabled-positive"))).account.accountId;
   const failureAccountId = (await accounts.resolve(principal("failure"))).account.accountId;
   const inactive = (await accounts.resolve(principal("inactive"))).account;
 
@@ -71,6 +81,12 @@ before(async () => {
     sentCount: 25n,
     receivedCount: 0n,
   }));
+  states.values.set(disabledZeroAccountId, durableState(disabledZeroAccountId));
+  states.values.set(disabledPositiveAccountId, durableState(disabledPositiveAccountId, {
+    totalPoints: 999n,
+    sentCount: 99n,
+    receivedCount: 9n,
+  }));
   states.failureAccountId = failureAccountId;
 
   const jwk = {
@@ -84,52 +100,19 @@ before(async () => {
     requiredScope: SCOPE,
     publicKey: jwk,
   });
-  const app = express();
-  app.use(requestContext, express.json({ strict: true }));
-  app.use(
-    "/api/account",
-    createZpRouter({ service: new ZpProgressService(accounts, states), readAuth: auth }),
-  );
-  app.use(
-    (
-      error: unknown,
-      _req: Request,
-      res: Response,
-      _next: NextFunction,
-    ) => {
-      if (error instanceof InsufficientScopeError) {
-        return res.status(403).set("Cache-Control", "no-store").json({
-          ok: false,
-          error: "Account access is not permitted.",
-          requestId: res.locals.requestId,
-        });
-      }
-      if (error instanceof UnauthorizedError) {
-        return res.status(401).set("Cache-Control", "no-store").json({
-          ok: false,
-          error: "Authentication is required.",
-          requestId: res.locals.requestId,
-        });
-      }
-      return res.status(500).json({
-        ok: false,
-        error: "Internal server error.",
-        requestId: res.locals.requestId,
-      });
-    },
-  );
-
-  const server = app.listen(0);
-  await new Promise<void>((resolve) => server.once("listening", resolve));
-  const address = server.address();
-  assert.ok(address && typeof address === "object");
-  baseUrl = `http://127.0.0.1:${address.port}`;
-  closeServer = () => new Promise<void>((resolve, reject) => {
-    server.close((error) => error ? reject(error) : resolve());
-  });
+  const service = new ZpProgressService(accounts, states);
+  const enabledServer = await startZpServer(service, auth, true);
+  const disabledServer = await startZpServer(service, auth, false);
+  baseUrl = enabledServer.baseUrl;
+  disabledBaseUrl = disabledServer.baseUrl;
+  closeServers.push(enabledServer.close, disabledServer.close);
 });
 
-after(async () => closeServer?.());
+after(async () => {
+  for (const close of closeServers) {
+    await close();
+  }
+});
 
 describe("current-account ZP HTTP boundary", () => {
   it("requires verified authentication and the account-read scope", async () => {
@@ -261,7 +244,96 @@ describe("current-account ZP HTTP boundary", () => {
     assert.doesNotMatch(text, /totalPoints|pendingMilestones/);
     assert.match(text, /Internal server error/);
   });
+
+  it("fails closed without reading absent, zero, or stale positive state when projection is disabled", async () => {
+    assert.equal(states.values.has(disabledEmptyAccountId), false);
+    const readsBefore = states.readCount;
+
+    for (const subject of ["disabled-empty", "disabled-zero", "disabled-positive"]) {
+      const response = await fetch(`${disabledBaseUrl}/api/account/zp`, {
+        headers: {
+          Authorization: `Bearer ${await jwt(subject)}`,
+          "X-Request-Id": `zp-disabled-${subject}`,
+        },
+      });
+
+      assert.equal(response.status, 503);
+      assert.match(response.headers.get("cache-control") ?? "", /no-store.*private/);
+      assert.equal(response.headers.get("pragma"), "no-cache");
+      assert.deepEqual(await response.json(), {
+        ok: false,
+        code: "ZP_PROJECTION_UNAVAILABLE",
+        error: "ZP projection is unavailable.",
+        requestId: `zp-disabled-${subject}`,
+      });
+      assert.equal(states.readCount, readsBefore);
+    }
+  });
+
+  it("preserves authentication and read:account authorization while disabled", async () => {
+    const readsBefore = states.readCount;
+    assert.equal((await fetch(`${disabledBaseUrl}/api/account/zp`)).status, 401);
+    const insufficient = await fetch(`${disabledBaseUrl}/api/account/zp`, {
+      headers: { Authorization: `Bearer ${await jwt("disabled-empty", "read:payments")}` },
+    });
+
+    assert.equal(insufficient.status, 403);
+    assert.equal(states.readCount, readsBefore);
+  });
 });
+
+async function startZpServer(
+  service: ZpProgressService,
+  auth: readonly RequestHandler[],
+  projectionEnabled: boolean,
+): Promise<Readonly<{ baseUrl: string; close: () => Promise<void> }>> {
+  const app = express();
+  app.use(requestContext, express.json({ strict: true }));
+  app.use(
+    "/api/account",
+    createZpRouter({ service, projectionEnabled, readAuth: auth }),
+  );
+  app.use(
+    (
+      error: unknown,
+      _req: Request,
+      res: Response,
+      _next: NextFunction,
+    ) => {
+      if (error instanceof InsufficientScopeError) {
+        return res.status(403).set("Cache-Control", "no-store").json({
+          ok: false,
+          error: "Account access is not permitted.",
+          requestId: res.locals.requestId,
+        });
+      }
+      if (error instanceof UnauthorizedError) {
+        return res.status(401).set("Cache-Control", "no-store").json({
+          ok: false,
+          error: "Authentication is required.",
+          requestId: res.locals.requestId,
+        });
+      }
+      return res.status(500).json({
+        ok: false,
+        error: "Internal server error.",
+        requestId: res.locals.requestId,
+      });
+    },
+  );
+
+  const server = app.listen(0);
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+
+  return Object.freeze({
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    }),
+  });
+}
 
 function principal(subject: string) {
   return Object.freeze({
