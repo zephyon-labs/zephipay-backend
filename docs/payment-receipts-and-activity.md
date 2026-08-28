@@ -5,6 +5,14 @@ rail-independent Runtime receipt records and are intentionally separate from the
 legacy Solana-shaped `payment_receipts` table and the process-local x402 receipt
 registry.
 
+The x402 preview system is experimental and noncanonical. `X402_ENABLED`
+defaults to `false`; while it is unset or false, its middleware, facilitator
+client, process-local receipt registry, agent resource, verification, listing,
+entitlement, catalog, and protocol-description routes are not mounted.
+`SVM_ADDRESS` is required only when `X402_ENABLED=true`. Enabling x402 does not
+make its preview objects Zephyon settlement evidence, canonical receipts, or
+economic authority.
+
 The Mock-only worker creates a Runtime v0.2 receipt only from a conclusive
 `settled` observation. PostgreSQL commits the `SETTLED` execution update, its
 attempt, `execution_settled` event, canonical receipt, and `receipt_created`

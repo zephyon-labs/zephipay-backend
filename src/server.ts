@@ -18,15 +18,8 @@ import {
   authenticatedReadRateLimiter,
   generalRateLimiter,
   paymentMutationRateLimiter,
-  sensitiveRateLimiter,
 } from "./middleware/rateLimiter";
 import { requestContext } from "./middleware/requestContext";
-import { agentRouter } from "./routes/agent";
-import { catalogRouter } from "./routes/catalog";
-import { entitlementsRouter } from "./routes/entitlements";
-import { protocolRouter } from "./routes/protocol";
-import { receiptsRouter } from "./routes/receipts";
-import { verifyRouter } from "./routes/verify";
 import { createAccountRouter } from "./routes/account";
 import { createEconomicIdentityRouter } from "./routes/economicIdentity";
 import { createRecipientsRouter } from "./routes/recipients";
@@ -42,7 +35,7 @@ import { createActivityRouter, createPaymentExecutionsRouter } from "./routes/pa
 import { PostgresIdentityPersistence } from "./storage/postgres/postgresIdentityPersistence";
 import { PostgresEconomicIdentityPersistence } from "./storage/postgres/postgresEconomicIdentityPersistence";
 import { createPaymentPostgresPool } from "./storage/postgres/postgresPool";
-import { x402Middleware } from "./x402/x402Server";
+import { mountX402Surface } from "./x402/x402Surface";
 import { PostgresPaymentRequestRepository } from "./storage/postgres/postgresPaymentRequestRepository";
 import { PaymentRequestService } from "./paymentRequests/paymentRequestService";
 import { createPaymentRequestsRouter } from "./routes/paymentRequests";
@@ -325,25 +318,10 @@ if (environment.authEnabled) {
 }
 
 app.use(generalRateLimiter);
-app.use("/api/protocol", protocolRouter);
-app.use(
-  "/api/verify",
-  sensitiveRateLimiter,
-  verifyRouter,
-);
-app.use(
-  "/api/receipts",
-  sensitiveRateLimiter,
-  receiptsRouter,
-);
-app.use(
-  "/api/entitlements",
-  sensitiveRateLimiter,
-  entitlementsRouter,
-);
-app.use("/api/catalog", catalogRouter);
-app.use(x402Middleware);
-app.use("/api/agent", agentRouter);
+mountX402Surface(app, {
+  enabled: environment.x402Enabled,
+  svmAddress: environment.x402SvmAddress,
+});
 
 app.get("/", (_req, res) => {
   res.json({

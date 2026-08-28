@@ -1,20 +1,24 @@
 import { Router } from "express";
-import { getReceipt } from "../receipts/receiptRegistry";
+import type { ReceiptRegistry } from "../receipts/receiptRegistry";
 
-export const verifyRouter = Router();
+export function createVerifyRouter(receiptRegistry: ReceiptRegistry): Router {
+  const verifyRouter = Router();
 
-verifyRouter.get("/:receiptId", (req, res) => {
-  const receipt = getReceipt(req.params.receiptId);
+  verifyRouter.get("/:receiptId", (req, res) => {
+    const receipt = receiptRegistry.getReceipt(req.params.receiptId);
 
-  if (!receipt) {
-    return res.status(404).json({
-      valid: false,
-      error: "Receipt not found",
+    if (!receipt) {
+      return res.status(404).json({
+        valid: false,
+        error: "Receipt not found",
+      });
+    }
+
+    return res.json({
+      valid: true,
+      receipt,
     });
-  }
-
-  return res.json({
-    valid: true,
-    receipt,
   });
-});
+
+  return verifyRouter;
+}

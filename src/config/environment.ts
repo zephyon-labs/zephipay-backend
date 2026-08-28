@@ -126,6 +126,11 @@ const zpProjectionEnabled = parseBoolean(
   process.env.ZP_PROJECTION_ENABLED,
   false,
 );
+const x402Enabled = parseBoolean(
+  process.env.X402_ENABLED,
+  false,
+);
+const x402SvmAddress = process.env.SVM_ADDRESS?.trim() || undefined;
 const auth0Issuer = process.env.AUTH0_ISSUER?.trim();
 const auth0Audience = process.env.AUTH0_AUDIENCE?.trim();
 const auth0RequiredScope = process.env.AUTH0_REQUIRED_SCOPE?.trim() || "read:account";
@@ -143,6 +148,9 @@ if ((growthProjectionEnabled || zpProjectionEnabled) && !postgresEnabled) {
   throw new Error(
     "Growth/ZP projection requires POSTGRES_ENABLED=true.",
   );
+}
+if (x402Enabled && !x402SvmAddress) {
+  throw new Error("SVM_ADDRESS is required when X402_ENABLED=true.");
 }
 if (auth0Issuer) {
   const issuerUrl = new URL(auth0Issuer);
@@ -174,6 +182,8 @@ export const environment = Object.freeze({
   syntheticBetaIdentitiesEnabled: syntheticBetaIdentitiesRequested,
   growthProjectionEnabled,
   zpProjectionEnabled,
+  x402Enabled,
+  x402SvmAddress,
 
   postgresEnabled,
   databaseUrl,

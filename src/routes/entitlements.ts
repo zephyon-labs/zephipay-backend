@@ -1,7 +1,5 @@
 import { Router } from "express";
-import { listReceipts } from "../receipts/receiptRegistry";
-
-export const entitlementsRouter = Router();
+import type { ReceiptRegistry } from "../receipts/receiptRegistry";
 
 function isExpired(expiresAt: string | null | undefined) {
   if (!expiresAt) return false;
@@ -12,100 +10,107 @@ function hasUsesRemaining(usesRemaining: number | null | undefined) {
   if (usesRemaining === null || usesRemaining === undefined) return true;
   return usesRemaining > 0;
 }
-entitlementsRouter.get("/:wallet/check", (req, res) => {
-  const wallet = req.params.wallet;
-  const resource = req.query.resource as string | undefined;
+export function createEntitlementsRouter(receiptRegistry: ReceiptRegistry): Router {
+  const entitlementsRouter = Router();
 
-  if (!resource) {
-    return res.status(400).json({
-      ok: false,
-      error: "Missing required query parameter: resource",
-    });
-  }
+  entitlementsRouter.get("/:wallet/check", (req, res) => {
+    const wallet = req.params.wallet;
+    const resource = req.query.resource as string | undefined;
 
-  const receipts = listReceipts();
+    if (!resource) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing required query parameter: resource",
+      });
+    }
 
-  const matchingEntitlement = receipts
-    .filter((receipt: any) => {
-      const owner = receipt?.ownership?.owner;
-      const payTo = receipt?.payment?.payTo;
-      const payer = receipt?.settlementProof?.payer;
+    const receipts = receiptRegistry.listReceipts();
 
-      return owner === wallet || payTo === wallet || payer === wallet;
-    })
-    .map((receipt: any) => {
-      const entitlement = receipt?.entitlements;
+    const matchingEntitlement = receipts
+      .filter((receipt: any) => {
+        const owner = receipt?.ownership?.owner;
+        const payTo = receipt?.payment?.payTo;
+        const payer = receipt?.settlementProof?.payer;
 
-      const active =
-        Boolean(entitlement?.accessGranted) &&
-        !isExpired(entitlement?.expiresAt) &&
-        hasUsesRemaining(entitlement?.usesRemaining);
+        return owner === wallet || payTo === wallet || payer === wallet;
+      })
+      .map((receipt: any) => {
+        const entitlement = receipt?.entitlements;
 
-      return {
-        receipt,
-        entitlement,
-        active,
-      };
-    })
-    .find(({ entitlement, active }) => {
-      return active && entitlement?.resource === resource;
-    });
+        const active =
+          Boolean(entitlement?.accessGranted) &&
+          !isExpired(entitlement?.expiresAt) &&
+          hasUsesRemaining(entitlement?.usesRemaining);
 
-  if (!matchingEntitlement) {
+        return {
+          receipt,
+          entitlement,
+          active,
+        };
+      })
+      .find(({ entitlement, active }) => {
+        return active && entitlement?.resource === resource;
+      });
+
+    if (!matchingEntitlement) {
+      return res.json({
+        ok: true,
+        wallet,
+        resource,
+        authorized: false,
+        reason: "No active entitlement found for this wallet and resource.",
+      });
+    }
+
     return res.json({
       ok: true,
       wallet,
       resource,
-      authorized: false,
-      reason: "No active entitlement found for this wallet and resource.",
+      authorized: true,
+      receiptId: matchingEntitlement.receipt.localReceiptId,
+      entitlement: matchingEntitlement.entitlement,
     });
-  }
-
-  return res.json({
-    ok: true,
-    wallet,
-    resource,
-    authorized: true,
-    receiptId: matchingEntitlement.receipt.localReceiptId,
-    entitlement: matchingEntitlement.entitlement,
   });
-});
-entitlementsRouter.get("/:wallet", (req, res) => {
-  const wallet = req.params.wallet;
 
-  const receipts = listReceipts();
+  entitlementsRouter.get("/:wallet", (req, res) => {
+    const wallet = req.params.wallet;
 
-  const entitlements = receipts
-    .filter((receipt: any) => {
-      const owner = receipt?.ownership?.owner;
-      const payTo = receipt?.payment?.payTo;
-      const payer = receipt?.settlementProof?.payer;
+    const receipts = receiptRegistry.listReceipts();
 
-      return owner === wallet || payTo === wallet || payer === wallet;
-    })
-    .map((receipt: any) => {
-      const entitlement = receipt?.entitlements || null;
+    const entitlements = receipts
+      .filter((receipt: any) => {
+        const owner = receipt?.ownership?.owner;
+        const payTo = receipt?.payment?.payTo;
+        const payer = receipt?.settlementProof?.payer;
 
-      const active =
-        Boolean(entitlement?.accessGranted) &&
-        !isExpired(entitlement?.expiresAt) &&
-        hasUsesRemaining(entitlement?.usesRemaining);
+        return owner === wallet || payTo === wallet || payer === wallet;
+      })
+      .map((receipt: any) => {
+        const entitlement = receipt?.entitlements || null;
 
-      return {
-        receiptId: receipt.localReceiptId,
-        owner: receipt?.ownership?.owner,
-        paymentProtocol: receipt?.paymentProtocol,
-        resource: entitlement?.resource || receipt?.resource?.path,
-        entitlement,
-        active,
-        createdAt: receipt.createdAt,
-      };
+        const active =
+          Boolean(entitlement?.accessGranted) &&
+          !isExpired(entitlement?.expiresAt) &&
+          hasUsesRemaining(entitlement?.usesRemaining);
+
+        return {
+          receiptId: receipt.localReceiptId,
+          owner: receipt?.ownership?.owner,
+          paymentProtocol: receipt?.paymentProtocol,
+          resource: entitlement?.resource || receipt?.resource?.path,
+          entitlement,
+          active,
+          createdAt: receipt.createdAt,
+        };
+      });
+
+    res.json({
+      ok: true,
+      wallet,
+      count: entitlements.length,
+      entitlements,
     });
-
-  res.json({
-    ok: true,
-    wallet,
-    count: entitlements.length,
-    entitlements,
   });
-});
+
+  return entitlementsRouter;
+}

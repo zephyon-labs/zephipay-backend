@@ -1,23 +1,33 @@
 type StoredReceipt = Record<string, unknown>;
 
-const receiptRegistry = new Map<string, StoredReceipt>();
+export type ReceiptRegistry = Readonly<{
+  registerReceipt(receipt: StoredReceipt): StoredReceipt;
+  getReceipt(receiptId: string): StoredReceipt | null;
+  listReceipts(): StoredReceipt[];
+}>;
 
-export function registerReceipt(receipt: StoredReceipt) {
-  const receiptId = receipt.localReceiptId;
+export function createReceiptRegistry(): ReceiptRegistry {
+  const receiptRegistry = new Map<string, StoredReceipt>();
 
-  if (typeof receiptId !== "string" || receiptId.length === 0) {
-    throw new Error("Cannot register receipt without localReceiptId");
-  }
+  return Object.freeze({
+    registerReceipt(receipt: StoredReceipt) {
+      const receiptId = receipt.localReceiptId;
 
-  receiptRegistry.set(receiptId, receipt);
+      if (typeof receiptId !== "string" || receiptId.length === 0) {
+        throw new Error("Cannot register receipt without localReceiptId");
+      }
 
-  return receipt;
-}
+      receiptRegistry.set(receiptId, receipt);
 
-export function getReceipt(receiptId: string) {
-  return receiptRegistry.get(receiptId) || null;
-}
+      return receipt;
+    },
 
-export function listReceipts() {
-  return Array.from(receiptRegistry.values());
+    getReceipt(receiptId: string) {
+      return receiptRegistry.get(receiptId) || null;
+    },
+
+    listReceipts() {
+      return Array.from(receiptRegistry.values());
+    },
+  });
 }
