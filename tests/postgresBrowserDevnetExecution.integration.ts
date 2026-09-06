@@ -1,3 +1,4 @@
+import { DevnetRecoveryWorker } from "../src/devnet/devnetRecoveryWorker";
 import assert from"node:assert/strict";import{randomUUID}from"node:crypto";import{after,beforeEach,test}from"node:test";import{Pool}from"pg";import{PostgresBrowserDevnetExecutionStore}from"../src/storage/postgres/postgresBrowserDevnetExecutionStore";import type{PersistedDevnetPreparation}from"../src/devnet/devnetExecutionState";
 import{actorSubjectForAccount}from"../src/identity/identityTypes";import{PostgresIdentityPersistence}from"../src/storage/postgres/postgresIdentityPersistence";
 import{PostgresDevnetExecutionStateRepository}from"../src/storage/postgres/postgresDevnetExecutionStateRepository";
@@ -28,3 +29,38 @@ async function leaseFor(executionId:string,worker=`pg-browser-${randomUUID()}`){
 async function reconcile(service:DevnetReconciliationService,executionId:string){const lease=await leaseFor(executionId);try{return await service.reconcile(executionId,ACTOR,lease.control);}finally{await lease.release();}}
 async function observe(executionId:string,input:Omit<Parameters<PostgresDevnetExecutionStateRepository["recordReconciliationObservation"]>[0],"recoveryFence">){const lease=await leaseFor(executionId);try{return await states.recordReconciliationObservation({...input,recoveryFence:lease.control.fence});}finally{await lease.release();}}
 async function settled(executionId:string){const input=prepared(executionId,"PREPARED_NOT_CONTACTED"),value=await states.persistPreparation({...input,state:undefined,committedAt:undefined} as any),commitmentId=randomUUID();await states.commitSubmission({executionId,actorSubject:ACTOR,preparationId:value.preparationId,commitmentId,committedAt:NOW});return(await observe(executionId,{observationId:randomUUID(),executionId,actorSubject:ACTOR,preparationId:value.preparationId,providerId:"reconcile",signature:value.artifact.signature,outcome:"SETTLED",observedAt:NOW,slot:"484124271",confirmationStatus:"finalized"})).preparation;}
+
+
+for(const preparationFails of [false,true])test(`fair recovery settles a later payment exactly once while oldest stays UNKNOWN (preparation failure: ${preparationFails})`,async()=>{
+  const oldestPayment=paymentId;
+  const createCommitted=async(id:string,order:number)=>{
+    const created=await store.createOrGet({executionId:randomUUID(),paymentIntentId:id,actorSubject:ACTOR,providerIdempotencyKey:String(order).repeat(64),policyHash:POLICY,now:new Date(Date.parse(NOW)+order*1_000).toISOString()});
+    const input=prepared(created.aggregate.executionId,"PREPARED_NOT_CONTACTED");
+    const value=await states.persistPreparation({...input,paymentIntentId:id,state:undefined,committedAt:undefined,artifact:{...input.artifact,signature:`public-signature-${order}`,signedTransactionDigest:String(order).repeat(64)}} as any);
+    await states.commitSubmission({executionId:value.executionId,actorSubject:ACTOR,preparationId:value.preparationId,commitmentId:randomUUID(),committedAt:NOW});
+    return{aggregate:created.aggregate,value};
+  };
+  const oldest=await createCommitted(oldestPayment,1),laterPayment=randomUUID();
+  await pool.query(`INSERT INTO payments(id,actor_subject,idempotency_key,request_hash,status,network,rail,asset,mint_address,recipient_address,amount_raw,purpose,user_confirmed_at,execution_started_at,created_at,updated_at) SELECT $2,actor_subject,$3,request_hash,status,network,rail,asset,mint_address,recipient_address,amount_raw,purpose,user_confirmed_at,execution_started_at,created_at,updated_at FROM payments WHERE id=$1`,[oldestPayment,laterPayment,`later-${randomUUID()}`]);
+  const later=await createCommitted(laterPayment,2),seen:string[]=[];
+  const provider={identity:{providerId:"reconcile",network:"devnet" as const,role:"reconciliation" as const},async observeSignature(signature:string){
+    seen.push(signature);const base={signature,historySearched:true as const,providerId:"reconcile",contextSlot:"200",observedAt:NOW};
+    return signature===oldest.value.artifact.signature?{...base,status:"missing" as const}:{...base,status:"settled" as const,settledAt:NOW,slot:"199",confirmationStatus:"finalized"};
+  }};
+  const service=new DevnetReconciliationService(states,provider,"reconcile",()=>NOW),restartedRecovery=new PostgresDevnetRecoveryRepository(pool,states);
+  const worker=new DevnetRecoveryWorker(restartedRecovery,{
+    async currentBlockHeight(){throw new Error("preparation block provider unavailable");},async prepare(){throw new Error("must not prepare");},
+    async reconcile(candidate,lease){const result=await service.reconcile(candidate.executionId,ACTOR,lease),aggregate=await store.find(candidate.paymentIntentId,ACTOR);assert(aggregate);await store.applyLifecycle({aggregate,preparation:result.preparation,signature:result.observation.signature,observedAt:result.observation.observedAt,slot:result.observation.slot,confirmationStatus:result.observation.confirmationStatus});return true;},
+  },"fair-worker",{preparationEnabled:preparationFails,reconciliationEnabled:true});
+  const tick=()=>preparationFails?assert.rejects(()=>worker.iterate(),/preparation block provider unavailable/):worker.iterate();
+  await tick();assert.equal((await states.findPreparation(oldest.value.executionId,ACTOR))?.state,"UNKNOWN_RECONCILIATION_REQUIRED");
+  await tick();assert.deepEqual(seen,[oldest.value.artifact.signature,later.value.artifact.signature]);
+  const terminal=await states.findPreparation(later.value.executionId,ACTOR);assert.equal(terminal?.state,"SETTLED");assert(terminal);
+  assert.equal((await pool.query("SELECT status FROM payment_executions WHERE execution_id=$1",[later.value.executionId])).rows[0].status,"SETTLED");
+  assert.equal((await pool.query("SELECT status FROM payments WHERE id=$1",[laterPayment])).rows[0].status,"COMPLETED");
+  await store.applyLifecycle({aggregate:later.aggregate,preparation:terminal,signature:terminal.artifact.signature,observedAt:NOW,slot:"199",confirmationStatus:"finalized"});
+  const count=await pool.query("SELECT count(*)::int AS count FROM payment_execution_receipts WHERE execution_id=$1",[later.value.executionId]);assert.equal(count.rows[0].count,1);
+  assert.equal((await pool.query("SELECT count(*)::int AS count FROM payment_execution_receipts WHERE execution_id=$1",[oldest.value.executionId])).rows[0].count,0);
+  const future=new Date(Date.now()+2_000).toISOString(),candidate=await new PostgresDevnetRecoveryRepository(pool,states).claimReconciliation("future-worker",future,new Date(Date.parse(future)+30_000).toISOString());
+  assert.equal(candidate?.executionId,oldest.value.executionId);assert.equal(candidate?.preparation?.state,"UNKNOWN_RECONCILIATION_REQUIRED");
+});

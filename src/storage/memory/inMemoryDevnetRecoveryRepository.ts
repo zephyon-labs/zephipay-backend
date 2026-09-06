@@ -1,8 +1,10 @@
+import { DEVNET_RECONCILIATION_REVISIT_MS } from "../../devnet/devnetRecoveryRepository";
 import type { DevnetRecoveryCandidate, DevnetRecoveryRecord, DevnetRecoveryRepository, DevnetRecoveryTaskKind } from "../../devnet/devnetRecoveryRepository";
 
 export class InMemoryDevnetRecoveryRepository implements DevnetRecoveryRepository{
   private readonly records:DevnetRecoveryRecord[]=[];
   private readonly leases=new Map<string,{owner:string;claimedAt:string;expiresAt:string}>();
+  private readonly nextReconciliationAt=new Map<string,string>();
   private queue:Promise<void>=Promise.resolve();
   add(record:DevnetRecoveryRecord){this.records.push(Object.freeze({...record}));}
   claimPreparation(workerId:string,now:string,leaseExpiresAt:string,currentBlockHeight:string){if(!/^(0|[1-9]\d*)$/.test(currentBlockHeight))return Promise.reject(new Error("Current Devnet block height is invalid."));return this.claim("PREPARATION",workerId,now,leaseExpiresAt,currentBlockHeight);}
@@ -11,7 +13,22 @@ export class InMemoryDevnetRecoveryRepository implements DevnetRecoveryRepositor
   renew(executionId:string,kind:DevnetRecoveryTaskKind,workerId:string,claimedAt:string,now:string,leaseExpiresAt:string){return this.exclusive(()=>{const lease=this.leases.get(this.key(executionId,kind));if(!lease||lease.owner!==workerId||lease.claimedAt!==claimedAt||lease.expiresAt<=now||leaseExpiresAt<=now)return false;lease.expiresAt=leaseExpiresAt;return true;});}
   async inspectUnresolvedBacklog(now:string){const committed=this.records.filter(value=>value.executionMode==="devnet_validation"&&value.selectedRail==="solana"&&value.settlementNetwork==="solana-devnet"&&!['SETTLED','FAILED','CANCELLED'].includes(value.executionStatus)&&value.preparation?.committedAt).map(value=>value.preparation!.committedAt!).sort();const oldestCommittedAt=committed[0];return Object.freeze({unresolvedCount:committed.length,...(oldestCommittedAt?{oldestCommittedAt,oldestUnresolvedAgeMs:Math.max(0,Date.parse(now)-Date.parse(oldestCommittedAt))}:{})});}
   release(executionId:string,kind:DevnetRecoveryTaskKind,workerId:string,claimedAt:string){return this.exclusive(()=>{const key=this.key(executionId,kind),lease=this.leases.get(key);if(lease?.owner===workerId&&lease.claimedAt===claimedAt)this.leases.delete(key);});}
-  private claim(kind:DevnetRecoveryTaskKind,workerId:string,now:string,leaseExpiresAt:string,currentBlockHeight?:string,executionId?:string){return this.exclusive(()=>{const record=this.records.filter(value=>(executionId===undefined||value.executionId===executionId)&&this.eligible(value,kind,currentBlockHeight)).sort((a,b)=>a.executionId.localeCompare(b.executionId)).find(value=>{const lease=this.leases.get(this.key(value.executionId,kind));return !lease||lease.expiresAt<=now;});if(!record)return undefined;this.leases.set(this.key(record.executionId,kind),{owner:workerId,claimedAt:now,expiresAt:leaseExpiresAt});return clone(record,{taskKind:kind,leaseOwner:workerId,claimedAt:now,leaseExpiresAt});});}
+  private claim(kind:DevnetRecoveryTaskKind,workerId:string,now:string,leaseExpiresAt:string,currentBlockHeight?:string,executionId?:string){
+    return this.exclusive(()=>{
+      const record=this.records.filter(value=>{
+        if(executionId!==undefined&&value.executionId!==executionId||!this.eligible(value,kind,currentBlockHeight))return false;
+        const lease=this.leases.get(this.key(value.executionId,kind));
+        if(lease&&lease.expiresAt>now)return false;
+        // Expired claims remain reclaimable; exact recovery bypasses scheduling,
+        // but neither route bypasses the lease or changes transaction truth.
+        return kind!=="RECONCILIATION"||executionId!==undefined||lease!==undefined||(this.nextReconciliationAt.get(value.executionId)??"")<=now;
+      }).sort((a,b)=>(kind==="RECONCILIATION"?(this.nextReconciliationAt.get(a.executionId)??"").localeCompare(this.nextReconciliationAt.get(b.executionId)??""):0)||a.executionId.localeCompare(b.executionId))[0];
+      if(!record)return undefined;
+      if(kind==="RECONCILIATION")this.nextReconciliationAt.set(record.executionId,new Date(Date.parse(now)+DEVNET_RECONCILIATION_REVISIT_MS).toISOString());
+      this.leases.set(this.key(record.executionId,kind),{owner:workerId,claimedAt:now,expiresAt:leaseExpiresAt});
+      return clone(record,{taskKind:kind,leaseOwner:workerId,claimedAt:now,leaseExpiresAt});
+    });
+  }
   private eligible(value:DevnetRecoveryRecord,kind:DevnetRecoveryTaskKind,currentBlockHeight?:string){if(value.executionMode!=="devnet_validation"||value.selectedRail!=="solana"||value.settlementNetwork!=="solana-devnet"||["SETTLED","FAILED","CANCELLED"].includes(value.executionStatus))return false;const state=value.preparation?.state;return kind==="PREPARATION"?(state===undefined||(state==="PREPARED_NOT_CONTACTED"&&BigInt(currentBlockHeight!)>BigInt(value.preparation!.artifact.lastValidBlockHeight))):state!==undefined&&["SUBMISSION_COMMITTED_RECONCILE_ONLY","ACCEPTED_PENDING","UNKNOWN_RECONCILIATION_REQUIRED","SETTLED","FAILED"].includes(state);}
   private key(executionId:string,kind:DevnetRecoveryTaskKind){return`${executionId}\0${kind}`;}
   private exclusive<T>(fn:()=>T|Promise<T>):Promise<T>{const run=this.queue.then(fn,fn);this.queue=run.then(()=>undefined,()=>undefined);return run;}

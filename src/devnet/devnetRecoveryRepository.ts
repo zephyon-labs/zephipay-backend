@@ -1,5 +1,8 @@
 import type { DevnetReconciliationPersistenceFence, PersistedDevnetPreparation } from "./devnetExecutionState";
 
+// Operational scheduling only; never a deadline for transaction truth.
+export const DEVNET_RECONCILIATION_REVISIT_MS = 1_000;
+
 export type DevnetRecoveryTaskKind="PREPARATION"|"RECONCILIATION";
 export type DevnetRecoveryLease=Readonly<{taskKind:DevnetRecoveryTaskKind;leaseOwner:string;claimedAt:string;leaseExpiresAt:string}>;
 export type DevnetRecoveryLeaseControl=Readonly<{fence:DevnetReconciliationPersistenceFence;renew():Promise<boolean>}>;
