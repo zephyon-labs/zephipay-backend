@@ -1,3 +1,11 @@
+import { DevnetOrchestrationService } from "../src/devnet/devnetOrchestrationService";
+import { Aes256GcmPreparedTransactionCipher } from "../src/devnet/preparedTransactionCipher";
+import { Keypair } from "@solana/web3.js";
+import { CIRCLE_SOLANA_DEVNET_USDC_MINT } from "../src/devnet/canonicalDevnetAsset";
+import { deriveDevnetAssociatedSourceTokenAccount, devnetPreparationPolicy, hashDevnetPolicy } from "../src/devnet/devnetPreparationPolicy";
+const SIGNER=Keypair.fromSeed(Buffer.alloc(32,3)).publicKey.toBase58();
+const SOURCE=deriveDevnetAssociatedSourceTokenAccount(CIRCLE_SOLANA_DEVNET_USDC_MINT,SIGNER);
+const HISTORICAL_POLICY={mint:CIRCLE_SOLANA_DEVNET_USDC_MINT,decimals:6,sourceTokenAccount:SOURCE,signerKeyId:"server",signerKeyVersion:"1",signerPublicKey:SIGNER,submissionProviderId:"submit",reconciliationProviderId:"reconcile"};
 import { DevnetRecoveryWorker } from "../src/devnet/devnetRecoveryWorker";
 import assert from"node:assert/strict";import{randomUUID}from"node:crypto";import{after,beforeEach,test}from"node:test";import{Pool}from"pg";import{PostgresBrowserDevnetExecutionStore}from"../src/storage/postgres/postgresBrowserDevnetExecutionStore";import type{PersistedDevnetPreparation}from"../src/devnet/devnetExecutionState";
 import{actorSubjectForAccount}from"../src/identity/identityTypes";import{PostgresIdentityPersistence}from"../src/storage/postgres/postgresIdentityPersistence";
@@ -5,7 +13,7 @@ import{PostgresDevnetExecutionStateRepository}from"../src/storage/postgres/postg
 import{PostgresDevnetRecoveryRepository}from"../src/storage/postgres/postgresDevnetRecoveryRepository";
 import{DevnetReconciliationService}from"../src/devnet/devnetReconciliationService";
 import{IndependentDevnetReconciliationRpc}from"../src/adapters/solana/liveDevnetProviders";import{SingleAttemptDevnetJsonRpc,type JsonRpcFetch}from"../src/adapters/solana/devnetJsonRpc";
-const url=process.env.TEST_DATABASE_URL?.trim();if(!url)throw new Error("TEST_DATABASE_URL is required.");const pool=new Pool({connectionString:url,max:4}),store=new PostgresBrowserDevnetExecutionStore(pool),states=new PostgresDevnetExecutionStateRepository(pool),recovery=new PostgresDevnetRecoveryRepository(pool,states),identities=new PostgresIdentityPersistence(pool),NOW="2026-08-15T12:00:00.000Z",ACCOUNT="b6d07d21-3892-46c6-af41-f0e60d844bbd",ACTOR=actorSubjectForAccount(ACCOUNT),POLICY="a".repeat(64);let paymentId:string;
+const url=process.env.TEST_DATABASE_URL?.trim();if(!url)throw new Error("TEST_DATABASE_URL is required.");const pool=new Pool({connectionString:url,max:4}),store=new PostgresBrowserDevnetExecutionStore(pool),states=new PostgresDevnetExecutionStateRepository(pool),recovery=new PostgresDevnetRecoveryRepository(pool,states),identities=new PostgresIdentityPersistence(pool),NOW="2026-08-15T12:00:00.000Z",ACCOUNT="b6d07d21-3892-46c6-af41-f0e60d844bbd",ACTOR=actorSubjectForAccount(ACCOUNT),POLICY=hashDevnetPolicy(devnetPreparationPolicy(HISTORICAL_POLICY));let paymentId:string;
 beforeEach(async()=>{await pool.query("TRUNCATE devnet_submission_observations,devnet_reconciliation_observations,devnet_submission_commitments,devnet_execution_preparations,payment_execution_receipts,payment_execution_events,payment_execution_attempts,payment_executions,payment_events,payment_receipts,payments,beta_allowlist,account_security_events,accounts RESTART IDENTITY CASCADE");paymentId=randomUUID();await identities.createAccount({accountId:ACCOUNT,createdAt:NOW});await pool.query("INSERT INTO beta_allowlist(actor_subject,enabled,added_at)VALUES($1,true,$2)",[ACTOR,NOW]);await pool.query(`INSERT INTO payments(id,actor_subject,idempotency_key,request_hash,status,network,rail,asset,mint_address,recipient_address,amount_raw,purpose,user_confirmed_at,execution_started_at,created_at,updated_at)VALUES($1,$2,$3,decode($4,'hex'),'PROCESSING','solana-devnet','solana','USDC','4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU','DWLaEPUUyLgPqhoJDGni8PRaL58FdfSmXdL6Qtrp1hJ8',1000000,'browser test',$5,$5,$5,$5)`,[paymentId,ACTOR,`browser-${randomUUID()}`,"b".repeat(64),NOW]);});after(async()=>pool.end());
 test("concurrent browser creation yields one Devnet execution",async()=>{const input={executionId:randomUUID(),paymentIntentId:paymentId,actorSubject:ACTOR,providerIdempotencyKey:"c".repeat(64),policyHash:POLICY,now:NOW},[a,b]=await Promise.all([store.createOrGet(input),store.createOrGet({...input,executionId:randomUUID()})]);assert.equal(a.aggregate.executionId,b.aggregate.executionId);assert.equal([a,b].filter(value=>value.created).length,1);const row=(await pool.query("SELECT execution_mode,selected_rail,settlement_network,count(*)over() AS count FROM payment_executions WHERE payment_intent_id=$1",[paymentId])).rows[0];assert.deepEqual([row.execution_mode,row.selected_rail,row.settlement_network,Number(row.count)],["devnet_validation","solana","solana-devnet",1]);});
 test("authoritative Devnet settlement atomically completes payment and creates exactly one Solana receipt",async()=>{const created=await store.createOrGet({executionId:randomUUID(),paymentIntentId:paymentId,actorSubject:ACTOR,providerIdempotencyKey:"d".repeat(64),policyHash:POLICY,now:NOW}),preparation=await settled(created.aggregate.executionId),first=await store.applyLifecycle({aggregate:created.aggregate,preparation,signature:preparation.artifact.signature,observedAt:NOW,slot:"484124271",confirmationStatus:"finalized"}),before=(await pool.query("SELECT status,version,execution_receipt_id,solana_signature,confirmed_slot,completed_at FROM payments WHERE id=$1",[paymentId])).rows[0],second=await store.applyLifecycle({aggregate:first,preparation,signature:preparation.artifact.signature,observedAt:NOW,slot:"484124271",confirmationStatus:"finalized"}),after=(await pool.query("SELECT status,version,execution_receipt_id,solana_signature,confirmed_slot,completed_at FROM payments WHERE id=$1",[paymentId])).rows[0];assert.equal(first.receiptId,`receipt:${created.aggregate.executionId}`);assert.equal(second.receiptId,first.receiptId);assert.deepEqual(before,after);assert.deepEqual([after.status,after.execution_receipt_id,after.solana_signature,String(after.confirmed_slot),new Date(after.completed_at).toISOString()],["COMPLETED",first.receiptId,preparation.artifact.signature,"484124271",NOW]);assert.equal((await pool.query("SELECT status FROM payment_executions WHERE execution_id=$1",[created.aggregate.executionId])).rows[0].status,"SETTLED");const receipt=(await pool.query("SELECT rail,evidence_type,count(*)over() AS count FROM payment_execution_receipts WHERE execution_id=$1",[created.aggregate.executionId])).rows[0];assert.deepEqual([receipt.rail,receipt.evidence_type,Number(receipt.count)],["solana","solana.signature",1]);assert.equal((await pool.query("SELECT count(*)::int count FROM payment_events WHERE payment_id=$1 AND event_type='SETTLEMENT_CONFIRMED'",[paymentId])).rows[0].count,1);});
@@ -22,7 +30,7 @@ test("PostgreSQL later finalized success overrides prior UNKNOWN",async()=>{cons
 test("PostgreSQL repeated and long-lived missing remains UNKNOWN after validity and backlog age",async()=>{const{value,commitmentId}=await committedForReconciliation("6"),later="2027-08-15T12:00:00.000Z",first=await reconcile(rpcService([{context:{slot:190},value:[null]}]),value.executionId),second=await reconcile(rpcService([{context:{slot:999999},value:[null]}],()=>later),value.executionId),backlog=await recovery.inspectUnresolvedBacklog(later);assert.equal(first.preparation.state,"UNKNOWN_RECONCILIATION_REQUIRED");assert.equal(second.preparation.state,"UNKNOWN_RECONCILIATION_REQUIRED");assert.equal(second.observation.outcome,"UNKNOWN");assert.equal(second.persisted,false);assert(backlog.oldestUnresolvedAgeMs!>31_000_000_000);assert.equal((await states.findPreparation(value.executionId,ACTOR))?.state,"UNKNOWN_RECONCILIATION_REQUIRED");assert.equal((await states.commitSubmission({executionId:value.executionId,actorSubject:ACTOR,preparationId:value.preparationId,commitmentId,committedAt:NOW})).submissionAuthorized,false);});
 test("PostgreSQL provider failure remains UNKNOWN",async()=>{const{value}=await committedForReconciliation("7"),service=new DevnetReconciliationService(states,{identity:{providerId:"reconcile",network:"devnet",role:"reconciliation"},async observeSignature(){throw Object.assign(new Error("offline"),{code:"HTTP"});}},"reconcile",()=>NOW,randomUUID),result=await reconcile(service,value.executionId);assert.equal(result.preparation.state,"UNKNOWN_RECONCILIATION_REQUIRED");assert.equal(result.observation.outcome,"UNKNOWN");assert.equal(result.observation.errorCode,"RPC_HTTP");});
 test("PostgreSQL processed and confirmed success remain PENDING",async()=>{const{value}=await committedForReconciliation("8");for(const confirmationStatus of["processed","confirmed"]){const result=await reconcile(rpcService([{context:{slot:190},value:[{confirmationStatus,err:null,slot:189}]}]),value.executionId);assert.equal(result.preparation.state,"ACCEPTED_PENDING");assert.equal(result.observation.outcome,"PENDING");}});
-function prepared(executionId:string,state:PersistedDevnetPreparation["state"]):PersistedDevnetPreparation{return{preparationId:executionId,executionId,paymentIntentId:paymentId,actorSubject:ACTOR,generation:1,state,encryptedSignedTransaction:{algorithm:"aes-256-gcm",keyVersion:"v1",initializationVector:Buffer.alloc(12),authenticationTag:Buffer.alloc(16),ciphertext:Buffer.from("x")},artifact:{signature:"public-signature",signedTransactionDigest:"e".repeat(64),cluster:"solana-devnet",mint:"4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",rawAmount:"1000000",destination:"DWLaEPUUyLgPqhoJDGni8PRaL58FdfSmXdL6Qtrp1hJ8",sourceTokenAccount:"source",decimals:6,recentBlockhash:"block",lastValidBlockHeight:"1",signerKeyId:"server",signerKeyVersion:"1",signerPublicKey:"public",policyHash:POLICY,submissionProviderId:"submit",reconciliationProviderId:"reconcile"},preparedAt:NOW,...(state!=="PREPARED_NOT_CONTACTED"?{committedAt:NOW}:{})};}
+function prepared(executionId:string,state:PersistedDevnetPreparation["state"]):PersistedDevnetPreparation{return{preparationId:executionId,executionId,paymentIntentId:paymentId,actorSubject:ACTOR,generation:1,state,encryptedSignedTransaction:{algorithm:"aes-256-gcm",keyVersion:"v1",initializationVector:Buffer.alloc(12),authenticationTag:Buffer.alloc(16),ciphertext:Buffer.from("x")},artifact:{signature:"public-signature",signedTransactionDigest:"e".repeat(64),cluster:"solana-devnet",mint:"4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",rawAmount:"1000000",destination:"DWLaEPUUyLgPqhoJDGni8PRaL58FdfSmXdL6Qtrp1hJ8",sourceTokenAccount:SOURCE,decimals:6,recentBlockhash:"block",lastValidBlockHeight:"1",signerKeyId:"server",signerKeyVersion:"1",signerPublicKey:SIGNER,policyHash:POLICY,submissionProviderId:"submit",reconciliationProviderId:"reconcile"},preparedAt:NOW,...(state!=="PREPARED_NOT_CONTACTED"?{committedAt:NOW}:{})};}
 async function committedForReconciliation(seed:string){const created=await store.createOrGet({executionId:randomUUID(),paymentIntentId:paymentId,actorSubject:ACTOR,providerIdempotencyKey:seed.repeat(64),policyHash:POLICY,now:NOW}),input=prepared(created.aggregate.executionId,"PREPARED_NOT_CONTACTED"),value=await states.persistPreparation({...input,state:undefined,committedAt:undefined}as any),commitmentId=randomUUID();await states.commitSubmission({executionId:value.executionId,actorSubject:ACTOR,preparationId:value.preparationId,commitmentId,committedAt:NOW});return{value,commitmentId};}
 function rpcService(results:unknown[],clock=()=>NOW){let index=0;const fetch:JsonRpcFetch=async()=>({ok:true,async text(){return JSON.stringify({jsonrpc:"2.0",result:results[index++]})}}),provider=new IndependentDevnetReconciliationRpc("reconcile",new SingleAttemptDevnetJsonRpc("https://unused.invalid/",500,fetch),clock);return new DevnetReconciliationService(states,provider,"reconcile",clock,randomUUID);}
 async function leaseFor(executionId:string,worker=`pg-browser-${randomUUID()}`){const claimedAt=new Date().toISOString(),expiresAt=new Date(Date.parse(claimedAt)+10_000).toISOString(),candidate=await recovery.claimReconciliationExecution(executionId,worker,claimedAt,expiresAt);assert(candidate?.recoveryLease);const claimed=candidate.recoveryLease;return{control:{fence:{leaseOwner:worker,leaseClaimedAt:claimed.claimedAt},async renew(){const now=new Date().toISOString();return recovery.renew(executionId,"RECONCILIATION",worker,claimed.claimedAt,now,new Date(Date.parse(now)+10_000).toISOString());}},async release(){await recovery.release(executionId,"RECONCILIATION",worker,claimed.claimedAt);}};}
@@ -63,4 +71,123 @@ for(const preparationFails of [false,true])test(`fair recovery settles a later p
   assert.equal((await pool.query("SELECT count(*)::int AS count FROM payment_execution_receipts WHERE execution_id=$1",[oldest.value.executionId])).rows[0].count,0);
   const future=new Date(Date.now()+2_000).toISOString(),candidate=await new PostgresDevnetRecoveryRepository(pool,states).claimReconciliation("future-worker",future,new Date(Date.parse(future)+30_000).toISOString());
   assert.equal(candidate?.executionId,oldest.value.executionId);assert.equal(candidate?.preparation?.state,"UNKNOWN_RECONCILIATION_REQUIRED");
+});
+
+
+const OTHER_KEY=Keypair.fromSeed(Buffer.alloc(32,9)).publicKey.toBase58();
+const economicsChallenges=[
+  {name:"wrong mint",field:"mint",overrides:{mint:OTHER_KEY,sourceTokenAccount:deriveDevnetAssociatedSourceTokenAccount(OTHER_KEY,SIGNER)},rehash:true},
+  {name:"wrong decimals",field:"decimals",overrides:{decimals:5},rehash:true},
+  {name:"wrong raw amount",field:"rawAmount",overrides:{rawAmount:"2000000"}},
+  {name:"wrong destination",field:"destination",overrides:{destination:OTHER_KEY}},
+  {name:"wrong source",field:"signerSourcePolicy",overrides:{sourceTokenAccount:OTHER_KEY}},
+  {name:"wrong signer with its valid source",field:"historicalPolicy",overrides:{signerPublicKey:OTHER_KEY,sourceTokenAccount:deriveDevnetAssociatedSourceTokenAccount(CIRCLE_SOLANA_DEVNET_USDC_MINT,OTHER_KEY)}},
+  {name:"wrong signer key identity",field:"historicalPolicy",overrides:{signerKeyId:"different-key"}},
+  {name:"wrong signer key version",field:"historicalPolicy",overrides:{signerKeyVersion:"different-version"}},
+];
+for(const challenge of economicsChallenges)test(`AUD-DN03-01: finalized historical ${challenge.name} retains evidence without canonical settlement`,async()=>{
+  const policyHash=challenge.rehash?hashDevnetPolicy(devnetPreparationPolicy({...HISTORICAL_POLICY,...challenge.overrides})):POLICY;
+  const {aggregate}=await store.createOrGet({executionId:randomUUID(),paymentIntentId:paymentId,actorSubject:ACTOR,providerIdempotencyKey:"a".repeat(64),policyHash,now:NOW});
+  const input=prepared(aggregate.executionId,"PREPARED_NOT_CONTACTED");
+  const value=await states.persistPreparation({...input,artifact:{...input.artifact,...challenge.overrides,policyHash}});
+  const commitmentId=randomUUID();
+  await states.commitSubmission({executionId:value.executionId,actorSubject:ACTOR,preparationId:value.preparationId,commitmentId,committedAt:NOW});
+  let lookups=0;
+  const provider={identity:{providerId:"reconcile",network:"devnet" as const,role:"reconciliation" as const},async observeSignature(signature:string){lookups++;return{status:"settled" as const,signature,slot:"199",contextSlot:"200",confirmationStatus:"finalized",observedAt:NOW,settledAt:NOW,historySearched:true as const,providerId:"reconcile"};}};
+  const service=new DevnetReconciliationService(states,provider,"reconcile",()=>NOW);
+  const result=await reconcile(service,value.executionId);
+  assert.equal(result.preparation.state,"SETTLED");
+  const evidenceBefore=await states.listReconciliationObservations(value.executionId,ACTOR);
+  const commitmentBefore=await states.findCommitment(value.executionId,ACTOR);
+  // Even a caller snapshot claiming canonical economics cannot override the DB artifact.
+  const claimed={...result.preparation,artifact:{...input.artifact}};
+  const projection={aggregate,preparation:claimed,signature:value.artifact.signature,observedAt:NOW,slot:"199",confirmationStatus:"finalized"};
+  await Promise.all([store.applyLifecycle(projection),store.applyLifecycle(projection)]);
+  const snapshot=async()=>({
+    payment:(await pool.query("SELECT status,version,completed_at,execution_receipt_id FROM payments WHERE id=$1",[paymentId])).rows[0],
+    execution:(await pool.query("SELECT status,version,review_reason,provider_reference,settled_at,settlement_evidence,failure_code FROM payment_executions WHERE execution_id=$1",[value.executionId])).rows[0],
+    events:(await pool.query("SELECT event_type,details FROM payment_execution_events WHERE execution_id=$1 ORDER BY sequence_number",[value.executionId])).rows,
+    receipts:(await pool.query("SELECT count(*)::int count FROM payment_execution_receipts WHERE execution_id=$1",[value.executionId])).rows[0].count,
+  });
+  const first=await snapshot();
+  assert.equal(first.payment.status,"PROCESSING");assert.equal(first.payment.completed_at,null);assert.equal(first.payment.execution_receipt_id,null);
+  assert.equal(first.execution.status,"UNKNOWN");assert.equal(first.execution.review_reason,"DEVNET_SETTLEMENT_ECONOMICS_MISMATCH");
+  assert.equal(first.execution.provider_reference,value.artifact.signature);assert.equal(first.execution.settled_at,null);assert.equal(first.execution.settlement_evidence,null);assert.equal(first.execution.failure_code,null);
+  assert.equal(first.receipts,0);
+  const blocked=first.events.filter(event=>event.event_type==="settlement_projection_blocked");assert.equal(blocked.length,1);
+  assert(blocked[0].details.fields.includes(challenge.field));
+  assert.deepEqual([blocked[0].details.preparationId,blocked[0].details.generation,blocked[0].details.signature,blocked[0].details.slot,blocked[0].details.confirmationStatus],[value.preparationId,1,value.artifact.signature,"199","finalized"]);
+  assert.equal(first.events.some(event=>["execution_settled","receipt_created"].includes(event.event_type)),false);
+  const replay=await service.reconcile(value.executionId,ACTOR,{fence:{leaseOwner:"unused",leaseClaimedAt:NOW},async renew(){throw new Error("terminal replay must not renew");}});
+  assert.equal(replay.attempted,false);assert.equal(replay.persisted,false);
+  await store.applyLifecycle({...projection,preparation:replay.preparation});
+  // A delayed pre-finality snapshot must not clear the conservative review state.
+  await store.applyLifecycle({...projection,preparation:{...value,state:"ACCEPTED_PENDING"}});
+  assert.deepEqual(await snapshot(),first);
+  assert.deepEqual(await states.findPreparation(value.executionId,ACTOR),result.preparation);
+  assert.deepEqual(await states.listReconciliationObservations(value.executionId,ACTOR),evidenceBefore);
+  assert.deepEqual(await states.findCommitment(value.executionId,ACTOR),commitmentBefore);
+  assert.equal(lookups,1);
+  assert.equal((await states.commitSubmission({executionId:value.executionId,actorSubject:ACTOR,preparationId:value.preparationId,commitmentId,committedAt:NOW})).submissionAuthorized,false);
+  assert.deepEqual(await states.listPreparationEligible(),[]);
+  // Exercise the real submission gate even with submission enabled and available.
+  let providerSubmissions=0,signatures=0;
+  const orchestration=new DevnetOrchestrationService(states,new Aes256GcmPreparedTransactionCipher(Buffer.alloc(32,7),"test"),
+    {...HISTORICAL_POLICY,cluster:"solana-devnet",asset:"USDC",policyHash:POLICY},
+    {async getLatestDevnetBlockhash(){throw new Error("must not prepare");}},
+    {keyId:"server",keyVersion:"1",publicKey:SIGNER,async signTransaction(){signatures++;throw new Error("must not sign");}},
+    {async getCurrentDevnetBlockHeight(){throw new Error("must not refresh");}},provider,
+    {identity:{providerId:"submit",network:"devnet",role:"submission"},async submitExactSignedTransaction(){providerSubmissions++;throw new Error("must not resubmit");}},
+    {submissionEnabled:true,reconciliationEnabled:true},()=>NOW);
+  const submit=await orchestration.submitPrepared({executionId:value.executionId,actorSubject:ACTOR,commitmentId,providerIdempotencyKey:aggregate.providerIdempotencyKey});
+  assert.equal(submit.attempted,false);assert.equal(submit.reason,"RECONCILIATION_ONLY");assert.equal(providerSubmissions,0);assert.equal(signatures,0);
+  assert.deepEqual(await states.listSubmissionObservations(value.executionId,ACTOR),[]);
+});
+
+test("AUD-DN03-01: only the authoritative committed generation can settle, with concurrent canonical replay creating one receipt",async()=>{
+  const {aggregate}=await store.createOrGet({executionId:randomUUID(),paymentIntentId:paymentId,actorSubject:ACTOR,providerIdempotencyKey:"a".repeat(64),policyHash:POLICY,now:NOW});
+  const first=await states.persistPreparation(prepared(aggregate.executionId,"PREPARED_NOT_CONTACTED"));
+  const second=await states.replaceExpiredPreparation({priorPreparationId:first.preparationId,abandonedAt:NOW,replacement:{...first,preparationId:randomUUID(),generation:2,artifact:{...first.artifact,signature:"generation-two-signature",signedTransactionDigest:"f".repeat(64)}}});
+  await states.commitSubmission({executionId:second.executionId,actorSubject:ACTOR,preparationId:second.preparationId,commitmentId:randomUUID(),committedAt:NOW});
+  const result=await reconcile(rpcService([{context:{slot:200},value:[{confirmationStatus:"finalized",err:null,slot:199}]}]),second.executionId);
+  const projection={aggregate,preparation:result.preparation,observedAt:NOW};
+  const staleClaims=[{preparationId:first.preparationId},{generation:1},{executionId:randomUUID()},{paymentIntentId:randomUUID()},{actorSubject:"account:other"}];
+  for(const stale of staleClaims)await assert.rejects(()=>store.applyLifecycle({...projection,preparation:{...result.preparation,...stale}}),/committed Devnet preparation identity/);
+  assert.equal((await pool.query("SELECT status FROM payment_executions WHERE execution_id=$1",[aggregate.executionId])).rows[0].status,"READY");
+  // Finality also comes from the locked durable record, not caller fields.
+  await Promise.all([store.applyLifecycle({...projection,signature:"stale-signature",slot:"1"}),store.applyLifecycle(projection)]);
+  const payment=(await pool.query("SELECT status,solana_signature,confirmed_slot FROM payments WHERE id=$1",[paymentId])).rows[0];
+  assert.deepEqual([payment.status,payment.solana_signature,String(payment.confirmed_slot)],["COMPLETED",second.artifact.signature,"199"]);
+  assert.equal((await pool.query("SELECT status FROM payment_executions WHERE execution_id=$1",[aggregate.executionId])).rows[0].status,"SETTLED");
+  const receipt=(await pool.query("SELECT amount_units,amount_decimals,provider_reference,count(*)over()::int count FROM payment_execution_receipts WHERE execution_id=$1",[aggregate.executionId])).rows[0];
+  assert.deepEqual([String(receipt.amount_units),receipt.amount_decimals,receipt.provider_reference,receipt.count],["1000000",6,second.artifact.signature,1]);
+});
+
+test("AUD-DN03-01: caller-only SETTLED evidence cannot create canonical settlement",async()=>{
+  const {value}=await committedForReconciliation("a"),aggregate=await store.find(paymentId,ACTOR);assert(aggregate);
+  await assert.rejects(()=>store.applyLifecycle({aggregate,preparation:{...value,state:"SETTLED"},signature:value.artifact.signature,observedAt:NOW,slot:"199",confirmationStatus:"finalized"}),/committed Devnet preparation identity/);
+  assert.equal((await pool.query("SELECT status FROM payments WHERE id=$1",[paymentId])).rows[0].status,"PROCESSING");
+  assert.equal((await pool.query("SELECT count(*)::int count FROM payment_execution_receipts")).rows[0].count,0);
+});
+
+test("AUD-DN03-01: settlement waits for the persisted preparation lock before any canonical write",async()=>{
+  const {aggregate}=await store.createOrGet({executionId:randomUUID(),paymentIntentId:paymentId,actorSubject:ACTOR,providerIdempotencyKey:"a".repeat(64),policyHash:POLICY,now:NOW});
+  const preparation=await settled(aggregate.executionId),blocker=await pool.connect();
+  let projection:ReturnType<typeof store.applyLifecycle>|undefined;
+  try{
+    await blocker.query("BEGIN");
+    const pid=Number((await blocker.query("SELECT pg_backend_pid() pid")).rows[0].pid);
+    await blocker.query("SELECT preparation_id FROM devnet_execution_preparations WHERE preparation_id=$1 FOR UPDATE",[preparation.preparationId]);
+    projection=store.applyLifecycle({aggregate,preparation,observedAt:NOW});
+    let waiting=false;const deadline=Date.now()+3_000;
+    while(!waiting&&Date.now()<deadline){
+      waiting=(await pool.query("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1::int=ANY(pg_blocking_pids(pid))) waiting",[pid])).rows[0].waiting;
+      if(!waiting)await new Promise(resolve=>setTimeout(resolve,10));
+    }
+    assert.equal(waiting,true,"projection must wait on the committed preparation lock");
+    assert.equal((await pool.query("SELECT status FROM payment_executions WHERE execution_id=$1",[aggregate.executionId])).rows[0].status,"READY");
+    assert.equal((await pool.query("SELECT status FROM payments WHERE id=$1",[paymentId])).rows[0].status,"PROCESSING");
+    assert.equal((await pool.query("SELECT count(*)::int count FROM payment_execution_receipts")).rows[0].count,0);
+  }finally{await blocker.query("ROLLBACK");blocker.release();await projection;}
+  assert.equal((await pool.query("SELECT status FROM payments WHERE id=$1",[paymentId])).rows[0].status,"COMPLETED");
 });
