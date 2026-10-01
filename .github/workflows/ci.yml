@@ -20,6 +20,20 @@ jobs:
     name: verify
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: economic_ci
+          POSTGRES_PASSWORD: disposable-ci-only
+          POSTGRES_DB: economic_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U economic_ci -d economic_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -47,3 +61,13 @@ jobs:
 
       - name: Validate migrations
         run: npm run migrate:validate
+
+      - name: Apply migrations to disposable PostgreSQL
+        env:
+          DATABASE_URL: postgresql://economic_ci:disposable-ci-only@localhost:5432/economic_ci
+        run: npm run migrate
+
+      - name: PostgreSQL persistence and reliability tests
+        env:
+          TEST_DATABASE_URL: postgresql://economic_ci:disposable-ci-only@localhost:5432/economic_ci
+        run: npm run test:postgres

@@ -8,7 +8,7 @@
     "build": "tsc",
     "lint": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "test:postgres": "tsx --test --test-concurrency=1 tests/postgresPaymentFoundation.integration.ts tests/postgresIdentityFoundation.integration.ts tests/postgresEconomicIdentity.integration.ts tests/postgresPaymentIdentity.integration.ts tests/postgresExecution.integration.ts tests/postgresDevnetExecutionState.integration.ts tests/postgresBrowserDevnetExecution.integration.ts tests/postgresPaymentRequests.integration.ts tests/postgresOpenBetaActivity.integration.ts tests/postgresActivity.integration.ts tests/r4Invariants.integration.ts tests/postgresE2eReliability.integration.ts",
+    "test:postgres": "tsx --test --test-concurrency=1 tests/postgresPaymentFoundation.integration.ts tests/postgresIdentityFoundation.integration.ts tests/postgresEconomicIdentity.integration.ts tests/postgresPaymentIdentity.integration.ts tests/postgresExecution.integration.ts tests/postgresDevnetExecutionState.integration.ts tests/postgresBrowserDevnetExecution.integration.ts tests/postgresPaymentRequests.integration.ts tests/postgresOpenBetaActivity.integration.ts tests/postgresActivity.integration.ts tests/r4Invariants.integration.ts tests/postgresE2eReliability.integration.ts tests/postgresEconomicFinalization.integration.ts",
     "test:postgres:growth": "tsx --test --test-concurrency=1 tests/postgresGrowthEvents.integration.ts tests/postgresGrowthProjection.integration.ts tests/postgresZpState.integration.ts",
     "migrate": "tsx scripts/run-migrations.ts",
     "migrate:validate": "tsx scripts/validate-migrations.ts",
@@ -29,7 +29,8 @@
     "r4:stage2:read": "npm run build && tsx scripts/r4/run-local.ts stage2-read",
     "r4:fault-gates": "npm run build && tsx scripts/r4/run-local.ts fault-gates",
     "start": "node dist/server.js",
-    "x402:client": "ts-node-dev --transpile-only ./scripts/x402-fetch-client.ts"
+    "x402:client": "ts-node-dev --transpile-only ./scripts/x402-fetch-client.ts",
+    "test:postgres:economic": "tsx --test --test-concurrency=1 tests/postgresEconomicFinalization.integration.ts"
   },
   "keywords": [],
   "author": "",
