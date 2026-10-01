@@ -1,0 +1,10 @@
+{
+  "status": "UNRELEASED_AUDIT_CANDIDATE",
+  "package": "zephyon-protocol-0.4.0.tgz",
+  "version": "0.4.0",
+  "protocolBase": "82862e2b28c15e05d95026b391df82092ce89805",
+  "sourceSha256": "25e96994b53a9eefa5492fbeecbd21af8e2d11bf7530146c96d72a04d2ed2f1f",
+  "packageSha256": "5bad0d842b6b65ef1d2b545912049665ea8a577e0d34ab1c30446f92889e65d0",
+  "integrity": "sha512-fZOvxTqXQN2q/4GEoGq2wzL1d+CTqlBQ7sY4//5yx0Z1QiRFXDjGGIRkTb9NO6eZbrKtUq8u4mWcFMpACQxp8A==",
+  "files": 776
+}
