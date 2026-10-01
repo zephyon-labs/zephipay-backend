@@ -1,5 +1,7 @@
 # Trusted economic evidence and durable sponsor finalization V1
 
+Follow-on lifecycle, budget, role and canonical-session behavior is specified in [Pre-signer operational authority V1](pre-signer-operational-authority-v1.md). The implementation notes below describe the original migration-023 foundation; its historical audit handoff remains unchanged.
+
 This package is a disconnected Backend foundation for independent audit. It does not activate a wallet route, signer, Mainnet RPC, transaction broadcast, production Runtime decision adapter, sponsorship, or ZERA. Existing Devnet USDC routes and execution remain unchanged. All identity, amount, envelope, canonical hash, message-profile and signature semantics come from Protocol 0.4.0.
 
 ## Scope and composition

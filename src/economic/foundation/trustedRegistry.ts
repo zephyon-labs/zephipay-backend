@@ -56,7 +56,35 @@ export class TrustedRegistryAdministration {
       await qualifiedNetwork(client, input.network, new Date().toISOString());
       await client.query(`INSERT INTO economic_sponsor_budgets(budget_id,network,sponsor_public_key,sponsor_key_version,base_limit,priority_limit,rent_limit,outstanding_limit)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, [machineId(input.id), createNetworkDomainV1(input.network), machineId(input.sponsorPublicKey), machineId(input.sponsorKeyVersion), units(input.base), units(input.priority), units(input.rent), input.outstanding]);
+      await client.query(`INSERT INTO economic_budget_heads(family_id,network,sponsor_public_key,sponsor_key_version,current_budget_id) VALUES($1,$2,$3,$4,$1)`,[input.id,createNetworkDomainV1(input.network),input.sponsorPublicKey,input.sponsorKeyVersion]);
+      await client.query("INSERT INTO economic_budget_versions(budget_id,family_id,version) VALUES($1,$1,1)",[input.id]);
       await audit(client, { type: "BUDGET_CONFIGURED", actor: "server-configuration", reference: input.id });
+    });
+  }
+
+  /** CAS revision prevents stale administration from reviving disabled budgets or overwriting a newer version. */
+  async setBudgetStatus(familyId: string, expectedRevision: string, status: "ACTIVE" | "DISABLED"): Promise<void> {
+    requireCondition(status === "ACTIVE" || status === "DISABLED", "Invalid budget status.");
+    await transaction(this.pool, async client => {
+      const head = (await client.query("SELECT * FROM economic_budget_heads WHERE family_id=$1 FOR UPDATE",[machineId(familyId)])).rows[0];
+      requireCondition(head && head.revision === expectedRevision, "Stale budget administrative revision.");
+      if (head.status === status) return;
+      await client.query("UPDATE economic_budget_heads SET status=$2,revision=revision+1 WHERE family_id=$1",[familyId,status]);
+      await audit(client,{type:`BUDGET_${status}`,actor:"budget-administration",reference:`${familyId}:${BigInt(head.revision)+1n}`});
+    });
+  }
+
+  async reviseBudget(input: { familyId: string; expectedRevision: string; newBudgetId: string; base: string; priority: string; rent: string; outstanding: number }): Promise<void> {
+    requireCondition(Number.isSafeInteger(input.outstanding) && input.outstanding > 0,"Invalid outstanding limit.");
+    await transaction(this.pool, async client => {
+      const head = (await client.query("SELECT * FROM economic_budget_heads WHERE family_id=$1 FOR UPDATE",[machineId(input.familyId)])).rows[0];
+      requireCondition(head && head.revision === input.expectedRevision,"Stale budget administrative revision.");
+      const next = (await client.query("SELECT (max(version)+1)::text AS version FROM economic_budget_versions WHERE family_id=$1",[input.familyId])).rows[0].version;
+      await client.query(`INSERT INTO economic_sponsor_budgets(budget_id,network,sponsor_public_key,sponsor_key_version,base_limit,priority_limit,rent_limit,outstanding_limit)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,[machineId(input.newBudgetId),head.network,head.sponsor_public_key,head.sponsor_key_version,units(input.base),units(input.priority),units(input.rent),input.outstanding]);
+      await client.query("INSERT INTO economic_budget_versions(budget_id,family_id,version) VALUES($1,$2,$3)",[input.newBudgetId,input.familyId,next]);
+      await client.query("UPDATE economic_budget_heads SET current_budget_id=$2,revision=revision+1 WHERE family_id=$1",[input.familyId,input.newBudgetId]);
+      await audit(client,{type:"BUDGET_VERSION_CREATED",actor:"budget-administration",reference:`${input.newBudgetId}:${next}`});
     });
   }
 

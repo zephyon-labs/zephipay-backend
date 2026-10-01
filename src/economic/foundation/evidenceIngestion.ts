@@ -5,6 +5,7 @@ import { EconomicConsentV1, EconomicIntentEnvelopeV1, RuntimeDecisionBindingV1, 
 import { createAuthPipeline, externalPrincipalFrom, type AuthConfiguration } from "../../auth/authMiddleware";
 import { audit, databaseTime, machineId, requireCondition, sha256, transaction } from "./database";
 import { exactObject, parseEconomicJson } from "./strictJson";
+import { lockEconomicSession } from "./sessionAuthority";
 import { qualifyAsset } from "./trustedRegistry";
 
 export type EvidencePolicy = Readonly<{
@@ -51,10 +52,14 @@ export async function loadAuthoritativeEvidence(client: PoolClient, envelope: Ec
   const d = (await client.query("SELECT * FROM economic_runtime_evidence WHERE decision_id=$1 FOR SHARE", [envelope.runtime.decisionId])).rows[0];
   requireCondition(c && !c.revoked_at && c.issuer === policy.auth.issuer && c.audience === policy.auth.audience && c.context === "zephipay-economic-consent-v1" && c.expires_at.toISOString() > now, "Missing, stale, revoked or unauthenticated consent.");
   requireCondition(d && !d.revoked_at && d.issuer === policy.runtimeIssuer && d.policy_version === envelope.runtime.policyVersion && d.evidence_digest === envelope.runtime.evidenceDigest && d.scope === envelope.runtime.scope && d.valid_from.toISOString() <= now && d.valid_until.toISOString() > now && sameNetworkV1(d.network, envelope.amount.asset.network), "Missing, stale, revoked or unauthenticated Runtime evidence.");
+  await lockEconomicSession(client, { issuer: c.issuer, subject: c.provider_subject, providerSession: c.session_reference, principalId: envelope.principal.id, requiredSessionId: c.account_session_id });
+  // Session/account lock waits may cross validity; validate the fresh database clock under all authority locks.
+  const eligibleAt = await databaseTime(client);
+  requireCondition(c.expires_at.toISOString() > eligibleAt && d.valid_from.toISOString() <= eligibleAt && d.valid_until.toISOString() > eligibleAt,"Evidence expired during eligibility lock wait.");
   const consent: EconomicConsentV1 = { schema: "zephyon.economic-consent/v1", consentId: c.consent_id, principalId: c.principal_id, envelopeDigest: c.envelope_digest, confirmedAt: c.confirmed_at.toISOString() };
   const decision = d.binding as RuntimeDecisionBindingV1;
   requireCondition(d.envelope_digest === consent.envelopeDigest, "Runtime envelope mismatch.");
-  assertEconomicAuthorizationV1(envelope, consent, decision, now);
+  assertEconomicAuthorizationV1(envelope, consent, decision, eligibleAt);
   return { consent, decision };
 }
 
@@ -79,12 +84,13 @@ export function createEconomicEvidenceIngestion(pool: Pool, configuration: Evide
         WHERE e.issuer=$1 AND e.subject=$2`, [principal.issuer, principal.providerSubject])).rows[0];
       requireCondition(identity?.actor_subject === envelope.principal.id, "Authenticated subject does not own envelope.");
       await assertActivePrincipal(client, envelope.principal.id);
-      const now = await databaseTime(client), validUntil = new Date(Math.min(expiry * 1000, Date.parse(envelope.expiresAt))).toISOString();
+      const session = await lockEconomicSession(client, { issuer: principal.issuer, subject: principal.providerSubject, providerSession: principal.providerSessionId, principalId: envelope.principal.id });
+      const now = await databaseTime(client), validUntil = new Date(Math.min(expiry * 1000, Date.parse(envelope.expiresAt), Date.parse(session.expiresAt))).toISOString();
       requireCondition(now >= envelope.createdAt && now < validUntil && issued * 1000 <= Date.parse(now), "Expired or premature confirmation.");
       const id = randomUUID();
-      await client.query(`INSERT INTO economic_consent_evidence(consent_id,envelope_digest,principal_id,issuer,audience,context,provider_subject,authentication_reference,session_reference,authenticated_at,confirmed_at,expires_at)
-        VALUES($1,$2,$3,$4,$5,'zephipay-economic-consent-v1',$6,$7,$8,$9,$10,$11)`, [id, body.envelopeDigest, envelope.principal.id, principal.issuer, policy.auth.audience, principal.providerSubject,
-        sha256(token.slice(7)), principal.providerSessionId ?? null, new Date(issued * 1000).toISOString(), now, validUntil]);
+      await client.query(`INSERT INTO economic_consent_evidence(consent_id,envelope_digest,principal_id,issuer,audience,context,provider_subject,authentication_reference,session_reference,authenticated_at,confirmed_at,expires_at,account_session_id)
+        VALUES($1,$2,$3,$4,$5,'zephipay-economic-consent-v1',$6,$7,$8,$9,$10,$11,$12)`, [id, body.envelopeDigest, envelope.principal.id, principal.issuer, policy.auth.audience, principal.providerSubject,
+        sha256(token.slice(7)), principal.providerSessionId ?? null, new Date(issued * 1000).toISOString(), now, validUntil, session.sessionId]);
       await audit(client, { type: "CONSENT_ACCEPTED", actor: envelope.principal.id, ...envelope.attempt, consentId: id, reference: body.envelopeDigest as string });
       return id;
     });
