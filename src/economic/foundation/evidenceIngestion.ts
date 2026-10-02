@@ -52,7 +52,7 @@ export async function loadAuthoritativeEvidence(client: PoolClient, envelope: Ec
   const d = (await client.query("SELECT * FROM economic_runtime_evidence WHERE decision_id=$1 FOR SHARE", [envelope.runtime.decisionId])).rows[0];
   requireCondition(c && !c.revoked_at && c.issuer === policy.auth.issuer && c.audience === policy.auth.audience && c.context === "zephipay-economic-consent-v1" && c.expires_at.toISOString() > now, "Missing, stale, revoked or unauthenticated consent.");
   requireCondition(d && !d.revoked_at && d.issuer === policy.runtimeIssuer && d.policy_version === envelope.runtime.policyVersion && d.evidence_digest === envelope.runtime.evidenceDigest && d.scope === envelope.runtime.scope && d.valid_from.toISOString() <= now && d.valid_until.toISOString() > now && sameNetworkV1(d.network, envelope.amount.asset.network), "Missing, stale, revoked or unauthenticated Runtime evidence.");
-  await lockEconomicSession(client, { issuer: c.issuer, subject: c.provider_subject, providerSession: c.session_reference, principalId: envelope.principal.id, requiredSessionId: c.account_session_id });
+  await lockEconomicSession(client, { issuer: c.issuer, subject: c.provider_subject, providerSession: c.session_reference, principalId: envelope.principal.id, requiredSessionId: c.account_session_id, authenticatedAt: c.authenticated_at.toISOString() });
   // Session/account lock waits may cross validity; validate the fresh database clock under all authority locks.
   const eligibleAt = await databaseTime(client);
   requireCondition(c.expires_at.toISOString() > eligibleAt && d.valid_from.toISOString() <= eligibleAt && d.valid_until.toISOString() > eligibleAt,"Evidence expired during eligibility lock wait.");
@@ -84,7 +84,7 @@ export function createEconomicEvidenceIngestion(pool: Pool, configuration: Evide
         WHERE e.issuer=$1 AND e.subject=$2`, [principal.issuer, principal.providerSubject])).rows[0];
       requireCondition(identity?.actor_subject === envelope.principal.id, "Authenticated subject does not own envelope.");
       await assertActivePrincipal(client, envelope.principal.id);
-      const session = await lockEconomicSession(client, { issuer: principal.issuer, subject: principal.providerSubject, providerSession: principal.providerSessionId, principalId: envelope.principal.id });
+      const session = await lockEconomicSession(client, { issuer: principal.issuer, subject: principal.providerSubject, providerSession: principal.providerSessionId, principalId: envelope.principal.id, authenticatedAt: new Date(issued * 1000).toISOString() });
       const now = await databaseTime(client), validUntil = new Date(Math.min(expiry * 1000, Date.parse(envelope.expiresAt), Date.parse(session.expiresAt))).toISOString();
       requireCondition(now >= envelope.createdAt && now < validUntil && issued * 1000 <= Date.parse(now), "Expired or premature confirmation.");
       const id = randomUUID();
