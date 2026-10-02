@@ -67,6 +67,11 @@ jobs:
           DATABASE_URL: postgresql://economic_ci:disposable-ci-only@localhost:5432/economic_ci
         run: npm run migrate
 
+      - name: Configure isolated economic database roles
+        env:
+          DATABASE_URL: postgresql://economic_ci:disposable-ci-only@localhost:5432/economic_ci
+        run: npm run db:economic:roles
+
       - name: PostgreSQL persistence and reliability tests
         env:
           TEST_DATABASE_URL: postgresql://economic_ci:disposable-ci-only@localhost:5432/economic_ci

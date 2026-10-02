@@ -10,12 +10,19 @@ import { base58 } from "@scure/base";
 import { TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
 import { EconomicIntentEnvelopeV1, authorizationBindingDigestV1, createEconomicIntentEnvelopeV1, offlineSponsoredMessageV1 } from "zephyon-protocol";
 import { PostgresIdentityPersistence } from "../src/storage/postgres/postgresIdentityPersistence";
-import { PostgresFinalizationRepository } from "../src/economic/foundation/postgresFinalizationRepository";
+import { PostgresFinalizationRepository as BaseRepository } from "../src/economic/foundation/postgresFinalizationRepository";
 import { createEconomicEvidenceIngestion, EvidencePolicy, TrustedRuntimeIssuer } from "../src/economic/foundation/evidenceIngestion";
 import { SignerRequest, SignerResponse, TrustedExposureObserver, TrustedSignerPort } from "../src/economic/foundation/finalizationTypes";
 import { TrustedRegistryAdministration, devnetUsdcConfiguration, qualifyAsset } from "../src/economic/foundation/trustedRegistry";
+import { EconomicSessionAdministration } from "../src/economic/foundation/sessionAuthority";
 import { sha256, transaction } from "../src/economic/foundation/database";
 
+// Existing regression fixtures explicitly use the privileged disposable pool. Restricted LOGIN tests are separate.
+class PostgresFinalizationRepository extends BaseRepository {
+  constructor(db: Pool, configuration: EvidencePolicy, signer?: TrustedSignerPort, observer?: TrustedExposureObserver) {
+    super(db,configuration,signer,observer,{signerResults:db,observerEvidence:db});
+  }
+}
 const url = process.env.TEST_DATABASE_URL?.trim();
 if (!url) throw new Error("TEST_DATABASE_URL required; use a disposable database only.");
 const pool = new Pool({ connectionString: url, max: 16 });
@@ -77,6 +84,9 @@ beforeEach(async () => {
   await pool.query("TRUNCATE economic_authority_events,economic_network_registry,economic_sponsor_budgets,accounts RESTART IDENTITY CASCADE");
   const provisioned = await identities.provisionExternalIdentity({ accountId: randomUUID(), identityId: randomUUID(), issuer, subject: "subject:alice" });
   accountId = provisioned.account.accountId; principalId = provisioned.account.actorSubject;
+  const sessionId = randomUUID();
+  await identities.createAccountSession({sessionId,accountId,expectedAccountVersion:provisioned.account.version,expiresAt:new Date(Date.now()+7200_000).toISOString()});
+  await new EconomicSessionAdministration(pool).bind({issuer,providerSubject:"subject:alice",providerSessionReference:"session:test",accountSessionId:sessionId});
   token = await jwt(); runtime.transform = value => value;
   signer = new SignerFixture(); repo = new PostgresFinalizationRepository(pool,policy,signer);
   await admin.install(config);
@@ -280,7 +290,7 @@ test("lost signer response survives restart and queries the same operation witho
 
 test("crash after contact commitment before actual call remains query-only even when signer has never seen the operation",async()=>{
   await budget();const p=await prepared();await repo.claim(p.claim);
-  await pool.query("UPDATE economic_finalizations SET signer_state='CONTACT_COMMITTED',exposure_state='UNCERTAIN',version=version+1,updated_at=clock_timestamp() WHERE finalization_id=$1",[p.claim.sponsorFinalizationId]);
+  await pool.query("SELECT economic_commit_signer_contact($1)",[p.claim.sponsorFinalizationId]);
   const result=await new PostgresFinalizationRepository(pool,policy,signer).recover(p.claim.sponsorFinalizationId);
   assert.equal(result.signerState,"RESULT_UNKNOWN");assert.equal(result.exposureState,"UNCERTAIN");assert.equal(signer.calls,0);assert.equal(signer.queries,1);
   assert.equal(await repo.cancel(p.e.attempt.intentId,"1",p.e.attempt.fenceToken,principalId),"FINALIZATION_WON");

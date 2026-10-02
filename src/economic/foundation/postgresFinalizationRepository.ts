@@ -20,6 +20,7 @@ function operation(row: Row): DurableFinalization {
   requireCondition(sponsorTupleDigestV1(tuple) === row.tuple_digest, "Stored finalization tuple corrupt.");
   return Object.freeze({ sponsorFinalizationId: row.finalization_id, tuple, tupleDigest: row.tuple_digest,
     signerOperationId: row.signer_operation_id, signerState: row.signer_state, exposureState: row.exposure_state,
+    budgetId: row.budget_id, budgetVersion: row.budget_version,
     requested: Object.freeze({ base: row.base_requested, priority: row.priority_requested, rent: row.rent_requested }),
     ...(row.accounting_reference ? { consumed: Object.freeze({ base: row.base_consumed, priority: row.priority_consumed, rent: row.rent_consumed, reference: row.accounting_reference }) } : {}),
     ...(row.artifact_reference ? { artifactReference: row.artifact_reference, finalTransactionId: row.final_transaction_id } : {}), version: row.version });
@@ -36,11 +37,17 @@ function uuid(value: string): void {
   requireCondition(/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value), "Invalid server operation ID.");
 }
 
+/** Fixed server-owned connections; deployment roles must be distinct from the application login. */
+export type OperationalAuthorityConnections = Readonly<{ signerResults: Pool; observerEvidence?: Pool }>;
+
 /** Internal service/repository, deliberately not wired into any existing payment or wallet route. */
 export class PostgresFinalizationRepository {
   private readonly policy: EvidencePolicy;
   constructor(private readonly pool: Pool, configuration: EvidencePolicy,
-    private readonly signer?: TrustedSignerPort, private readonly observer?: TrustedExposureObserver) {
+    private readonly signer?: TrustedSignerPort, private readonly observer?: TrustedExposureObserver,
+    private readonly authorities?: OperationalAuthorityConnections) {
+    requireCondition(!signer || authorities?.signerResults, "Separate signer-result authority connection required.");
+    requireCondition(!observer || authorities?.observerEvidence, "Separate observer-evidence authority connection required.");
     this.policy = validateEvidencePolicy(configuration);
   }
 
@@ -99,7 +106,7 @@ export class PostgresFinalizationRepository {
   async claim(input: Claim): Promise<{ disposition: "CREATED" | "REPLAY" | "CONVERGED"; operation: DurableFinalization }> {
     uuid(input.sponsorFinalizationId); uuid(input.consentId);
     const artifact = bytes(input.customerArtifact);
-    let verifiedCallback = false;
+    let callbackValidation = "REJECTED"; // Unclassified failures retain uncertainty, including failures before verification.
     try {
       return await transaction(this.pool, async client => {
         const initial = (await client.query("SELECT intent_id FROM economic_attempts WHERE envelope_digest=$1", [input.envelopeDigest])).rows[0];
@@ -107,10 +114,14 @@ export class PostgresFinalizationRepository {
         const head = (await client.query("SELECT * FROM economic_attempt_heads WHERE intent_id=$1 FOR UPDATE", [initial.intent_id])).rows[0];
         const attempt = (await client.query("SELECT * FROM economic_attempts WHERE envelope_digest=$1", [input.envelopeDigest])).rows[0];
         const envelope = createEconomicIntentEnvelopeV1(attempt.envelope, attempt.envelope.amount.asset);
-        const messageDigest = assertSponsoredMessageProfileV1(Transaction.from(artifact).serializeMessage(), envelope, attempt.recent_blockhash);
+        let messageDigest: string;
+        try { messageDigest = assertSponsoredMessageProfileV1(Transaction.from(artifact).serializeMessage(), envelope, attempt.recent_blockhash); }
+        catch (error) { callbackValidation = "INVALID_ARTIFACT"; throw error; }
+        // A signature-inspection exception can contain a valid sponsor slot with an invalid/missing user slot.
+        // Retain uncertainty; never infer absent sponsor authority from an SDK rejection.
         const signatures = inspectSponsoredSignaturesV1(artifact, messageDigest, envelope.source.signer, envelope.fee.signer);
+        callbackValidation = signatures.state === "FULLY_SIGNED" ? "SPONSOR_RESULT_PRESENT" : signatures.state === "CUSTOMER_VERIFIED_SPONSOR_ABSENT" ? "CUSTOMER_VERIFIED" : "INVALID_ARTIFACT";
         requireCondition(signatures.state === "CUSTOMER_VERIFIED_SPONSOR_ABSENT", "Expected customer-only verified artifact.");
-        verifiedCallback = true;
         requireCondition(head.current_generation === attempt.generation && attempt.state !== "CANCELLED", "Stale or cancelled generation; late evidence retained.");
         const tuple = createSponsorFinalizationTupleV1({ schema: "zephyon.sponsor-finalization/v1", attempt: envelope.attempt,
           network: envelope.amount.asset.network, messageDigest, requiredSigners: [envelope.fee.signer,envelope.source.signer], userSigner: envelope.source.signer,
@@ -132,12 +143,14 @@ export class PostgresFinalizationRepository {
         const feeRegistryId = await qualifyAsset(client, envelope.fee.asset, "FEE", now);
         const evidence = await loadAuthoritativeEvidence(client, envelope, input.consentId, this.policy, now);
         requireCondition(sponsorTupleDigestV1(bindSponsorFinalizationV1({ envelope, ...evidence, now, userSignedTransaction: artifact, recentBlockhash: attempt.recent_blockhash, reservedExposureId: attempt.requested_exposure_id })) === tupleDigest, "Finalization binding mismatch.");
-        const budget = (await client.query(`SELECT * FROM economic_sponsor_budgets WHERE network=$1::jsonb AND sponsor_public_key=$2 AND sponsor_key_version=$3 FOR UPDATE`, [tuple.network, tuple.sponsorPublicKey, tuple.sponsorKeyVersion])).rows[0];
+        const headBudget = (await client.query(`SELECT * FROM economic_budget_heads WHERE network=$1::jsonb AND sponsor_public_key=$2 AND sponsor_key_version=$3 FOR UPDATE`,[tuple.network,tuple.sponsorPublicKey,tuple.sponsorKeyVersion])).rows[0];
+        requireCondition(headBudget?.status === "ACTIVE", "Sponsor budget disabled or unconfigured.");
+        const budget = (await client.query(`SELECT b.*,v.family_id,v.version AS budget_version FROM economic_sponsor_budgets b JOIN economic_budget_versions v USING(budget_id) WHERE b.budget_id=$1 FOR UPDATE OF b`,[headBudget.current_budget_id])).rows[0];
         requireCondition(budget, "No configured sponsor exposure budget.");
         await this.assertBudget(client, budget, envelope);
-        const row = (await client.query(`INSERT INTO economic_finalizations(finalization_id,intent_id,generation,tuple,tuple_digest,consent_id,runtime_id,payment_registry_id,fee_registry_id,budget_id,exposure_id,base_requested,priority_requested,rent_requested,signer_operation_id,customer_artifact)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`, [input.sponsorFinalizationId, head.intent_id, attempt.generation, tuple, tupleDigest, input.consentId, envelope.runtime.decisionId,
-          paymentRegistryId, feeRegistryId, budget.budget_id, attempt.requested_exposure_id, envelope.fee.maxBaseFee, envelope.fee.maxPriorityFee, envelope.fee.maxRent, randomUUID(), artifact])).rows[0];
+        const row = (await client.query(`INSERT INTO economic_finalizations(finalization_id,intent_id,generation,tuple,tuple_digest,consent_id,runtime_id,payment_registry_id,fee_registry_id,budget_id,exposure_id,base_requested,priority_requested,rent_requested,signer_operation_id,customer_artifact,budget_version)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING *`, [input.sponsorFinalizationId, head.intent_id, attempt.generation, tuple, tupleDigest, input.consentId, envelope.runtime.decisionId,
+          paymentRegistryId, feeRegistryId, budget.budget_id, attempt.requested_exposure_id, envelope.fee.maxBaseFee, envelope.fee.maxPriorityFee, envelope.fee.maxRent, randomUUID(), artifact, budget.budget_version])).rows[0];
         await client.query("UPDATE economic_attempts SET state='FINALIZATION_COMMITTED',finalization_id=$3 WHERE intent_id=$1 AND generation=$2", [head.intent_id, attempt.generation, input.sponsorFinalizationId]);
         // Recheck the wall clock after possible contention. All authority locks are still held.
         await loadAuthoritativeEvidence(client, envelope, input.consentId, this.policy, await databaseTime(client));
@@ -149,7 +162,7 @@ export class PostgresFinalizationRepository {
       await transaction(this.pool, async client => {
         const row = (await client.query("SELECT intent_id,generation FROM economic_attempts WHERE envelope_digest=$1", [input.envelopeDigest])).rows[0];
         if (row) await client.query(`INSERT INTO economic_callback_evidence(evidence_id,intent_id,generation,artifact_digest,artifact,validation)
-          VALUES($1,$2,$3,$4,$5,$6)`, [randomUUID(),row.intent_id,row.generation,sha256(artifact),artifact,verifiedCallback ? "CUSTOMER_VERIFIED" : "REJECTED"]);
+          VALUES($1,$2,$3,$4,$5,$6)`, [randomUUID(),row.intent_id,row.generation,sha256(artifact),artifact,callbackValidation]);
         await audit(client, { type: "CLAIM_REJECTED", actor: "finalization-service", intentId: row?.intent_id, generation: row?.generation, finalizationId: input.sponsorFinalizationId, reference: sha256(artifact) });
       });
       throw error;
@@ -157,13 +170,13 @@ export class PostgresFinalizationRepository {
   }
 
   private async assertBudget(client: PoolClient, budget: Row, envelope: EconomicIntentEnvelopeV1): Promise<void> {
-    // Consumed cost remains charged against this immutable budget. No automatic replenishment/reset.
+    // All versions share charged exposure; a new version never resets realized or outstanding costs.
     const sum = (await client.query(`SELECT
       COALESCE(sum(CASE WHEN exposure_state='CONSUMED' THEN base_consumed WHEN exposure_state IN ('RESERVED','UNCERTAIN') THEN base_requested ELSE 0 END),0)::text AS base,
       COALESCE(sum(CASE WHEN exposure_state='CONSUMED' THEN priority_consumed WHEN exposure_state IN ('RESERVED','UNCERTAIN') THEN priority_requested ELSE 0 END),0)::text AS priority,
       COALESCE(sum(CASE WHEN exposure_state='CONSUMED' THEN rent_consumed WHEN exposure_state IN ('RESERVED','UNCERTAIN') THEN rent_requested ELSE 0 END),0)::text AS rent,
       count(*) FILTER (WHERE exposure_state IN ('RESERVED','UNCERTAIN'))::integer AS outstanding
-      FROM economic_finalizations WHERE budget_id=$1`, [budget.budget_id])).rows[0];
+      FROM economic_finalizations WHERE budget_id IN (SELECT budget_id FROM economic_budget_versions WHERE family_id=$1)`, [budget.family_id])).rows[0];
     requireCondition(BigInt(sum.base) + BigInt(envelope.fee.maxBaseFee) <= BigInt(budget.base_limit) &&
       BigInt(sum.priority) + BigInt(envelope.fee.maxPriorityFee) <= BigInt(budget.priority_limit) &&
       BigInt(sum.rent) + BigInt(envelope.fee.maxRent) <= BigInt(budget.rent_limit) && sum.outstanding < budget.outstanding_limit, "Sponsor exposure budget exhausted.");
@@ -183,9 +196,11 @@ export class PostgresFinalizationRepository {
   }
 
   private async lockOperation(client: PoolClient, id: string): Promise<Row> {
-    const preliminary = (await client.query("SELECT budget_id FROM economic_finalizations WHERE finalization_id=$1", [id])).rows[0];
+    const preliminary = (await client.query("SELECT intent_id,budget_id FROM economic_finalizations WHERE finalization_id=$1", [id])).rows[0];
     requireCondition(preliminary, "Unknown finalization.");
-    // All accounting/result mutations serialize on budget BEFORE operation; no double-release/cross-operation overspend.
+    // Same lock domain/order as controlled contact, expiry and observer evidence insertion.
+    await client.query("SELECT intent_id FROM economic_attempt_heads WHERE intent_id=$1 FOR UPDATE",[preliminary.intent_id]);
+    await client.query("SELECT h.family_id FROM economic_budget_heads h JOIN economic_budget_versions v USING(family_id) WHERE v.budget_id=$1 FOR UPDATE OF h",[preliminary.budget_id]);
     await client.query("SELECT budget_id FROM economic_sponsor_budgets WHERE budget_id=$1 FOR UPDATE", [preliminary.budget_id]);
     return (await client.query("SELECT * FROM economic_finalizations WHERE finalization_id=$1 FOR UPDATE", [id])).rows[0];
   }
@@ -212,11 +227,11 @@ export class PostgresFinalizationRepository {
       if (row.signer_state !== "NOT_CONTACTED") return { row, contact: false };
       const attempt = (await client.query("SELECT envelope FROM economic_attempts WHERE intent_id=$1 AND generation=$2", [row.intent_id,row.generation])).rows[0];
       await loadAuthoritativeEvidence(client,attempt.envelope,row.consent_id,this.policy,await databaseTime(client));
-      const changed = (await client.query(`UPDATE economic_finalizations SET signer_state='CONTACT_COMMITTED',exposure_state='UNCERTAIN',updated_at=clock_timestamp(),version=version+1 WHERE finalization_id=$1 RETURNING *`, [id])).rows[0];
-      await audit(client, { type: "SIGNER_CONTACT_COMMITTED", actor: "signer-coordinator", intentId: row.intent_id, generation: row.generation, finalizationId: id, reference: row.signer_operation_id });
-      return { row: changed, contact: true };
+      const contact = (await client.query("SELECT economic_commit_signer_contact($1) AS granted",[id])).rows[0].granted as boolean;
+      const changed = (await client.query("SELECT * FROM economic_finalizations WHERE finalization_id=$1",[id])).rows[0];
+      return { row: changed, contact };
     });
-    if (["RESULT_AVAILABLE","REFUSED"].includes(committed.row.signer_state)) return operation(committed.row);
+    if (["RESULT_AVAILABLE","REFUSED","EXPIRED_NEVER_CONTACTED"].includes(committed.row.signer_state)) return operation(committed.row);
     const request = { operation: operation(committed.row), customerArtifact: Buffer.from(committed.row.customer_artifact) };
     let response: SignerResponse;
     try {
@@ -233,22 +248,27 @@ export class PostgresFinalizationRepository {
     }
   }
 
+  /** Atomic terminal transition/release. Replays do not update the row or append authority. */
+  async expireNeverContacted(id: string, actor = "expiry-worker"): Promise<DurableFinalization> {
+    uuid(id); machineId(actor);
+    return transaction(this.pool, async client => {
+      await client.query("SELECT economic_expire_never_contacted($1,$2)",[id,actor]);
+      return operation((await client.query("SELECT * FROM economic_finalizations WHERE finalization_id=$1",[id])).rows[0]);
+    });
+  }
+
   private async recordUnknown(id: string): Promise<DurableFinalization> {
     return transaction(this.pool, async client => {
-      const row = await this.lockOperation(client,id);
-      if (["REFUSED","RESULT_AVAILABLE"].includes(row.signer_state)) return operation(row);
-      requireCondition(["CONTACT_COMMITTED","RESULT_UNKNOWN"].includes(row.signer_state), "Signer not contacted.");
-      const result = (await client.query(`UPDATE economic_finalizations SET signer_state='RESULT_UNKNOWN',exposure_state='UNCERTAIN',updated_at=clock_timestamp(),version=version+1 WHERE finalization_id=$1 RETURNING *`, [id])).rows[0];
-      await audit(client, { type: "SIGNER_RESULT_UNKNOWN", actor: "signer-coordinator", intentId: row.intent_id, generation: row.generation, finalizationId: id, reference: row.exposure_id });
-      return operation(result);
+      await client.query("SELECT economic_record_signer_unknown($1)",[id]);
+      return operation((await client.query("SELECT * FROM economic_finalizations WHERE finalization_id=$1",[id])).rows[0]);
     });
   }
 
   private async acceptSignerResponse(id: string, response: SignerResponse): Promise<DurableFinalization> {
-    return transaction(this.pool, async client => {
+    return transaction(this.authorities!.signerResults, async client => {
       const row = await this.lockOperation(client,id), op = operation(row);
       requireCondition(response.signerOperationId === op.signerOperationId && response.tupleDigest === op.tupleDigest && response.sponsorKeyVersion === op.tuple.sponsorKeyVersion && sameNetworkV1(response.network,op.tuple.network), "Signer response identity/network conflict.");
-      requireCondition(row.signer_state !== "NOT_CONTACTED", "Missing signer-contact commitment.");
+      requireCondition(!["NOT_CONTACTED","EXPIRED_NEVER_CONTACTED"].includes(row.signer_state), "Missing signer-contact commitment.");
       if (response.state === "UNKNOWN") {
         if (["RESULT_AVAILABLE","REFUSED"].includes(row.signer_state)) return op;
         const changed = (await client.query(`UPDATE economic_finalizations SET signer_state='RESULT_UNKNOWN',updated_at=clock_timestamp(),version=version+1 WHERE finalization_id=$1 RETURNING *`, [id])).rows[0];
@@ -288,15 +308,17 @@ export class PostgresFinalizationRepository {
     if (evidence.state === "UNKNOWN") return (await this.find(id))!;
     requireCondition(evidence.state === "FINALIZED" && evidence.finalizationId === id && evidence.transactionId === snapshot.finalTransactionId && sameNetworkV1(evidence.network,snapshot.tuple.network), "Exposure observation binding mismatch.");
     machineId(evidence.reference); units(evidence.base); units(evidence.priority); units(evidence.rent);
+    const evidenceId = await transaction(this.authorities!.observerEvidence!, async client => {
+      const inserted = await client.query(`INSERT INTO economic_effect_evidence(evidence_id,finalization_id,kind,network,transaction_id,reference,base_consumed,priority_consumed,rent_consumed)
+        VALUES($1,$2,'FINALIZED_ACCOUNTING',$3,$4,$5,$6,$7,$8) ON CONFLICT(finalization_id,reference) DO NOTHING RETURNING evidence_id`,
+      [randomUUID(),id,evidence.network,evidence.transactionId,evidence.reference,evidence.base,evidence.priority,evidence.rent]);
+      const stored = (await client.query("SELECT * FROM economic_effect_evidence WHERE finalization_id=$1 AND reference=$2",[id,evidence.reference])).rows[0];
+      requireCondition(stored.kind === "FINALIZED_ACCOUNTING" && stored.transaction_id === evidence.transactionId && sameNetworkV1(stored.network,evidence.network) && stored.base_consumed === evidence.base && stored.priority_consumed === evidence.priority && stored.rent_consumed === evidence.rent,"Conflicting immutable accounting evidence.");
+      return inserted.rows[0]?.evidence_id ?? stored.evidence_id;
+    });
     return transaction(this.pool, async client => {
-      const row = await this.lockOperation(client,id);
-      if (row.exposure_state === "CONSUMED") {
-        requireCondition(row.accounting_reference === evidence.reference && row.base_consumed === evidence.base && row.priority_consumed === evidence.priority && row.rent_consumed === evidence.rent, "Conflicting immutable accounting evidence.");
-        return operation(row);
-      }
-      const changed = (await client.query(`UPDATE economic_finalizations SET exposure_state='CONSUMED',base_consumed=$2,priority_consumed=$3,rent_consumed=$4,accounting_reference=$5,updated_at=clock_timestamp(),version=version+1 WHERE finalization_id=$1 RETURNING *`, [id,evidence.base,evidence.priority,evidence.rent,evidence.reference])).rows[0];
-      await audit(client, { type: "EXPOSURE_CONSUMED", actor: "trusted-finalized-observer", finalizationId: id, reference: evidence.reference });
-      return operation(changed);
+      await client.query("SELECT economic_apply_finalized_accounting($1,$2)",[id,evidenceId]);
+      return operation((await client.query("SELECT * FROM economic_finalizations WHERE finalization_id=$1",[id])).rows[0]);
     });
   }
 }

@@ -1,6 +1,6 @@
 import type { NetworkDomainV1, SponsorFinalizationTupleV1 } from "zephyon-protocol";
 
-export type SignerState = "NOT_CONTACTED" | "CONTACT_COMMITTED" | "RESULT_UNKNOWN" | "REFUSED" | "RESULT_AVAILABLE";
+export type SignerState = "NOT_CONTACTED" | "CONTACT_COMMITTED" | "RESULT_UNKNOWN" | "REFUSED" | "RESULT_AVAILABLE" | "EXPIRED_NEVER_CONTACTED";
 export type DurableFinalization = Readonly<{
   sponsorFinalizationId: string;
   tuple: SponsorFinalizationTupleV1;
@@ -8,6 +8,8 @@ export type DurableFinalization = Readonly<{
   signerOperationId: string;
   signerState: SignerState;
   exposureState: "RESERVED" | "UNCERTAIN" | "RELEASED" | "CONSUMED";
+  budgetId: string;
+  budgetVersion: string;
   requested: { base: string; priority: string; rent: string };
   consumed?: { base: string; priority: string; rent: string; reference: string };
   artifactReference?: string;
