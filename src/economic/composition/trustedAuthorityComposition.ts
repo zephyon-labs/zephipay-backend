@@ -67,7 +67,7 @@ export async function createTrustedAuthorityComposition(input: {
       await readiness();
       const state=(await db.reader.query("SELECT * FROM economic_authority_trace WHERE finalization_id=$1",[id])).rows[0];
       const events=(await db.reader.query("SELECT * FROM economic_authority_events WHERE finalization_id=$1 OR (intent_id=$2 AND generation=$3) ORDER BY event_id",[id,state?.intent_id,state?.generation])).rows;
-      const reports=(await db.reader.query("SELECT * FROM economic_observer_reports WHERE finalization_id=$1 ORDER BY occurred_at,report_id",[id])).rows;
+      const reports=(await db.reader.query("SELECT * FROM economic_observer_report_summary WHERE finalization_id=$1 ORDER BY occurred_at,report_id",[id])).rows;
       const incidents=(await db.reader.query("SELECT * FROM economic_authority_incidents WHERE finalization_id=$1 ORDER BY occurred_at,incident_id",[id])).rows;
       const expiry=(await db.reader.query("SELECT * FROM economic_expiry_records WHERE finalization_id=$1",[id])).rows[0];
       const signerReports=(await db.reader.query("SELECT * FROM economic_signer_report_summary WHERE finalization_id=$1 ORDER BY occurred_at,report_id",[id])).rows;

@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { after, before, beforeEach, test } from "node:test";
@@ -250,7 +252,7 @@ test("conflicting signer callback retains evidence and freezes further exposure 
 
 for(const outcome of ["settled","failed-onchain"] as const)test(`finalized authoritative ${outcome} records actual exposure without conflating signing with settlement`,async()=>{
   const p=await signed();const plan=await observerPlan(p.id,{outcome});const worker=await make({observerPlan:plan.planId});await worker.observe(p.id);
-  const trace=await worker.trace(p.id);assert.equal(trace.reports[0].report.outcome,outcome);assert.equal(trace.state.base_consumed,"8000");assert.equal(trace.state.exposure_state,"CONSUMED");
+  const trace=await worker.trace(p.id);assert.equal(trace.reports[0].outcome,outcome);assert.equal(trace.state.base_consumed,"8000");assert.equal(trace.state.exposure_state,"CONSUMED");
 });
 
 for(const change of [{transactionId:"wrong-transaction"},{network:{family:"solana",environment:"mainnet",genesisHash:"wrong"}},{sourceId:"untrusted-observer"},{finalizationId:randomUUID()},{state:"garbage"}])test(`observer contradiction ${Object.keys(change)[0]} is retained and grants no accounting`,async()=>{
@@ -470,4 +472,114 @@ for(const kind of ["session","runtime"] as const)test(`expired ${kind} rejects c
   }
   await new Promise(resolve=>setTimeout(resolve,Math.max(0,deadline-Date.now()+20)));
   await assert.rejects(()=>composition.claim(p.claim),/stale|expired|unauthenticated/i);assert.equal(await count("economic_finalizations"),0);assert.equal(await count("economic_signer_contact_authority"),0);
+});
+
+
+// No handler, validator, connection options or user mapping: catalog-only FDW fixtures cannot read external data.
+async function withInertForeign(action:(relation:string)=>Promise<void>,options:{schema?:string;name?:string;empty?:boolean}={}) {
+  const schema=options.schema??"public",name=options.name??"composition_acl_foreign",relation=`${schema}.${name}`;
+  if(schema!=="public")await pool.query(`CREATE SCHEMA ${schema}`);
+  await pool.query(`CREATE FOREIGN DATA WRAPPER composition_inert NO HANDLER NO VALIDATOR;
+    CREATE SERVER composition_inert FOREIGN DATA WRAPPER composition_inert;
+    CREATE FOREIGN TABLE ${relation} (${options.empty?"":"payload text"}) SERVER composition_inert`);
+  try {
+    const fdw=(await pool.query("SELECT fdwhandler,fdwvalidator,fdwoptions FROM pg_foreign_data_wrapper WHERE fdwname='composition_inert'")).rows[0];
+    assert.equal(fdw.fdwhandler,0);assert.equal(fdw.fdwvalidator,0);assert.equal(fdw.fdwoptions,null);
+    await composition.readiness(); // Mere inert existence with no operational/PUBLIC grants is not drift.
+    await action(relation);
+  } finally {
+    await pool.query(`DROP FOREIGN TABLE ${relation}; DROP SERVER composition_inert; DROP FOREIGN DATA WRAPPER composition_inert`);
+    if(schema!=="public")await pool.query(`DROP SCHEMA ${schema}`);
+  }
+  await composition.readiness();
+}
+async function checkLoginCommand(role:typeof roleNames[number],shouldPass:boolean) {
+  const connection=new URL(url!);
+  connection.searchParams.set("user",`composition_fixture_${role}`);
+  connection.searchParams.set("password","disposable-economic-fixture-only");
+  try {
+    const result=await promisify(execFile)("npm",["run","db:economic:verify","--",role,"--synthetic-fixtures"],{
+      env:{...process.env,DATABASE_URL:connection.toString()},timeout:20_000,maxBuffer:32768});
+    assert.equal(shouldPass,true,"standalone checker accepted ACL drift");assert.match(result.stdout,/login readiness passed/);
+  } catch(error:any) {
+    if(shouldPass)throw error;
+    assert.equal(error.code,1);assert.match(error.stderr,/Economic ACL readiness failed/);
+  }
+}
+async function rejectsAclDrift(role:typeof roleNames[number],standalone=false) {
+  await assert.rejects(()=>verifyAuthorityLogin(connections[role],role,{syntheticFixtures:true}),/ACL readiness failed/);
+  await assert.rejects(()=>composition.readiness(),/ACL readiness failed/);
+  await assert.rejects(()=>make(),/ACL readiness failed/);
+  if(standalone)await checkLoginCommand(role,false);
+}
+
+for(const privilege of ["SELECT","INSERT","UPDATE","DELETE","TRUNCATE","REFERENCES","TRIGGER"])test(`AUD-TAC-01: foreign-table ${privilege} drift fails actual reader LOGIN and composition`,async()=>{
+  await withInertForeign(async relation=>{
+    await pool.query(`GRANT ${privilege} ON ${relation} TO composition_fixture_reader`);
+    await rejectsAclDrift("reader",privilege==="SELECT"||privilege==="UPDATE");
+    assert.equal((await readerPool.query("SELECT has_table_privilege(current_user,$1,$2) AS granted",[relation,privilege])).rows[0].granted,true,"readiness must not repair grants");
+  });
+});
+for(const privilege of ["SELECT","INSERT","UPDATE","REFERENCES"])test(`AUD-TAC-01: foreign-table column ${privilege} is checked`,async()=>{
+  await withInertForeign(async relation=>{await pool.query(`GRANT ${privilege}(payload) ON ${relation} TO composition_fixture_reader`);await rejectsAclDrift("reader");});
+});
+for(const role of roleNames)test(`AUD-TAC-01: foreign-table ownership by ${role} LOGIN fails readiness`,async()=>{
+  await withInertForeign(async relation=>{await pool.query(`ALTER FOREIGN TABLE ${relation} OWNER TO composition_fixture_${role}`);await rejectsAclDrift(role,role==="reader");});
+});
+for(const privilege of ["SELECT","UPDATE"])test(`AUD-TAC-01: foreign-table PUBLIC ${privilege} fails verifier, CLI and composition`,async()=>{
+  await withInertForeign(async relation=>{await pool.query(`GRANT ${privilege} ON ${relation} TO PUBLIC`);await rejectsAclDrift("reader",true);});
+});
+test("AUD-TAC-01: PUBLIC foreign-column write and inherited ownership cannot escape inventory",async()=>{
+  await withInertForeign(async relation=>{
+    await pool.query(`GRANT UPDATE(payload) ON ${relation} TO PUBLIC`);await rejectsAclDrift("reader");
+    await pool.query(`REVOKE UPDATE(payload) ON ${relation} FROM PUBLIC; ALTER FOREIGN TABLE ${relation} OWNER TO zephipay_economic_reader`);
+    await rejectsAclDrift("reader");
+  });
+});
+test("AUD-TAC-01: same-name foreign relation in another user schema cannot borrow the public allowlist",async()=>{
+  await withInertForeign(async relation=>{await pool.query(`GRANT SELECT ON ${relation} TO composition_fixture_reader`);await rejectsAclDrift("reader");},{schema:"pgscope",name:"economic_authority_trace"});
+});
+test("AUD-TAC-01: zero-column foreign tables retain PUBLIC and ownership checks",async()=>{
+  await withInertForeign(async relation=>{
+    await pool.query(`GRANT SELECT ON ${relation} TO PUBLIC`);await rejectsAclDrift("reader");
+    await pool.query(`REVOKE SELECT ON ${relation} FROM PUBLIC; ALTER FOREIGN TABLE ${relation} OWNER TO composition_fixture_reader`);await rejectsAclDrift("reader");
+  },{empty:true});
+});
+
+for(const [kind,definition] of [["TABLE","(payload text)"],["TABLE","(payload text) PARTITION BY LIST(payload)"],["VIEW","AS SELECT 'inert'::text AS payload"],["MATERIALIZED VIEW","AS SELECT 'inert'::text AS payload"]])test(`AUD-TAC-01 regression: ${kind} ${definition.includes("PARTITION")?"partitioned ":""}grant and ownership drift still fails`,async()=>{
+  const relation="public.composition_acl_ordinary";await pool.query(`CREATE ${kind} ${relation} ${definition}`);
+  try {
+    await pool.query(`GRANT SELECT ON ${relation} TO composition_fixture_reader`);await rejectsAclDrift("reader");
+    await pool.query(`REVOKE SELECT ON ${relation} FROM composition_fixture_reader; ALTER ${kind} ${relation} OWNER TO composition_fixture_reader`);await rejectsAclDrift("reader");
+  } finally {await pool.query(`DROP ${kind} ${relation}`);}
+  await composition.readiness();
+});
+test("AUD-TAC-01: standalone command passes all five unchanged restricted LOGINs",async()=>{
+  for(const role of roleNames)await checkLoginCommand(role,true);
+});
+
+test("AUD-TAC-02: reader summary omits extra observer payload while forensic evidence stays intact",async()=>{
+  const p=await signed();const extras={rawArtifact:"inert-artifact-canary",credentials:{token:"inert-credential-canary"},tokens:["inert-token-canary"],providerPayload:{nested:"inert-provider-canary"}};
+  const plan=await observerPlan(p.id,extras),worker=await make({observerPlan:plan.planId});await worker.observe(p.id);
+  const trace=await worker.trace(p.id),summary=trace.reports[0];
+  assert.equal(summary.observation_state,"FINALIZED");assert.equal(summary.outcome,"settled");assert.equal(summary.base_consumed,"8000");
+  assert.equal(summary.transaction_id,(await repo.find(p.id))?.finalTransactionId);assert.equal(summary.network_genesis_hash,plan.report.network.genesisHash);
+  assert.deepEqual(Object.keys(summary).sort(),["report_id","finalization_id","report_digest","disposition","effect_evidence_id","database_actor","occurred_at","source_id","reference","observation_state","transaction_id","outcome","network_family","network_environment","network_genesis_hash","base_consumed","priority_consumed","rent_consumed"].sort());
+  const forensic=(await observerPool.query("SELECT report FROM economic_observer_reports WHERE report_id=$1",[summary.report_id])).rows[0].report;
+  assert.deepEqual(forensic,plan.report);assert.deepEqual((await pool.query("SELECT report FROM economic_observer_reports WHERE report_id=$1",[summary.report_id])).rows[0].report,forensic);
+  assert(!JSON.stringify(trace).includes("-canary"));
+  for(const db of [readerPool,appPool])await assert.rejects(()=>db.query("SELECT report FROM economic_observer_reports WHERE report_id=$1",[summary.report_id]),{code:"42501"});
+  assert.equal(trace.state.exposure_state,"CONSUMED");
+});
+test("AUD-TAC-02: malformed nested or oversized allowed fields do not leak into reader projection",async()=>{
+  const p=await signed();const plan=await observerPlan(p.id,{state:"UNKNOWN",transactionId:{rawArtifact:"nested-transaction-canary"},network:{family:{token:"nested-family-canary"},environment:"x".repeat(100),genesisHash:{token:"nested-network-canary"}},base:{token:"nested-cost-canary"}});
+  const worker=await make({observerPlan:plan.planId});assert.equal((await worker.observe(p.id)).disposition,"INCIDENT");
+  const trace=await worker.trace(p.id),summary=trace.reports[0];
+  for(const field of ["transaction_id","network_family","network_environment","network_genesis_hash","base_consumed"])assert.equal(summary[field],null);
+  assert(!JSON.stringify(trace).includes("-canary"));assert.equal((await observerPool.query("SELECT report FROM economic_observer_reports WHERE report_id=$1",[summary.report_id])).rows[0].report.transactionId.rawArtifact,"nested-transaction-canary");
+});
+
+
+test("AUD-TAC-01: quoted foreign-table name cannot impersonate an allowed synthetic-schema relation",async()=>{
+  await withInertForeign(async relation=>{await pool.query(`GRANT SELECT ON ${relation} TO composition_fixture_signer`);await rejectsAclDrift("signer");},{name:'"economic_synthetic.signer_plans"'});
 });

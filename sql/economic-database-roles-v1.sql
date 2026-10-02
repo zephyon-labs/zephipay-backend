@@ -3,8 +3,8 @@
 BEGIN;
 SELECT pg_advisory_xact_lock(827346192045711002);
 DO $$ DECLARE role_name text; r record; BEGIN
-  IF NOT EXISTS(SELECT 1 FROM payment_schema_migrations WHERE version='025_trusted_authority_composition.sql') THEN
-    RAISE EXCEPTION 'migration 025 required before role provisioning';
+  IF NOT EXISTS(SELECT 1 FROM payment_schema_migrations WHERE version='026_observer_report_summary.sql') THEN
+    RAISE EXCEPTION 'migration 026 required before role provisioning';
   END IF;
   FOREACH role_name IN ARRAY ARRAY['zephipay_economic_admin','zephipay_economic_app','zephipay_economic_issuer','zephipay_economic_signer','zephipay_economic_observer','zephipay_economic_reader'] LOOP
     IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname=role_name) THEN
@@ -26,7 +26,7 @@ DO $$ DECLARE name text; f record; BEGIN
     'economic_consent_evidence','economic_runtime_evidence','economic_sponsor_budgets','economic_finalizations','economic_authority_events',
     'economic_callback_evidence','economic_exposure_projection','economic_session_bindings','economic_budget_heads','economic_budget_versions',
     'economic_signer_contact_authority','economic_expiry_records','economic_effect_evidence','economic_observer_operations',
-    'economic_authority_incidents','economic_observer_reports','economic_authority_trace','economic_signer_reports','economic_signer_report_summary'] LOOP
+    'economic_observer_report_summary','economic_authority_incidents','economic_observer_reports','economic_authority_trace','economic_signer_reports','economic_signer_report_summary'] LOOP
     EXECUTE format('ALTER TABLE public.%I OWNER TO zephipay_economic_admin',name);
     EXECUTE format('REVOKE ALL ON public.%I FROM PUBLIC,zephipay_economic_app,zephipay_economic_issuer,zephipay_economic_signer,zephipay_economic_observer,zephipay_economic_reader',name);
     -- REVOKE table privileges does not revoke previously granted column privileges.
@@ -51,7 +51,8 @@ GRANT SELECT ON economic_signer_report_summary TO zephipay_economic_reader;
 GRANT EXECUTE ON FUNCTION economic_record_signer_conflict(uuid,jsonb,bytea) TO zephipay_economic_signer;
 GRANT SELECT ON account_security_events TO zephipay_economic_admin;
 GRANT SELECT ON economic_authority_incidents TO zephipay_economic_app,zephipay_economic_signer,zephipay_economic_observer,zephipay_economic_reader;
-GRANT SELECT ON economic_observer_reports TO zephipay_economic_app,zephipay_economic_observer,zephipay_economic_reader;
+GRANT SELECT ON economic_observer_reports TO zephipay_economic_observer;
+GRANT SELECT ON economic_observer_report_summary TO zephipay_economic_app,zephipay_economic_reader;
 GRANT SELECT ON economic_authority_trace TO zephipay_economic_app,zephipay_economic_reader;
 GRANT EXECUTE ON FUNCTION economic_record_incident(uuid,text,text) TO zephipay_economic_app,zephipay_economic_signer,zephipay_economic_observer;
 GRANT EXECUTE ON FUNCTION economic_ingest_observation(uuid,text,jsonb) TO zephipay_economic_observer;

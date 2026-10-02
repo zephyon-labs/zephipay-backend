@@ -1,6 +1,6 @@
 # Trusted session and restricted authority composition V1 — audit handoff
 
-Date: 2026-10-02. Backend-only, local Phase B candidate. Architecture and limitations are in [trusted-authority-composition-v1.md](trusted-authority-composition-v1.md). Phase B has not been pushed, opened as a PR, merged or deployed.
+Date: 2026-10-02. Historical handoff for original candidate `a3196f113a580d07cf0ed9efeda05edbbc2f6c33`. The independent audit returned **REVISE BEFORE MERGE** for AUD-TAC-01 (P2), with AUD-TAC-02 (P3). The current correction and validation are recorded in [ACL focused re-audit handoff](trusted-authority-composition-v1-acl-reaudit.md). Backend-only, local Phase B candidate. Architecture and limitations are in [trusted-authority-composition-v1.md](trusted-authority-composition-v1.md). Phase B has not been pushed, opened as a PR, merged or deployed.
 
 ## Phase A protected closure
 
@@ -55,4 +55,4 @@ Commands: `npm run lint`, `npm run build`, `npm test`, `npm run migrate:validate
 
 Evidence retained locally in `/tmp/authority-composition-*`: `focused-final.log`, `prior94.log`, `postgres-full.log`, `unit.log`, `lint.log`, `build.log`, `migration-validation.log`, fresh migration/role logs, `upgrade-migrate.log`, `upgrade-repeat.log`, `upgrade-roles.log`, `upgrade-roles-repeat.log`, `upgrade-evidence.json`, race logs, CLI verification logs and `canonical-boundaries.json`. The final audit manifest supplies commit/patch fingerprints and validation log hashes without embedding credentials or fixture artifacts.
 
-Final verdict: **READY FOR INDEPENDENT AUDIT**. Stop here; Phase B remains a local candidate, without push, PR, merge or deployment.
+Original pre-audit handoff verdict: **READY FOR INDEPENDENT AUDIT** (superseded by the audit findings and focused correction linked above). Stop here; Phase B remains a local candidate, without push, PR, merge or deployment.

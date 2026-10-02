@@ -17,7 +17,7 @@ export async function verifyAuthorityLogin(pool: Pool, role: EconomicAuthorityRo
       SELECT rolname,rolcanlogin,rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls FROM pg_roles WHERE oid IN (SELECT oid FROM memberships)`)).rows;
     if (membership.length !== 1 || membership[0].rolname !== `zephipay_economic_${role}` || membership.some(r=>[r.rolcanlogin,r.rolsuper,r.rolcreatedb,r.rolcreaterole,r.rolreplication,r.rolbypassrls].some(Boolean))) problems.push("unexpected inherited role or missing intended group");
     const schemas = (await client.query(`SELECT nspname,pg_has_role(current_user,nspowner,'MEMBER') AS owner,has_schema_privilege(current_user,oid,'CREATE') AS can_create
-      FROM pg_namespace WHERE nspname NOT LIKE 'pg_%' AND nspname<>'information_schema'`)).rows;
+      FROM pg_namespace WHERE nspname !~ '^pg_' AND nspname<>'information_schema'`)).rows;
     if (schemas.some(s=>s.owner || s.can_create)) problems.push("schema ownership or CREATE privilege");
     if ((await client.query("SELECT pg_has_role(current_user,datdba,'MEMBER') AS owner FROM pg_database WHERE datname=current_database()")).rows[0].owner) problems.push("database ownership");
     const tables:TablePolicy = {...expected.tables};
@@ -25,31 +25,41 @@ export async function verifyAuthorityLogin(pool: Pool, role: EconomicAuthorityRo
       if(role==="signer") { tables["economic_synthetic.signer_plans"]={SELECT:["*"]};tables["economic_synthetic.signer_operations"]={SELECT:["*"],INSERT:["*"]}; }
       if(role==="observer") tables["economic_synthetic.observer_plans"]={SELECT:["*"]};
     }
-    const columns = (await client.query(`SELECT CASE WHEN n.nspname='public' THEN c.relname ELSE n.nspname||'.'||c.relname END AS relname,a.attname,pg_has_role(current_user,c.relowner,'MEMBER') AS owner,
-      has_column_privilege(current_user,c.oid,a.attnum,'SELECT') AS s,has_column_privilege(current_user,c.oid,a.attnum,'INSERT') AS i,
-      has_column_privilege(current_user,c.oid,a.attnum,'UPDATE') AS u,has_column_privilege(current_user,c.oid,a.attnum,'REFERENCES') AS r,
+    // Policy names are fixed identifiers. Keep actual catalog schema/name pairs separate so a
+    // quoted public name containing a dot cannot impersonate an allowed relation in another schema.
+    const relationKey=(schema:string,name:string)=>JSON.stringify([schema,name]);
+    const tablePolicies=new Map(Object.entries(tables).map(([name,policy])=>{
+      const dot=name.indexOf(".");return [relationKey(dot<0?"public":name.slice(0,dot),dot<0?name:name.slice(dot+1)),policy] as const;
+    }));
+    // Current database, every non-system schema; no foreign data is read. A zero-column relation
+    // retains one inventory row so ownership and table/PUBLIC grants cannot disappear from the scan.
+    const columns = (await client.query(`SELECT n.nspname AS schema_name,c.relname AS relation_name,format('%I.%I',n.nspname,c.relname) AS relname,a.attname,pg_has_role(current_user,c.relowner,'MEMBER') AS owner,
+      CASE WHEN a.attnum IS NULL THEN has_table_privilege(current_user,c.oid,'SELECT') ELSE has_column_privilege(current_user,c.oid,a.attnum,'SELECT') END AS s,
+      CASE WHEN a.attnum IS NULL THEN has_table_privilege(current_user,c.oid,'INSERT') ELSE has_column_privilege(current_user,c.oid,a.attnum,'INSERT') END AS i,
+      CASE WHEN a.attnum IS NULL THEN has_table_privilege(current_user,c.oid,'UPDATE') ELSE has_column_privilege(current_user,c.oid,a.attnum,'UPDATE') END AS u,
+      CASE WHEN a.attnum IS NULL THEN has_table_privilege(current_user,c.oid,'REFERENCES') ELSE has_column_privilege(current_user,c.oid,a.attnum,'REFERENCES') END AS r,
       has_table_privilege(current_user,c.oid,'DELETE') OR has_table_privilege(current_user,c.oid,'TRUNCATE') OR has_table_privilege(current_user,c.oid,'TRIGGER') AS forbidden,
       EXISTS(SELECT 1 FROM aclexplode(COALESCE(c.relacl,acldefault('r',c.relowner))) x WHERE x.grantee=0) OR
       EXISTS(SELECT 1 FROM aclexplode(a.attacl) x WHERE x.grantee=0) AS public_grant
-      FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_attribute a ON a.attrelid=c.oid
-      WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname<>'information_schema' AND c.relkind IN ('r','p','v','m') AND a.attnum>0 AND NOT a.attisdropped LIMIT 20001`)).rows;
+      FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace LEFT JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
+      WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema' AND c.relkind IN ('r','p','v','m','f') LIMIT 20001`)).rows;
     if (columns.length>20000) problems.push("catalog verification bound exceeded");
     const seen = new Set<string>();
     for (const c of columns) {
-      seen.add(c.relname);
+      const qualified=relationKey(c.schema_name,c.relation_name);seen.add(qualified);
       if (c.owner || c.forbidden || c.public_grant) problems.push(`unsafe ownership/write/PUBLIC privilege: ${c.relname}`);
       for (const [name,key] of [["SELECT","s"],["INSERT","i"],["UPDATE","u"],["REFERENCES","r"]] as const) {
-        const allowed=tables[c.relname]?.[name] ?? [];
+        const allowed=tablePolicies.get(qualified)?.[name] ?? [];
         if (c[key] !== (allowed.includes("*") || allowed.includes(c.attname))) problems.push(`grant mismatch: ${c.relname}.${c.attname}:${name}`);
       }
     }
-    for (const table of Object.keys(tables)) if (!seen.has(table)) problems.push(`required table missing: ${table}`);
+    for (const table of tablePolicies.keys()) if (!seen.has(table)) problems.push(`required table missing: ${table}`);
     const functions = (await client.query(`SELECT p.oid::regprocedure::text AS signature,p.proname,p.prosecdef,
       pg_has_role(current_user,p.proowner,'MEMBER') AS owner,has_function_privilege(current_user,p.oid,'EXECUTE') AS executable,
       EXISTS(SELECT 1 FROM aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) x WHERE x.grantee=0 AND x.privilege_type='EXECUTE') AS public_execute,
       p.proconfig,owner.rolname AS owner_name
       FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_roles owner ON owner.oid=p.proowner
-      WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname<>'information_schema' AND ((n.nspname='public' AND p.proname LIKE 'economic_%') OR p.prosecdef)`)).rows;
+      WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema' AND ((n.nspname='public' AND p.proname LIKE 'economic_%') OR p.prosecdef)`)).rows;
     const required = new Set<string>(expected.functions);
     for (const f of functions) {
       const signature = f.signature.replace(/^public\./,"");
@@ -63,7 +73,7 @@ export async function verifyAuthorityLogin(pool: Pool, role: EconomicAuthorityRo
       has_sequence_privilege(current_user,c.oid,'SELECT') OR has_sequence_privilege(current_user,c.oid,'UPDATE') AS other,
       pg_has_role(current_user,c.relowner,'MEMBER') AS owner,
       EXISTS(SELECT 1 FROM aclexplode(COALESCE(c.relacl,acldefault('S',c.relowner))) a WHERE a.grantee=0) AS public_grant
-      FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname<>'information_schema' AND c.relkind='S'`)).rows) {
+      FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname !~ '^pg_' AND n.nspname<>'information_schema' AND c.relkind='S'`)).rows) {
       remainingSequences.delete(s.relname);
       if(s.usage!==Boolean(sequences[s.relname]?.USAGE) || s.other || s.owner || s.public_grant) problems.push(`sequence authority mismatch: ${s.relname}`);
     }

@@ -3,7 +3,7 @@ export const authorityPrivilegePolicy = {
   app: {
     tables: {
       "economic_authority_incidents": {"SELECT":["*"]},
-      "economic_observer_reports": {"SELECT":["*"]},
+      "economic_observer_report_summary": {"SELECT":["*"]},
       "economic_authority_trace": {"SELECT":["*"]},
       "accounts": {"SELECT":["*"],"UPDATE":["account_id"]},
       "account_sessions": {"SELECT":["*"],"UPDATE":["session_id"]},
@@ -84,7 +84,7 @@ export const authorityPrivilegePolicy = {
     tables: {
       "economic_signer_report_summary": {"SELECT":["*"]},
       "economic_authority_incidents": {"SELECT":["*"]},
-      "economic_observer_reports": {"SELECT":["*"]},
+      "economic_observer_report_summary": {"SELECT":["*"]},
       "economic_authority_trace": {"SELECT":["*"]},
       "economic_observer_operations": {"SELECT":["*"]},
       "economic_exposure_projection": {"SELECT":["*"]},
