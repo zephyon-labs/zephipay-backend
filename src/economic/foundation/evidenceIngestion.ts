@@ -1,3 +1,4 @@
+import type { ProviderConsentGate } from "../provider/providerSessionAuthority";
 import { randomUUID } from "node:crypto";
 import express, { type ErrorRequestHandler, type Router } from "express";
 import type { Pool, PoolClient } from "pg";
@@ -64,20 +65,25 @@ export async function loadAuthoritativeEvidence(client: PoolClient, envelope: Ec
 }
 
 /** Factory creates an UNMOUNTED, authenticated raw transport seam. It cannot accept a caller-created principal. */
-export function createEconomicEvidenceIngestion(pool: Pool, configuration: EvidencePolicy, runtime: TrustedRuntimeIssuer): {
+export function createEconomicEvidenceIngestion(pool: Pool, configuration: EvidencePolicy, runtime: TrustedRuntimeIssuer, providerGate?: ProviderConsentGate): {
   consentRouter: Router;
   issueRuntimeDecision(envelopeDigest: string): Promise<void>;
   revoke(kind: "consent" | "runtime", id: string): Promise<void>;
 } {
   const policy = validateEvidencePolicy(configuration), router = express.Router();
-  router.post("/", ...createAuthPipeline(policy.auth), express.raw({ type: "application/json", limit: "32kb", inflate: false }), async (req, res) => {
-    const body = exactObject(parseEconomicJson(req.body), ["envelopeDigest"]);
+  if(providerGate) requireCondition(providerGate.verifier.contract.issuer===policy.auth.issuer && providerGate.verifier.contract.audience===policy.auth.audience &&
+    providerGate.verifier.contract.context==="zephipay-economic-consent-v1" && providerGate.verifier.contract.actions.consent.scope===policy.auth.requiredScope,"Provider/evidence contract mismatch.");
+  router.post("/", ...(providerGate ? [] : createAuthPipeline(policy.auth)), express.raw({ type: "application/json", limit: "32kb", inflate: false }), async (req, res) => {
+    const body = exactObject(parseEconomicJson(req.body), providerGate ? ["envelopeDigest","accountVersion"] : ["envelopeDigest"]);
     requireCondition(typeof body.envelopeDigest === "string" && /^[a-f0-9]{64}$/.test(body.envelopeDigest), "Invalid envelope reference.");
-    const principal = externalPrincipalFrom(res), claims = req.auth!.payload;
-    const expiry = claims.exp, issued = claims.iat;
-    requireCondition(typeof expiry === "number" && Number.isSafeInteger(expiry) && typeof issued === "number" && Number.isSafeInteger(issued), "Authentication validity required.");
     const token = req.headers.authorization;
     requireCondition(typeof token === "string" && /^Bearer /i.test(token), "Bearer authentication required.");
+    if(providerGate) await providerGate.readiness();
+    const proof = providerGate ? await providerGate.verify(token.slice(7)) : undefined;
+    const principal = proof ? {issuer:proof.issuer,providerSubject:proof.subject,providerSessionId:proof.session} : externalPrincipalFrom(res);
+    const expiry = proof ? providerGate!.verifier.eligibleUntil(proof) : req.auth!.payload.exp, issued = proof ? proof.issuedAt : req.auth!.payload.iat;
+    requireCondition(typeof expiry === "number" && Number.isSafeInteger(expiry) && typeof issued === "number" && Number.isSafeInteger(issued), "Authentication validity required.");
+    if(providerGate) requireCondition(typeof body.accountVersion === "string", "Canonical version required.");
     const consentId = await transaction(pool, async client => {
       const envelope = await loadEnvelope(client, body.envelopeDigest as string);
       const identity = (await client.query(`SELECT a.actor_subject FROM external_identities e JOIN accounts a USING(account_id)
@@ -85,6 +91,7 @@ export function createEconomicEvidenceIngestion(pool: Pool, configuration: Evide
       requireCondition(identity?.actor_subject === envelope.principal.id, "Authenticated subject does not own envelope.");
       await assertActivePrincipal(client, envelope.principal.id);
       const session = await lockEconomicSession(client, { issuer: principal.issuer, subject: principal.providerSubject, providerSession: principal.providerSessionId, principalId: envelope.principal.id, authenticatedAt: new Date(issued * 1000).toISOString() });
+      if(providerGate && proof) await providerGate.consume(client,proof,{accountVersion:body.accountVersion as string,principalId:envelope.principal.id,sessionId:session.sessionId,envelopeDigest:body.envelopeDigest as string});
       const now = await databaseTime(client), validUntil = new Date(Math.min(expiry * 1000, Date.parse(envelope.expiresAt), Date.parse(session.expiresAt))).toISOString();
       requireCondition(now >= envelope.createdAt && now < validUntil && issued * 1000 <= Date.parse(now), "Expired or premature confirmation.");
       const id = randomUUID();
