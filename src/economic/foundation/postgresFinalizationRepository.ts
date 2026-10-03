@@ -12,6 +12,8 @@ import { EvidencePolicy, assertActivePrincipal, loadAuthoritativeEvidence, valid
 import { DurableFinalization, SignerResponse, TrustedExposureObserver, TrustedSignerPort } from "./finalizationTypes";
 import { qualifyAsset } from "./trustedRegistry";
 
+class SignerEvidenceConflict extends Error {}
+function signerEvidence(condition: unknown, message: string): asserts condition { if (!condition) throw new SignerEvidenceConflict(message); }
 type Row = Record<string, any>;
 type Claim = Readonly<{ sponsorFinalizationId: string; envelopeDigest: string; consentId: string; customerArtifact: Uint8Array }>;
 
@@ -163,6 +165,10 @@ export class PostgresFinalizationRepository {
         const row = (await client.query("SELECT intent_id,generation FROM economic_attempts WHERE envelope_digest=$1", [input.envelopeDigest])).rows[0];
         if (row) await client.query(`INSERT INTO economic_callback_evidence(evidence_id,intent_id,generation,artifact_digest,artifact,validation)
           VALUES($1,$2,$3,$4,$5,$6)`, [randomUUID(),row.intent_id,row.generation,sha256(artifact),artifact,callbackValidation]);
+        if(row && ["REJECTED","SPONSOR_RESULT_PRESENT"].includes(callbackValidation)) {
+          const finalization=(await client.query("SELECT finalization_id FROM economic_finalizations WHERE intent_id=$1 AND generation=$2",[row.intent_id,row.generation])).rows[0];
+          if(finalization)await client.query("SELECT economic_record_incident($1,'CALLBACK_CONTRADICTION',$2)",[finalization.finalization_id,sha256(artifact)]);
+        }
         await audit(client, { type: "CLAIM_REJECTED", actor: "finalization-service", intentId: row?.intent_id, generation: row?.generation, finalizationId: input.sponsorFinalizationId, reference: sha256(artifact) });
       });
       throw error;
@@ -243,7 +249,22 @@ export class PostgresFinalizationRepository {
     try { return await this.acceptSignerResponse(id, response); }
     catch (error) {
       await this.recordUnknown(id);
-      await transaction(this.pool, client => audit(client, { type: "SIGNER_RESULT_CONFLICT", actor: "signer-coordinator", finalizationId: id, reference: request.operation.signerOperationId }));
+      if(error instanceof SignerEvidenceConflict) {
+        const metadata:Record<string,unknown>={};
+        for(const key of ["signerOperationId","tupleDigest","network","sponsorKeyVersion","state","reference"]) {
+          const value=(response as any)?.[key];
+          let serialized:string;
+          try {serialized=typeof value==="string"?value:JSON.stringify(value)??"null";} catch {serialized="[non-JSON adapter value]";}
+          // Keep even heavily escaped malformed fields within the bounded incident record.
+          metadata[key]={excerpt:serialized.slice(0,64),digest:sha256(Buffer.from(serialized))};
+        }
+        const artifact=(response as any)?.artifact;
+        if(artifact instanceof Uint8Array){metadata.artifactDigest=sha256(artifact);metadata.artifactLength=artifact.byteLength;}
+        await this.authorities!.signerResults.query("SELECT economic_record_signer_conflict($1,$2,$3)",[id,metadata,artifact instanceof Uint8Array&&artifact.byteLength<=1232?Buffer.from(artifact):null]);
+      }
+      await transaction(this.pool, async client => {
+        await audit(client, { type: error instanceof SignerEvidenceConflict ? "SIGNER_RESULT_CONFLICT" : "SIGNER_RESULT_PERSISTENCE_FAILED", actor: "signer-coordinator", finalizationId: id, reference: request.operation.signerOperationId });
+      });
       throw error;
     }
   }
@@ -267,8 +288,11 @@ export class PostgresFinalizationRepository {
   private async acceptSignerResponse(id: string, response: SignerResponse): Promise<DurableFinalization> {
     return transaction(this.authorities!.signerResults, async client => {
       const row = await this.lockOperation(client,id), op = operation(row);
-      requireCondition(response.signerOperationId === op.signerOperationId && response.tupleDigest === op.tupleDigest && response.sponsorKeyVersion === op.tuple.sponsorKeyVersion && sameNetworkV1(response.network,op.tuple.network), "Signer response identity/network conflict.");
-      requireCondition(!["NOT_CONTACTED","EXPIRED_NEVER_CONTACTED"].includes(row.signer_state), "Missing signer-contact commitment.");
+      let bound=false;
+      try {bound=response.signerOperationId===op.signerOperationId&&response.tupleDigest===op.tupleDigest&&response.sponsorKeyVersion===op.tuple.sponsorKeyVersion&&sameNetworkV1(response.network,op.tuple.network);}
+      catch {throw new SignerEvidenceConflict("Malformed signer identity/network.");}
+      signerEvidence(bound,"Signer response identity/network conflict.");
+      signerEvidence(!["NOT_CONTACTED","EXPIRED_NEVER_CONTACTED"].includes(row.signer_state), "Missing signer-contact commitment.");
       if (response.state === "UNKNOWN") {
         if (["RESULT_AVAILABLE","REFUSED"].includes(row.signer_state)) return op;
         const changed = (await client.query(`UPDATE economic_finalizations SET signer_state='RESULT_UNKNOWN',updated_at=clock_timestamp(),version=version+1 WHERE finalization_id=$1 RETURNING *`, [id])).rows[0];
@@ -276,23 +300,24 @@ export class PostgresFinalizationRepository {
         return operation(changed);
       }
       if (response.state === "REFUSED") {
-        machineId(response.reference);
-        if (row.signer_state === "REFUSED") { requireCondition(row.refusal_reference === response.reference, "Conflicting immutable refusal."); return op; }
-        requireCondition(row.signer_state !== "RESULT_AVAILABLE", "Signer refusal conflicts with known signature.");
+        try {machineId(response.reference);} catch {throw new SignerEvidenceConflict("Invalid signer refusal reference.");}
+        if (row.signer_state === "REFUSED") { signerEvidence(row.refusal_reference === response.reference, "Conflicting immutable refusal."); return op; }
+        signerEvidence(row.signer_state !== "RESULT_AVAILABLE", "Signer refusal conflicts with known signature.");
         const changed = (await client.query(`UPDATE economic_finalizations SET signer_state='REFUSED',refusal_reference=$2,exposure_state='RELEASED',updated_at=clock_timestamp(),version=version+1 WHERE finalization_id=$1 RETURNING *`, [id,response.reference])).rows[0];
         await audit(client, { type: "SIGNER_REFUSED_EXPOSURE_RELEASED", actor: "signer-coordinator", finalizationId: id, reference: row.exposure_id });
         return operation(changed);
       }
-      requireCondition(response.state === "SIGNED", "Invalid signer result state.");
-      const artifact = bytes(response.artifact);
-      const signatures = inspectSponsoredSignaturesV1(artifact,op.tuple.messageDigest,op.tuple.userSigner,op.tuple.sponsorPublicKey);
-      requireCondition(signatures.state === "FULLY_SIGNED" && signatures.customerSignatureDigest === op.tuple.customerSignatureDigest, "Invalid completed signer artifact.");
+      signerEvidence(response.state === "SIGNED", "Invalid signer result state.");
+      let artifact: Buffer, signatures: ReturnType<typeof inspectSponsoredSignaturesV1>;
+      try { artifact=bytes(response.artifact); signatures=inspectSponsoredSignaturesV1(artifact,op.tuple.messageDigest,op.tuple.userSigner,op.tuple.sponsorPublicKey); }
+      catch { throw new SignerEvidenceConflict("Invalid signer result artifact."); }
+      signerEvidence(signatures.state === "FULLY_SIGNED" && signatures.customerSignatureDigest === op.tuple.customerSignatureDigest, "Invalid completed signer artifact.");
       const reference = `sha256:${sha256(artifact)}`;
       if (row.signer_state === "RESULT_AVAILABLE") {
-        requireCondition(row.artifact_reference === reference && row.final_transaction_id === signatures.finalTransactionId && row.result_artifact.equals(artifact), "Conflicting immutable signer result.");
+        signerEvidence(row.artifact_reference === reference && row.final_transaction_id === signatures.finalTransactionId && row.result_artifact.equals(artifact), "Conflicting immutable signer result.");
         return op;
       }
-      requireCondition(row.signer_state !== "REFUSED", "Signature conflicts with terminal refusal.");
+      signerEvidence(row.signer_state !== "REFUSED", "Signature conflicts with terminal refusal.");
       const changed = (await client.query(`UPDATE economic_finalizations SET signer_state='RESULT_AVAILABLE',result_artifact=$2,artifact_reference=$3,final_transaction_id=$4,updated_at=clock_timestamp(),version=version+1 WHERE finalization_id=$1 RETURNING *`, [id,artifact,reference,signatures.finalTransactionId])).rows[0];
       await audit(client, { type: "SIGNER_RESULT_VERIFIED", actor: "signer-coordinator", finalizationId: id, reference });
       return operation(changed);

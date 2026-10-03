@@ -8,7 +8,7 @@
     "build": "tsc",
     "lint": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "test:postgres": "tsx --test --test-concurrency=1 tests/postgresPaymentFoundation.integration.ts tests/postgresIdentityFoundation.integration.ts tests/postgresEconomicIdentity.integration.ts tests/postgresPaymentIdentity.integration.ts tests/postgresExecution.integration.ts tests/postgresDevnetExecutionState.integration.ts tests/postgresBrowserDevnetExecution.integration.ts tests/postgresPaymentRequests.integration.ts tests/postgresOpenBetaActivity.integration.ts tests/postgresActivity.integration.ts tests/r4Invariants.integration.ts tests/postgresE2eReliability.integration.ts tests/postgresEconomicFinalization.integration.ts tests/postgresOperationalAuthority.integration.ts",
+    "test:postgres": "tsx --test --test-concurrency=1 tests/postgresPaymentFoundation.integration.ts tests/postgresIdentityFoundation.integration.ts tests/postgresEconomicIdentity.integration.ts tests/postgresPaymentIdentity.integration.ts tests/postgresExecution.integration.ts tests/postgresDevnetExecutionState.integration.ts tests/postgresBrowserDevnetExecution.integration.ts tests/postgresPaymentRequests.integration.ts tests/postgresOpenBetaActivity.integration.ts tests/postgresActivity.integration.ts tests/r4Invariants.integration.ts tests/postgresE2eReliability.integration.ts tests/postgresEconomicFinalization.integration.ts tests/postgresOperationalAuthority.integration.ts tests/postgresAuthorityComposition.integration.ts",
     "test:postgres:growth": "tsx --test --test-concurrency=1 tests/postgresGrowthEvents.integration.ts tests/postgresGrowthProjection.integration.ts tests/postgresZpState.integration.ts",
     "migrate": "tsx scripts/run-migrations.ts",
     "migrate:validate": "tsx scripts/validate-migrations.ts",
@@ -32,7 +32,9 @@
     "x402:client": "ts-node-dev --transpile-only ./scripts/x402-fetch-client.ts",
     "test:postgres:economic": "tsx --test --test-concurrency=1 tests/postgresEconomicFinalization.integration.ts tests/postgresOperationalAuthority.integration.ts",
     "db:economic:roles": "tsx scripts/configure-economic-database-roles.ts",
-    "test:postgres:authority": "tsx --test --test-concurrency=1 tests/postgresOperationalAuthority.integration.ts"
+    "test:postgres:authority": "tsx --test --test-concurrency=1 tests/postgresOperationalAuthority.integration.ts",
+    "db:economic:verify": "tsx scripts/verify-economic-authority-login.ts",
+    "test:postgres:composition": "tsx --test --test-concurrency=1 tests/postgresAuthorityComposition.integration.ts"
   },
   "keywords": [],
   "author": "",

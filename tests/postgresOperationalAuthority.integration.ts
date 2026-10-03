@@ -94,10 +94,10 @@ before(async () => {
 });
 beforeEach(async () => {
   await pool.query("TRUNCATE economic_authority_events,economic_network_registry,economic_sponsor_budgets,accounts RESTART IDENTITY CASCADE");
-  const provisioned = await identities.provisionExternalIdentity({ accountId: randomUUID(), identityId: randomUUID(), issuer, subject: "subject:alice" });
+  const provisioned = await identities.provisionExternalIdentity({ accountId: randomUUID(), identityId: randomUUID(), issuer, subject: "subject:alice", occurredAt:new Date(Date.now()-60_000).toISOString() });
   accountId = provisioned.account.accountId; principalId = provisioned.account.actorSubject;
   sessionId = randomUUID();
-  await identities.createAccountSession({sessionId,accountId,expectedAccountVersion:provisioned.account.version,expiresAt:new Date(Date.now()+7200_000).toISOString()});
+  await identities.createAccountSession({sessionId,accountId,expectedAccountVersion:provisioned.account.version,createdAt:new Date(Date.now()-30_000).toISOString(),expiresAt:new Date(Date.now()+7200_000).toISOString()});
   await new EconomicSessionAdministration(issuerPool).bind({issuer,providerSubject:"subject:alice",providerSessionReference:"session:test",accountSessionId:sessionId});
   token = await jwt(); runtime.transform = value => value;
   signer = new SignerFixture(); repo = new PostgresFinalizationRepository(appPool,policy,signer,undefined,authorities);

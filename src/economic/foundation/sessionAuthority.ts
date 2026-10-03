@@ -24,7 +24,7 @@ export class EconomicSessionAdministration {
 
 /** Call after locking the canonical account. Revocation uses the same account -> session lock order. */
 export async function lockEconomicSession(client: PoolClient, input: {
-  issuer: string; subject: string; providerSession?: string; principalId: string; requiredSessionId?: string | null;
+  issuer: string; subject: string; providerSession?: string; principalId: string; requiredSessionId?: string | null; authenticatedAt?: string;
 }): Promise<{ sessionId: string; expiresAt: string }> {
   requireCondition(input.providerSession,"Authoritative provider session reference required.");
   const binding = (await client.query("SELECT account_session_id FROM economic_session_bindings WHERE issuer=$1 AND provider_subject=$2 AND provider_session_reference=$3",[input.issuer,input.subject,input.providerSession])).rows[0];
@@ -32,5 +32,6 @@ export async function lockEconomicSession(client: PoolClient, input: {
   const s = (await client.query("SELECT * FROM account_sessions WHERE session_id=$1 FOR SHARE",[binding.account_session_id])).rows[0];
   const now = await databaseTime(client);
   requireCondition(s && `zp:account:${s.account_id}` === input.principalId && !s.revoked_at && s.created_at.toISOString() <= now && s.expires_at.toISOString() > now,"Authoritative session expired, revoked or invalid.");
+  if (input.authenticatedAt !== undefined) requireCondition(Number.isFinite(Date.parse(input.authenticatedAt)) && s.created_at.toISOString() <= input.authenticatedAt && input.authenticatedAt <= now,"Authentication predates canonical session or is in the future.");
   return {sessionId:s.session_id,expiresAt:s.expires_at.toISOString()};
 }
