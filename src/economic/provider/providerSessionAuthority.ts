@@ -27,8 +27,9 @@ export async function consumeProviderToken(client: PoolClient, verifier: Provide
 }
 
 async function checkProviderRevision(client: PoolClient, verifier: ProviderTokenVerifier): Promise<void> {
+  const initializedRevision = verifier.assertInitialized();
   const row = (await client.query("SELECT provider_key_revision FROM economic_deployment_identity WHERE singleton")).rows[0];
-  requireCondition(row && String(row.provider_key_revision) === String(verifier.keyRevision), "Provider key snapshot is not current for this deployment.");
+  requireCondition(row && String(row.provider_key_revision) === String(initializedRevision) && verifier.keyRevision === initializedRevision, "Provider key snapshot is not current for this deployment.");
 }
 
 /** Unmounted identity-service seam. Raw signed tokens only; canonical lifecycle/CAS is shared with the existing repository. */

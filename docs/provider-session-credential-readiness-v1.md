@@ -1,6 +1,6 @@
 # Provider session, token and credential isolation readiness V1
 
-Status: local implementation candidate; independent audit required. No live provider, signer, observer, payment route or deployment is installed by this package.
+Status: local candidate with AUD-PSCI-01 pinned-key correction; focused re-audit required. No live provider, signer, observer, payment route or deployment is installed by this package.
 
 ## Protected predecessor
 
@@ -27,6 +27,16 @@ The readiness profile requires:
 - Header `typ: at+jwt`, pinned `RS256`, known unique `kid`. ID-token `JWT` type, token-directed key URLs/embedded keys, duplicate JSON members, oversized tokens and ambiguous audience arrays are rejected.
 - Explicit maximum token age and lifetime, zero future-time tolerance at the economic boundary. There is no production policy default.
 - An explicitly supplied public-only JWKS snapshot and monotonically increasing key revision. Only the configured key set is consulted; no discovery URL or external network request is activated.
+
+Key initialization is explicit and asynchronous. `new ProviderTokenVerifier(contract)` has no active snapshot and cannot report initialized; callers normally use `await ProviderTokenVerifier.create(contract, snapshot)`. Every `replaceKeys(snapshot)` call must also be awaited. Identity/session and consent/provider readiness both require a successfully initialized active snapshot, the matching durable revision, and the existing deployment/ACL checks. Revision equality alone never establishes readiness.
+
+For AUD-PSCI-01, every configured key is checked before activation. The supported JWK fields are exactly `kty`, `kid`, `n`, `e`, and optional `alg`, `use`, `key_ops`. `kty` must be RSA; `kid` must be nonempty and unique. RSA modulus/exponent must be nonempty canonical unpadded base64url unsigned integers, without leading zero octets; the modulus is odd and the exponent is odd, at least three and less than the modulus. Private members and unsupported metadata (including certificate URLs/chains and `ext`) are rejected. When present, `alg` must be `RS256`, `use` must be `sig`, and `key_ops` must be exactly `["verify"]`; sign-only and mixed operations are rejected. Absence of these optional metadata fields uses the same fixed RS256 verification profile, never a provider-specific exception.
+
+`MIN_PROVIDER_RSA_BITS = 2048` is enforced before import and against the imported key's modulus length. This matches the pinned JOSE stack's RS256 minimum and [RFC 7518 §3.3](https://www.rfc-editor.org/rfc/rfc7518.html#section-3.3); the public integer encoding follows [§6.3.1](https://www.rfc-editor.org/rfc/rfc7518.html#section-6.3.1). Configuration work is bounded to 16 keys and 2048 decoded bytes per RSA integer (a modulus up to 16384 bits). These are local resource bounds, not a provider exception or a change to token authorization policy.
+
+Metadata validation is followed by eager resolution/import of **every** key through the same `createLocalJWKSet` resolver used by `jwtVerify`. Imported keys must be public, verify-only `RSASSA-PKCS1-v1_5` with SHA-256 and sufficient strength. Each key also runs a WebCrypto verification operation with a deliberately invalid zero signature; the primitive must execute and return false. No provider JWT is required to discover an import, algorithm or usability failure. The initialized resolver caches those imported keys for token verification.
+
+Replacement builds a separate candidate snapshot, deep-copied before any await. Only after all keys pass does one immutable `{revision, resolver}` reference replace the active snapshot. The revision is checked again at publication: a slower older replacement cannot overwrite a newer accepted one. An invalid replacement never changes the active revision or resolver. A prior fully accepted snapshot remains eligible only while it still matches durable deployment state; if registration has advanced, both readiness surfaces fail until a valid matching snapshot initializes. Removed keys, retired revisions and stale reconstructed services remain rejected. Readiness detects import/usability, not ownership of the corresponding private key or the authenticity of an untrusted snapshot-delivery channel; the existing pinned-source and deployment trust assumptions remain necessary.
 
 `zep_environment` and `zep_context` are this adapter's required signed profile claims, not claims every provider emits. A selected provider must supply an authenticated equivalent through a separately reviewed adapter. Missing claims fail closed; client request fields cannot fill them. Real provider selection, claim mapping, JWKS retrieval authentication/caching, issuer session semantics, browser callback/CSRF/PKCE, and sender-constrained tokens remain integration decisions.
 

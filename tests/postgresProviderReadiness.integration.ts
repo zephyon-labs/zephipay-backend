@@ -19,6 +19,7 @@ import { ProviderSessionAuthority, ProviderConsentGate } from "../src/economic/p
 import { ProviderTokenVerifier } from "../src/economic/provider/providerTokenVerifier";
 import { DurableSyntheticSigner, DurableSyntheticObserver, SyntheticRuntimeIssuer, installSyntheticStore } from "./helpers/syntheticAuthorityAdapters";
 import { providerContract, providerJwks, providerToken, providerKeys } from "./helpers/providerTokens";
+import { invalidProviderKeySets, strongerProviderJwks, strongerProviderKeys } from "./helpers/providerKeyFixtures";
 
 const url = process.env.TEST_DATABASE_URL?.trim();
 if (!url) throw new Error("TEST_DATABASE_URL required; disposable fixtures only.");
@@ -66,7 +67,7 @@ beforeEach(async () => {
   await adminPool.query("TRUNCATE economic_authority_events,economic_network_registry,economic_sponsor_budgets,accounts,economic_deployment_identity,economic_deployment_logins RESTART IDENTITY CASCADE");
   await adminPool.query("INSERT INTO economic_deployment_identity(deployment_id,environment,database_name,provider_key_revision) VALUES($1,$2,$3,1)", [deploymentId, providerContract.environment, databaseName]);
   for (const role of roles) await adminPool.query("INSERT INTO economic_deployment_logins VALUES($1,$2,1)", [role, `provider_fixture_${role}`]);
-  verifier = new ProviderTokenVerifier(providerContract, { revision: 1, jwks: providerJwks }); sessionService = identityService(); rebuildGate();
+  verifier = await ProviderTokenVerifier.create(providerContract, { revision: 1, jwks: providerJwks }); sessionService = identityService(); rebuildGate();
   const provisioned = await identities.provisionExternalIdentity({ accountId: randomUUID(), identityId: randomUUID(), issuer: providerContract.issuer, subject: "subject:alice", occurredAt: new Date(Date.now() - 60000).toISOString() });
   accountId = provisioned.account.accountId; principalId = provisioned.account.actorSubject; sessionId = randomUUID();
   const created = await identities.createAccountSession({ accountId, sessionId, expectedAccountVersion: provisioned.account.version, createdAt: new Date(Date.now() - 30000).toISOString(), expiresAt: new Date(Date.now() + 3600000).toISOString() });
@@ -255,7 +256,7 @@ test("canonical expiry and disabled account block provider binding and consent",
 
 test("provider key revision changed during token validation rejects stale proof without consuming it", async () => {
   const p=await prepare(),original=verifier.verify.bind(verifier);
-  verifier.verify=async(raw,action)=>{const proof=await original(raw,action);verifier.replaceKeys({revision:2,jwks:providerJwks});return proof;};
+  verifier.verify=async(raw,action)=>{const proof=await original(raw,action);await verifier.replaceKeys({revision:2,jwks:providerJwks});return proof;};
   assert.equal((await confirm(p.digest)).status,400);
   assert.equal(await count("economic_consent_evidence"),0);
   assert.equal((await adminPool.query("SELECT count(*) FROM economic_provider_token_uses WHERE action='consent'")).rows[0].count,"0");
@@ -292,9 +293,9 @@ test("NOLOGIN retirement rejects a still-connected process", async () => {
 
 test("reconstructed service with retired provider key snapshot fails until current snapshot is installed", async () => {
   await adminPool.query("UPDATE economic_deployment_identity SET provider_key_revision=2");
-  verifier=new ProviderTokenVerifier(providerContract,{revision:1,jwks:providerJwks});sessionService=identityService();rebuildGate();
+  verifier=await ProviderTokenVerifier.create(providerContract,{revision:1,jwks:providerJwks});sessionService=identityService();rebuildGate();
   await assert.rejects(()=>sessionService.readiness(),/snapshot/);await assert.rejects(()=>gate.readiness(),/snapshot/);
-  verifier=new ProviderTokenVerifier(providerContract,{revision:2,jwks:providerJwks});sessionService=identityService();rebuildGate();
+  verifier=await ProviderTokenVerifier.create(providerContract,{revision:2,jwks:providerJwks});sessionService=identityService();rebuildGate();
   await sessionService.readiness();await gate.readiness();
   assert.equal((await confirm((await prepare()).digest)).status,201);
 });
@@ -325,4 +326,84 @@ for(const column of [false,true])test(`deployment rejects ${column?'column':'tab
   await adminPool.query(`GRANT ${grant} ON economic_deployment_identity TO provider_fixture_issuer WITH GRANT OPTION`);
   try {await assert.rejects(()=>gate.readiness(),/grant option/);}
   finally {await adminPool.query(`REVOKE ${grant} ON economic_deployment_identity FROM provider_fixture_issuer`);}
+});
+
+for (const {name,jwks} of invalidProviderKeySets) test(`AUD-PSCI-01: both readiness surfaces reject ${name} without a JWT`,async()=>{
+  verifier=new ProviderTokenVerifier(providerContract);sessionService=identityService();rebuildGate();
+  let presentedTokens=0;
+  verifier.verify=async()=>{presentedTokens++;throw new Error("No token may be needed for readiness");};
+  await assert.rejects(()=>verifier.replaceKeys({revision:1,jwks}),/INITIALIZATION_REJECTED/);
+  await assert.rejects(()=>sessionService.readiness(),/NOT_INITIALIZED/);
+  await assert.rejects(()=>gate.readiness(),/NOT_INITIALIZED/);
+  assert.equal(presentedTokens,0);
+});
+
+test("AUD-PSCI-01: cryptographic import failure cannot make either surface ready",async t=>{
+  const original=crypto.subtle.importKey.bind(crypto.subtle);let imports=0;
+  t.mock.method(crypto.subtle,"importKey",async(...args:any[])=>{
+    if(args[0]==="jwk"&&args[1].kid==="fixture-stronger"){imports++;throw new Error("synthetic cryptographic import failure");}
+    return (original as any)(...args);
+  });
+  verifier=new ProviderTokenVerifier(providerContract);sessionService=identityService();rebuildGate();
+  await assert.rejects(()=>verifier.replaceKeys({revision:1,jwks:strongerProviderJwks}),/INITIALIZATION_REJECTED/);
+  assert.equal(imports,1);
+  await assert.rejects(()=>sessionService.readiness(),/NOT_INITIALIZED/);
+  await assert.rejects(()=>gate.readiness(),/NOT_INITIALIZED/);
+});
+
+test("AUD-PSCI-01: neither surface is ready during initialization; both require ACL and durable revision afterward",async t=>{
+  const original=crypto.subtle.importKey.bind(crypto.subtle);let release!:()=>void;
+  const waiting=new Promise<void>(resolve=>release=resolve);
+  t.mock.method(crypto.subtle,"importKey",async(...args:any[])=>{
+    if(args[0]==="jwk"&&args[1].kid==="fixture-stronger")await waiting;
+    return (original as any)(...args);
+  });
+  verifier=new ProviderTokenVerifier(providerContract);sessionService=identityService();rebuildGate();
+  const initializing=verifier.replaceKeys({revision:1,jwks:strongerProviderJwks});
+  try {
+    await assert.rejects(()=>sessionService.readiness(),/NOT_INITIALIZED/);
+    await assert.rejects(()=>gate.readiness(),/NOT_INITIALIZED/);
+  } finally {release();}
+  await initializing;
+  await sessionService.readiness();await gate.readiness();
+  await adminPool.query("GRANT SELECT ON economic_finalizations TO provider_fixture_identity,provider_fixture_issuer");
+  try {await assert.rejects(()=>sessionService.readiness(),/ACL readiness/);await assert.rejects(()=>gate.readiness(),/ACL readiness/);}
+  finally {await adminPool.query("REVOKE SELECT ON economic_finalizations FROM provider_fixture_identity,provider_fixture_issuer");}
+  await adminPool.query("UPDATE economic_deployment_identity SET provider_key_revision=2");
+  await assert.rejects(()=>sessionService.readiness(),/snapshot/);await assert.rejects(()=>gate.readiness(),/snapshot/);
+  await adminPool.query("UPDATE economic_deployment_identity SET provider_key_revision=1,environment='wrong'");
+  await assert.rejects(()=>sessionService.readiness(),/mismatch/);await assert.rejects(()=>gate.readiness(),/mismatch/);
+});
+
+test("AUD-PSCI-01: failed replacement retains accepted snapshot; valid 3072-bit replacement restores revision-matched readiness",async()=>{
+  await assert.rejects(()=>verifier.replaceKeys({revision:2,jwks:invalidProviderKeySets[0].jwks}),/INITIALIZATION_REJECTED/);
+  assert.equal(verifier.keyRevision,1);await sessionService.readiness();await gate.readiness();
+  await adminPool.query("UPDATE economic_deployment_identity SET provider_key_revision=2");
+  await assert.rejects(()=>sessionService.readiness(),/snapshot/);await assert.rejects(()=>gate.readiness(),/snapshot/);
+  await verifier.replaceKeys({revision:2,jwks:strongerProviderJwks});
+  assert.equal(verifier.keyRevision,2);await sessionService.readiness();await gate.readiness();
+  const stale=await ProviderTokenVerifier.create(providerContract,{revision:1,jwks:providerJwks});
+  await assert.rejects(()=>new ProviderSessionAuthority(new AuthorityProcess("identity",db.identity,expected("identity")),stale,3600).readiness(),/snapshot/);
+  await assert.rejects(()=>new ProviderConsentGate(new AuthorityProcess("issuer",db.issuer,expected("issuer")),stale).readiness(),/snapshot/);
+  await assert.rejects(()=>verifier.replaceKeys({revision:1,jwks:providerJwks}),/increase/);
+  assert.equal((await confirm((await prepare()).digest,await providerToken({}, {kid:"fixture-stronger"},strongerProviderKeys.privateKey))).status,201);
+});
+
+for(let iteration=0;iteration<3;iteration++)test(`AUD-PSCI-01: invalid replacement loses rotation race and replay remains durable ${iteration+1}`,async()=>{
+  const p=await prepare(),jti="spent-before-rotation";
+  assert.equal((await confirm(p.digest,await providerToken({jti}))).status,201);
+  const results=await Promise.allSettled([
+    verifier.replaceKeys({revision:2,jwks:strongerProviderJwks}),
+    verifier.replaceKeys({revision:3,jwks:invalidProviderKeySets[0].jwks}),
+  ]);
+  assert.deepEqual(results.map(r=>r.status),["fulfilled","rejected"]);assert.equal(verifier.keyRevision,2);
+  await adminPool.query("UPDATE economic_deployment_identity SET provider_key_revision=2");
+  await sessionService.readiness();await gate.readiness();
+  const q=await prepare();
+  const substituted=await providerToken({jti},{kid:"fixture-stronger"},strongerProviderKeys.privateKey);
+  assert.equal((await confirm(q.digest,substituted)).status,400);
+  const fresh=await providerToken({}, {kid:"fixture-stronger"},strongerProviderKeys.privateKey);
+  const responses=await Promise.all([confirm(q.digest,fresh),confirm(q.digest,fresh)]);
+  assert.deepEqual(responses.map(r=>r.status).sort(),[201,400]);
+  assert.equal(await count("economic_consent_evidence"),2);
 });
