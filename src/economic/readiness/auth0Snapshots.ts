@@ -5,7 +5,7 @@ import type { JSONWebKeySet } from "jose";
 import { requireCondition, sha256 } from "../foundation/database";
 import { initializeProviderKeyResolver } from "../provider/providerTokenVerifier";
 import { assertVerifiedDeployment, type VerifiedDeployment } from "./deploymentProfile";
-import { digest, frozen, positive, verifyArtifact, type SignedArtifact } from "./signedArtifact";
+import { MAX_SIGNED_ARTIFACT_PAYLOAD_BYTES, digest, frozen, positive, verifyArtifact, type SignedArtifact } from "./signedArtifact";
 
 type SnapshotDocument = {
   type: "zephipay-auth0-snapshot-v1"; provider: "auth0"; deploymentId: string; environment: string; issuer: string;
@@ -16,7 +16,20 @@ type HeadDocument = { type: "zephipay-auth0-head-v1"; configuration: string; rev
 export type SnapshotProvenance = Readonly<Omit<SnapshotDocument, "jwks"> & { fingerprint: string; normalizedKeysFingerprint: string }>;
 type ActiveSnapshot = Readonly<{ provenance: SnapshotProvenance; resolver: Awaited<ReturnType<typeof initializeProviderKeyResolver>> }>;
 export interface SnapshotTransport {
-  acquire(request: Readonly<{ url: string; maxBytes: 131072; redirects: "reject"; signal: AbortSignal }>): Promise<SignedArtifact>;
+  acquire(request: Readonly<{ url: string; maxBytes: typeof MAX_SIGNED_ARTIFACT_PAYLOAD_BYTES; redirects: "reject"; signal: AbortSignal }>): Promise<SignedArtifact>;
+}
+
+function validateThumbprint(value: unknown, name: "x5t" | "x5t#S256"): void {
+  // RFC 7517 binary digests, plus Auth0's documented x5t-only base64url(uppercase ASCII hex) form.
+  // Length selects disjoint representations before decoding. No raw hex, padding, case folding or repair.
+  const rawBytes = name === "x5t" ? 20 : 32;
+  requireCondition(typeof value === "string" &&
+    (value.length === Math.ceil(rawBytes * 4 / 3) || (name === "x5t" && value.length === 54)) &&
+    /^[A-Za-z0-9_-]+$/.test(value), "Invalid key thumbprint metadata.");
+  const decoded = Buffer.from(value, "base64url");
+  requireCondition(decoded.toString("base64url") === value &&
+    (decoded.length === rawBytes || (name === "x5t" && decoded.length === 40 && /^[0-9A-F]{40}$/.test(decoded.toString("latin1")))),
+    "Invalid key thumbprint metadata.");
 }
 
 /** Certificates/thumbprints are public source metadata, not an alternate verification trust path. */
@@ -25,9 +38,7 @@ function projectAuth0Keys(input: JSONWebKeySet): JSONWebKeySet {
   const allowed = ["kty","kid","n","e","alg","use","key_ops","x5c","x5t","x5t#S256"];
   return { keys: input.keys.map(key => {
     requireCondition(key && Object.keys(key).every(k => allowed.includes(k)), "Unsupported Auth0 key metadata.");
-    for (const [name, bytes] of [["x5t",20],["x5t#S256",32]] as const) if (name in key) {
-      const v = key[name]; requireCondition(typeof v === "string" && Buffer.from(v,"base64url").length === bytes && Buffer.from(v,"base64url").toString("base64url") === v, "Invalid key thumbprint metadata.");
-    }
+    for (const name of ["x5t", "x5t#S256"] as const) if (name in key) validateThumbprint(key[name], name);
     if ("x5c" in key) requireCondition(Array.isArray(key.x5c) && key.x5c.length > 0 && key.x5c.length <= 4 && key.x5c.every(v => typeof v === "string" && v.length > 0 && v.length <= 8192 && Buffer.from(v,"base64").toString("base64") === v), "Invalid certificate metadata.");
     return Object.fromEntries(Object.entries(key).filter(([name]) => !["x5c","x5t","x5t#S256"].includes(name)));
   }) } as JSONWebKeySet;
@@ -90,7 +101,7 @@ export class Auth0Snapshots {
   async refresh(transport: SnapshotTransport): Promise<SnapshotProvenance> {
     const controller = new AbortController(); let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const input = await Promise.race([transport.acquire({ url: this.configuration.profile.keySource, maxBytes: 131072, redirects: "reject", signal: controller.signal }),
+      const input = await Promise.race([transport.acquire({ url: this.configuration.profile.keySource, maxBytes: MAX_SIGNED_ARTIFACT_PAYLOAD_BYTES, redirects: "reject", signal: controller.signal }),
         new Promise<never>((_, reject) => { timer = setTimeout(() => { controller.abort(); reject(new Error("Snapshot delivery timeout.")); }, 5000); })]);
       return await this.install(input);
     } finally { if (timer) clearTimeout(timer); }

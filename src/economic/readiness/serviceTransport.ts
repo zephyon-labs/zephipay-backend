@@ -2,7 +2,7 @@ import { createPublicKey, randomUUID, sign, type KeyObject } from "node:crypto";
 import { requireCondition, sha256 } from "../foundation/database";
 import { parseEconomicJson } from "../foundation/strictJson";
 import { assertVerifiedDeployment, readinessRoles, type ReadinessRole, type VerifiedDeployment } from "./deploymentProfile";
-import { frozen, positive, verifyArtifact, type SignedArtifact } from "./signedArtifact";
+import { assertArtifactBounds, frozen, positive, verifyArtifact, type SignedArtifact } from "./signedArtifact";
 
 export interface TransportReplayLedger {
   /** Atomic insert-if-absent. Production must be durable/shared through expiry; no volatile fallback. */
@@ -46,7 +46,7 @@ export class ReadinessServiceTransport {
       requestId:randomUUID(),method,path,bodyDigest:sha256(body),issuedAt:now,expiresAt:now+60});
   }
   private authenticated(input: SignedArtifact, response: boolean): Message {
-    requireCondition(input && typeof input.payload === "string" && Buffer.byteLength(input.payload)<=131072, "Bounded message required.");
+    assertArtifactBounds(input);
     const peek = parseEconomicJson(Buffer.from(input.payload)) as Message;
     requireCondition(readinessRoles.includes(peek.caller) && readinessRoles.includes(peek.server), "Unknown service identity.");
     const m = verifyArtifact<Message>(input,this.publicKeys[response ? peek.server : peek.caller]).data, p = this.configuration.profile, now=Date.now()/1000;

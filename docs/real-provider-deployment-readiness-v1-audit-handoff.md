@@ -1,6 +1,6 @@
 # Real provider and deployment readiness V1 — audit handoff
 
-Status: READY FOR INDEPENDENT AUDIT. This is a local, unmounted, non-value candidate. Acceptance would not authorize production deployment, a live provider integration, or economic activation.
+Status: READY FOR FOCUSED RE-AUDIT — AUD-RPDR-01/02 bounded correction. This is a local, unmounted, non-value candidate. Acceptance would not authorize production deployment, a live provider integration, or economic activation. Historical candidate evidence below remains labeled separately from the correction evidence.
 
 See [architecture, provider evidence and operating contract](real-provider-deployment-readiness-v1.md) for the capability/claim matrices, browser flow, ownership, deployment, rotation, outage, mobile and compromise boundaries.
 
@@ -15,13 +15,14 @@ See [architecture, provider evidence and operating contract](real-provider-deplo
 - Merged provider-readiness worktree and local/remote branch were removed normally after verification; safe worktree/ref pruning completed. No force deletion or deployment.
 - Closure record: `/tmp/provider-readiness-protected-closure.json`.
 
-## Phase B candidate and patch inventory
+## Originally audited Phase B candidate and patch inventory
 
 - Branch: `feat/real-provider-deployment-readiness-v1`.
 - Worktree: `/home/zeranova/dev/zephyon-labs/zephipay-backend-real-provider-readiness-v1`.
 - Parent/base: `4d9b6e4529559f480896278ea6d2a6e7eda670f7`.
-- One focused local commit only. No Phase B push, PR, merge or deployment.
-- Exact commit, full-index binary patch, SHA-256, per-file hashes, diff statistics and validation log hashes are frozen in `/tmp/real-provider-deployment-readiness-audit-manifest.json`. The patch is `/tmp/real-provider-deployment-readiness-v1.patch`. These external artifacts avoid embedding a self-referential commit/patch hash in the patch itself.
+- Originally audited commit: `772c1093b3a5117671301f5e7099fb084a6cdd16`, independently reviewed as `REVISE BEFORE MERGE` for AUD-RPDR-01 and AUD-RPDR-02 (both P2). No authentication/economic-authority bypass or architecture failure was found.
+- The original package was one local commit. This correction adds one local child commit on the same branch. Neither is pushed, PRed, merged or deployed by this correction.
+- Original 12-file patch (+940/−12) SHA-256: `2ded3054d501cc911d1aa58f91500d945d6c435cc0548604496d994568e4e431`. Its manifest `/tmp/real-provider-deployment-readiness-audit-manifest.json` and patch `/tmp/real-provider-deployment-readiness-v1.patch` are preserved. The updated manifest `/tmp/real-provider-correction-audit-manifest.json` records exact original/corrective commits, corrective and combined patches, fingerprints, inventories and log hashes. External manifests avoid embedding self-referential commit/patch hashes in the patch itself.
 
 | Changed file | Review purpose |
 | --- | --- |
@@ -40,7 +41,7 @@ See [architecture, provider evidence and operating contract](real-provider-deplo
 
 There are no SQL/migration, dependency/lockfile, public API, route, server, existing environment configuration, Site, Frontend, Protocol or ZERA edits. Runtime remains canonical through SDK `v0.4.0`. New Auth0 proofs do not satisfy the accepted generic consent verifier. The existing strict one-use token profile and canonical consent lifecycle remain intact.
 
-## Validation evidence
+## Original candidate validation evidence (historical)
 
 | Command / evidence | Result |
 | --- | --- |
@@ -96,3 +97,37 @@ Intermediate issues were corrected, not suppressed: the initially copied node_mo
 Canonical ZERA baseline SHA-256 is `182299950ae49c2bd2d8d5a99d2f73b3d0f77520982ab3c04ff8e2b9c1bbdff1`, representing unchanged 200,000,000 supply and allocations. No qualification, registry addition, mint, distribution, staking, liquidity, routing, ZERA activation, custody, wallet activation, signing, broadcast, sponsorship, Mainnet or live observation was performed.
 
 Recommend independent security/architecture audit of this exact local candidate. After acceptance, the next bounded task should obtain nonsecret operator attestations for the actual Auth0 tenant/client/dialect/assurance and specify the durable server confirmation bridge and deployment trust roots for a **non-value staging** integration. Production TLS/process/secret isolation and real browser/provider canaries remain separate gates. No Phase B push, PR, merge or deployment is authorized by this handoff.
+
+## AUD-RPDR-01/02 correction and focused review
+
+Reproductions ran against clean audited HEAD `772c1093b3a5117671301f5e7099fb084a6cdd16` before source edits. `/tmp/real-provider-correction-original-reproduction.json` preserves the exact Auth0 value, decoded representation, authenticated snapshot rejection and successful initialization with the same RSA material after metadata removal. It also records one decode/allocation of 3,072 bytes from the audit's 4,096-character signature input before rejection. This matches the independent audit reproduction; no live tenant or production credential was used.
+
+AUD-RPDR-01 root cause: the adapter treated all `x5t` metadata as a canonical encoding of a 20-byte binary digest. Auth0's published example instead encodes 40 uppercase ASCII hexadecimal characters in 54 unpadded base64url characters. The correction accepts that exact representation class alongside the existing standard 27-character form. `x5t#S256` remains standard-only (43 characters / 32 bytes). Length/alphabet checks precede decoding; decoded-length, canonical round-trip and uppercase ASCII-hex checks reject malformed, odd-length, mixed, overlong and unsupported forms. All certificate/thumbprint metadata is then removed. There is no alternate RSA trust path, retained thumbprint normalization, integer repair or broader Auth0 token dialect. See the architecture document for the policy table and official source.
+
+AUD-RPDR-02 root cause: `Buffer.from(signature, "base64url")` preceded any encoded-length check. The shared guard now requires exactly 86 base64url characters before any decode, corresponding to 64-byte Ed25519 signatures. Padding, invalid alphabet and wrong lengths fail first; decoded length, canonical round trip and signature verification remain. The service transport invokes the same guard before unauthenticated identity parsing.
+
+The effective limit is now one parser-derived 32,768-byte ceiling for payload verification, snapshot acquisition and service-message peeking. The parser default and depth limit are unchanged; exporting its existing constant does not change generic provider semantics. The former 131,072-byte allowance was ineffective because the strict parser already rejected above 32 KiB. UTF-8 byte bounds are tested independently of character count. Future serialized transport must account for envelope/escaping overhead within its acquisition cap.
+
+Correction source scope is four files: the parser constant export, signed-artifact guard, Auth0 thumbprint projection, and service pre-parse guard. The generic provider verifier, Auth0 token/reauthentication verifier, deployment/endpoint and database authority implementations are byte-for-byte unchanged from the audited candidate. Two new fixture/test files preserve the reproduction and negative coverage; only these two existing documents change otherwise. No migrations, packages, APIs, Runtime or economic architecture change.
+
+New tests prove the documented snapshot installs, produces the same RSA projection, verifies the correct RSA signature and rejects another key; generic key metadata rules remain strict. Negative cases cover encoding/length/case/hex/alphabet errors, excessive length, duplicate/escaped members, duplicate key IDs, unsupported metadata, unusable RSA, certificate/key-count/identifier bounds and invalid replacement preservation. Instrumented tests assert **zero `Buffer.from` calls** for malformed lengths/alphabet, 4,096- and 65,536-character signatures, over-limit UTF-8 payloads and service peeking. Valid exact-boundary payloads/signatures and canonical trailing-bit rejection are included. No memory-exhaustion or large stress test is used.
+
+Final correction validation and exact artifact fingerprints are recorded in `/tmp/real-provider-correction-audit-manifest.json`. Logs use `/tmp/real-provider-correction-*.log`. Required checks include lint/typecheck, build, built-module verification, all unit tests, focused artifact/Auth0/generic-provider suites, actual restricted LOGIN tests, complete PostgreSQL regression, migration validation and byte comparisons of all migrations 001–027, and whitespace/scope checks. Tests use a fresh local database `real_provider_correction_v1`; prior candidate/audit databases are not modified.
+
+| Final correction check | Result |
+| --- | --- |
+| `npm run lint` / TypeScript noEmit; `npm run build` | Passed |
+| Built CommonJS modules, shared limit constants and valid Ed25519 verification | Passed; no server started |
+| `npm test` | 594 passed; zero failures/skips |
+| Focused correction artifact/snapshot suite | 39 passed; includes instrumented pre-allocation rejection |
+| Combined focused correction, Auth0 and generic-provider suites | 199 passed; zero failures/skips |
+| `npm run test:postgres:provider` | 97 passed under actual restricted LOGINs; zero failures/skips |
+| `npm run test:postgres` | 378 passed; zero failures/skips |
+| `npm run migrate:validate` | 27 ordered migrations validated |
+| Migration byte comparison | All 001–027 identical to canonical base and audited candidate |
+| Fresh migration application and role installation | Passed in the disposable correction database |
+| `git diff --check`, scope and frozen source comparison | Passed at sealing; source/test hashes match the tested files |
+
+Source and tests were frozen before database regression; only the requested documentation was completed afterward. No failing validation required a policy relaxation, dependency change or architecture expansion. The local fixture server was stopped after validation. Exact corrective and combined full-index binary patches are `/tmp/real-provider-correction.patch` and `/tmp/real-provider-correction-combined.patch`; their fingerprints and per-file inventories are in the updated manifest.
+
+Focused re-audit should confirm the narrowly documented source compatibility, unchanged RSA trust boundary and eager initialization, exact pre-decode signature limits, parser-derived acquisition/message ceiling, and preserved provenance/rotation/token/transport behavior. Production tenant attestation, durable challenge/replay storage, authenticated delivery and actual TLS/process/secret isolation remain the previously recorded open decisions. This correction adds no activation permission.
