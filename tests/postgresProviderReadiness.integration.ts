@@ -407,3 +407,59 @@ for(let iteration=0;iteration<3;iteration++)test(`AUD-PSCI-01: invalid replaceme
   assert.deepEqual(responses.map(r=>r.status).sort(),[201,400]);
   assert.equal(await count("economic_consent_evidence"),2);
 });
+
+// Real-provider/deployment readiness remains unmounted and non-value. Existing canonical role/lifecycle tests above remain unchanged.
+import { DeploymentReadiness } from "../src/economic/readiness/deploymentProfile";
+import { ProviderDeploymentReadiness } from "../src/economic/readiness/providerDeploymentReadiness";
+import { readyFixture, profileFixture, endpointFixture, endpointKeys, accessFixture, snapshotFixture, headFixture } from "./helpers/realProviderFixtures";
+
+async function realReadiness(role: "identity" | "issuer", pool=db[role]) {
+  const f=await readyFixture(profileFixture({databaseName}));
+  const process=new AuthorityProcess(role,pool,expected(role));
+  const deployment=new DeploymentReadiness(process,f.configuration,endpointKeys.publicKey);
+  return {...f,service:new ProviderDeploymentReadiness(deployment,f.auth),endpoint:endpointFixture(f.configuration),nonce:"fixture-nonce"};
+}
+for(const role of ["identity","issuer"] as const)test(`real Auth0 ${role} readiness requires authenticated endpoint, keys and actual LOGIN`,async()=>{
+ const f=await realReadiness(role);await f.service.readiness(f.endpoint,f.nonce);
+ const proof=await f.auth.verifyAccess(await accessFixture(),'read:account');
+ await f.service.run(f.endpoint,f.nonce,proof,async client=>{
+  const canonical=(await client.query('SELECT account_id FROM external_identities WHERE issuer=$1 AND subject=$2',[proof.issuer,proof.subject])).rows[0];assert.equal(canonical.account_id,accountId);
+ });
+ await adminPool.query('UPDATE economic_deployment_identity SET provider_key_revision=2');await assert.rejects(()=>f.service.readiness(f.endpoint,f.nonce),/revision/);
+});
+for(const role of roles.filter(r=>r!=="identity"))test(`real provider rejects ${role} LOGIN substituted for identity`,async()=>{
+ const f=await realReadiness('identity',db[role]);await assert.rejects(()=>f.service.readiness(f.endpoint,f.nonce),/mismatch/);
+});
+test("real provider rejects admin fallback and copied-database endpoint identity",async()=>{
+ const admin=await realReadiness('identity',adminPool);await assert.rejects(()=>admin.service.readiness(admin.endpoint,admin.nonce),/mismatch/);
+ const f=await realReadiness('identity');
+ for(const change of [{host:'clone.fixture.example'},{peerSha256:'cd'.repeat(32)},{nonce:'replayed-other-process'},{configuration:'ef'.repeat(32)},{expiresAt:1}])
+  await assert.rejects(()=>f.service.readiness(endpointFixture(f.configuration,f.nonce,change),f.nonce),/endpoint/);
+});
+test("real provider request rolls back if DB generation changes during work",async()=>{
+ const f=await realReadiness('identity'),proof=await f.auth.verifyAccess(await accessFixture(),'read:account');
+ await assert.rejects(()=>f.service.run(f.endpoint,f.nonce,proof,async client=>{
+  await client.query("INSERT INTO economic_provider_token_uses(token_id,token_digest,account_session_id,account_version,action,resource_reference,issued_at,key_revision) VALUES($1,$2,$3::uuid,$4,'bind-session',$3::text,clock_timestamp(),1)",['12'.repeat(32),'34'.repeat(32),sessionId,version]);
+  await adminPool.query("UPDATE economic_deployment_logins SET credential_generation=2 WHERE authority_role='identity'");
+ }),/generation/);
+ assert.equal((await adminPool.query('SELECT count(*) FROM economic_provider_token_uses WHERE token_id=$1',['12'.repeat(32)])).rows[0].count,'0');
+});
+test("real provider confirmation model rechecks canonical revocation after authentication",async()=>{
+ const f=await realReadiness('identity'),proof=await f.auth.verifyAccess(await accessFixture(),'read:account');await revoke();
+ await assert.rejects(()=>f.service.run(f.endpoint,f.nonce,proof,async client=>{
+  // A valid access token alone never revives a revoked canonical session.
+  const row=(await client.query('SELECT * FROM account_sessions WHERE session_id=$1 AND account_id=$2 FOR SHARE',[sessionId,accountId])).rows[0];
+  assert(row && !row.revoked_at && row.expires_at>Date.now(), 'canonical session revoked');
+ }),/canonical session revoked/);
+});
+test("real provider key cutover retires established and reconstructed instances",async()=>{
+ const f=await realReadiness('identity'),next=snapshotFixture(f.configuration,2,strongerProviderJwks);
+ f.state.head=headFixture(f.configuration,next,2);await f.snapshots.install(next);await assert.rejects(()=>f.service.readiness(f.endpoint,f.nonce),/revision/);
+ await adminPool.query('UPDATE economic_deployment_identity SET provider_key_revision=2');await f.service.readiness(f.endpoint,f.nonce);
+ const stale=await realReadiness('identity');await assert.rejects(()=>stale.service.readiness(stale.endpoint,stale.nonce),/revision/);
+});
+test("real provider reconstruction does not erase durable generic consent consumption",async()=>{
+ const p=await prepare(),token=await providerToken({jti:'restart-durable-proof'});assert.equal((await confirm(p.digest,token)).status,201);
+ const f=await realReadiness('issuer');await f.service.readiness(f.endpoint,f.nonce);
+ verifier=await ProviderTokenVerifier.create(providerContract,{revision:1,jwks:providerJwks});rebuildGate();assert.equal((await confirm(p.digest,token)).status,400);
+});
