@@ -8,7 +8,7 @@
     "build": "tsc",
     "lint": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "test:postgres": "tsx --test --test-concurrency=1 tests/postgresPaymentFoundation.integration.ts tests/postgresIdentityFoundation.integration.ts tests/postgresEconomicIdentity.integration.ts tests/postgresPaymentIdentity.integration.ts tests/postgresExecution.integration.ts tests/postgresDevnetExecutionState.integration.ts tests/postgresBrowserDevnetExecution.integration.ts tests/postgresPaymentRequests.integration.ts tests/postgresOpenBetaActivity.integration.ts tests/postgresActivity.integration.ts tests/r4Invariants.integration.ts tests/postgresE2eReliability.integration.ts tests/postgresEconomicFinalization.integration.ts tests/postgresOperationalAuthority.integration.ts tests/postgresAuthorityComposition.integration.ts",
+    "test:postgres": "tsx --test --test-concurrency=1 tests/postgresPaymentFoundation.integration.ts tests/postgresIdentityFoundation.integration.ts tests/postgresEconomicIdentity.integration.ts tests/postgresPaymentIdentity.integration.ts tests/postgresExecution.integration.ts tests/postgresDevnetExecutionState.integration.ts tests/postgresBrowserDevnetExecution.integration.ts tests/postgresPaymentRequests.integration.ts tests/postgresOpenBetaActivity.integration.ts tests/postgresActivity.integration.ts tests/r4Invariants.integration.ts tests/postgresE2eReliability.integration.ts tests/postgresEconomicFinalization.integration.ts tests/postgresOperationalAuthority.integration.ts tests/postgresAuthorityComposition.integration.ts tests/postgresProviderReadiness.integration.ts",
     "test:postgres:growth": "tsx --test --test-concurrency=1 tests/postgresGrowthEvents.integration.ts tests/postgresGrowthProjection.integration.ts tests/postgresZpState.integration.ts",
     "migrate": "tsx scripts/run-migrations.ts",
     "migrate:validate": "tsx scripts/validate-migrations.ts",
@@ -34,7 +34,8 @@
     "db:economic:roles": "tsx scripts/configure-economic-database-roles.ts",
     "test:postgres:authority": "tsx --test --test-concurrency=1 tests/postgresOperationalAuthority.integration.ts",
     "db:economic:verify": "tsx scripts/verify-economic-authority-login.ts",
-    "test:postgres:composition": "tsx --test --test-concurrency=1 tests/postgresAuthorityComposition.integration.ts"
+    "test:postgres:composition": "tsx --test --test-concurrency=1 tests/postgresAuthorityComposition.integration.ts",
+    "test:postgres:provider": "tsx --test --test-concurrency=1 tests/postgresProviderReadiness.integration.ts"
   },
   "keywords": [],
   "author": "",
@@ -59,7 +60,8 @@
     "express-rate-limit": "^8.5.2",
     "pg": "^8.22.0",
     "viem": "^2.52.2",
-    "zephyon-protocol": "github:zephyon-labs/zephyon-protocol#v0.4.0"
+    "zephyon-protocol": "github:zephyon-labs/zephyon-protocol#v0.4.0",
+    "jose": "^6.2.7"
   },
   "devDependencies": {
     "@types/bn.js": "^5.2.0",
@@ -67,7 +69,6 @@
     "@types/express": "^5.0.5",
     "@types/node": "^24.10.1",
     "@types/pg": "^8.20.3",
-    "jose": "^6.2.7",
     "ts-node-dev": "^2.0.0",
     "tsx": "^4.23.1",
     "typescript": "^5.9.3"

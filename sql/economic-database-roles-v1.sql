@@ -3,10 +3,10 @@
 BEGIN;
 SELECT pg_advisory_xact_lock(827346192045711002);
 DO $$ DECLARE role_name text; r record; BEGIN
-  IF NOT EXISTS(SELECT 1 FROM payment_schema_migrations WHERE version='026_observer_report_summary.sql') THEN
-    RAISE EXCEPTION 'migration 026 required before role provisioning';
+  IF NOT EXISTS(SELECT 1 FROM payment_schema_migrations WHERE version='027_provider_credential_readiness.sql') THEN
+    RAISE EXCEPTION 'migration 027 required before role provisioning';
   END IF;
-  FOREACH role_name IN ARRAY ARRAY['zephipay_economic_admin','zephipay_economic_app','zephipay_economic_issuer','zephipay_economic_signer','zephipay_economic_observer','zephipay_economic_reader'] LOOP
+  FOREACH role_name IN ARRAY ARRAY['zephipay_economic_admin','zephipay_economic_app','zephipay_economic_issuer','zephipay_economic_signer','zephipay_economic_observer','zephipay_economic_reader','zephipay_economic_identity'] LOOP
     IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname=role_name) THEN
       EXECUTE format('CREATE ROLE %I NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS',role_name);
     END IF;
@@ -19,19 +19,19 @@ DO $$ DECLARE role_name text; r record; BEGIN
 END; $$;
 -- Definer functions use a pinned search path. PUBLIC must not create objects in that path.
 REVOKE CREATE ON SCHEMA public FROM PUBLIC;
-GRANT USAGE ON SCHEMA public TO zephipay_economic_admin,zephipay_economic_app,zephipay_economic_issuer,zephipay_economic_signer,zephipay_economic_observer,zephipay_economic_reader;
+GRANT USAGE ON SCHEMA public TO zephipay_economic_admin,zephipay_economic_app,zephipay_economic_issuer,zephipay_economic_signer,zephipay_economic_observer,zephipay_economic_reader,zephipay_economic_identity;
 GRANT CREATE ON SCHEMA public TO zephipay_economic_admin;
 DO $$ DECLARE name text; f record; BEGIN
-  FOREACH name IN ARRAY ARRAY['economic_network_registry','economic_asset_registry','economic_attempt_heads','economic_attempts',
+  FOREACH name IN ARRAY ARRAY['economic_deployment_identity','economic_deployment_logins','economic_provider_token_uses','economic_network_registry','economic_asset_registry','economic_attempt_heads','economic_attempts',
     'economic_consent_evidence','economic_runtime_evidence','economic_sponsor_budgets','economic_finalizations','economic_authority_events',
     'economic_callback_evidence','economic_exposure_projection','economic_session_bindings','economic_budget_heads','economic_budget_versions',
     'economic_signer_contact_authority','economic_expiry_records','economic_effect_evidence','economic_observer_operations',
     'economic_observer_report_summary','economic_authority_incidents','economic_observer_reports','economic_authority_trace','economic_signer_reports','economic_signer_report_summary'] LOOP
     EXECUTE format('ALTER TABLE public.%I OWNER TO zephipay_economic_admin',name);
-    EXECUTE format('REVOKE ALL ON public.%I FROM PUBLIC,zephipay_economic_app,zephipay_economic_issuer,zephipay_economic_signer,zephipay_economic_observer,zephipay_economic_reader',name);
+    EXECUTE format('REVOKE ALL ON public.%I FROM PUBLIC,zephipay_economic_app,zephipay_economic_issuer,zephipay_economic_signer,zephipay_economic_observer,zephipay_economic_reader,zephipay_economic_identity',name);
     -- REVOKE table privileges does not revoke previously granted column privileges.
     FOR f IN SELECT attname FROM pg_attribute WHERE attrelid=format('public.%I',name)::regclass AND attnum>0 AND NOT attisdropped LOOP
-      EXECUTE format('REVOKE ALL (%I) ON public.%I FROM PUBLIC,zephipay_economic_app,zephipay_economic_issuer,zephipay_economic_signer,zephipay_economic_observer,zephipay_economic_reader',f.attname,name);
+      EXECUTE format('REVOKE ALL (%I) ON public.%I FROM PUBLIC,zephipay_economic_app,zephipay_economic_issuer,zephipay_economic_signer,zephipay_economic_observer,zephipay_economic_reader,zephipay_economic_identity',f.attname,name);
     END LOOP;
   END LOOP;
   FOR f IN SELECT p.oid::regprocedure AS signature FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
@@ -42,7 +42,7 @@ DO $$ DECLARE name text; f record; BEGIN
       'economic_record_signer_conflict','economic_contact_session_chronology','economic_record_incident','economic_incident_freeze_guard','economic_ingest_observation',
       'economic_commit_signer_contact','economic_expire_never_contacted','economic_record_signer_unknown','economic_effect_evidence_guard','economic_apply_finalized_accounting']) LOOP
     EXECUTE format('ALTER FUNCTION %s OWNER TO zephipay_economic_admin',f.signature);
-    EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC,zephipay_economic_app,zephipay_economic_issuer,zephipay_economic_signer,zephipay_economic_observer,zephipay_economic_reader',f.signature);
+    EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC,zephipay_economic_app,zephipay_economic_issuer,zephipay_economic_signer,zephipay_economic_observer,zephipay_economic_reader,zephipay_economic_identity',f.signature);
     EXECUTE format('ALTER FUNCTION %s SET search_path=pg_catalog,public,pg_temp',f.signature);
   END LOOP;
 END; $$;
@@ -94,4 +94,14 @@ GRANT SELECT ON economic_observer_operations,economic_exposure_projection,econom
 GRANT INSERT(event_type,actor,intent_id,generation,finalization_id,consent_id,runtime_id,reference) ON economic_authority_events TO zephipay_economic_app,zephipay_economic_issuer,zephipay_economic_signer;
 REVOKE ALL ON SEQUENCE economic_authority_events_event_id_seq FROM PUBLIC;
 GRANT USAGE ON SEQUENCE economic_authority_events_event_id_seq TO zephipay_economic_app,zephipay_economic_issuer,zephipay_economic_signer;
+GRANT SELECT ON economic_deployment_identity,economic_deployment_logins TO zephipay_economic_identity,zephipay_economic_app,zephipay_economic_issuer,zephipay_economic_signer,zephipay_economic_observer,zephipay_economic_reader;
+GRANT SELECT,INSERT ON economic_provider_token_uses TO zephipay_economic_identity,zephipay_economic_issuer;
+-- Identity service uses the existing canonical lifecycle, CAS and security-event transactions.
+GRANT SELECT,INSERT ON accounts,external_identities,account_sessions,account_security_events TO zephipay_economic_identity;
+GRANT UPDATE(status,version,updated_at) ON accounts TO zephipay_economic_identity;
+GRANT UPDATE(revoked_at) ON account_sessions TO zephipay_economic_identity;
+GRANT SELECT ON economic_session_bindings TO zephipay_economic_identity;
+GRANT INSERT(issuer,provider_subject,provider_session_reference,account_session_id) ON economic_session_bindings TO zephipay_economic_identity;
+GRANT INSERT(event_type,actor,intent_id,generation,finalization_id,consent_id,runtime_id,reference) ON economic_authority_events TO zephipay_economic_identity;
+GRANT USAGE ON SEQUENCE account_security_events_event_id_seq,economic_authority_events_event_id_seq TO zephipay_economic_identity;
 COMMIT;

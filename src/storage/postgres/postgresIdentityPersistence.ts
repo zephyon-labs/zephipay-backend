@@ -180,27 +180,7 @@ export class PostgresIdentityPersistence implements IdentityPersistence {
   }
 
   createAccountSession(input: Parameters<IdentityPersistence["createAccountSession"]>[0]): Promise<Readonly<{ account: Account; session: AccountSession }>> {
-    validateUuid(input.sessionId, "Session ID");
-    validateTimestamp(input.expiresAt, "Session expiry time");
-    if (input.createdAt) validateTimestamp(input.createdAt, "Session creation time");
-    if (input.createdAt && Date.parse(input.expiresAt) <= Date.parse(input.createdAt)) {
-      throw new Error("Session expiry must be after creation.");
-    }
-    return this.transaction(async (client) => {
-      const current = await lockAccount(client, input.accountId);
-      requireVersion(current, input.expectedAccountVersion);
-      const result = await client.query(
-        `INSERT INTO account_sessions (session_id,account_id,created_at,expires_at)
-         VALUES ($1,$2,COALESCE($3::timestamptz,now()),$4) RETURNING *`,
-        [input.sessionId, input.accountId, input.createdAt ?? null, input.expiresAt],
-      );
-      const session = mapAccountSession(result.rows[0]);
-      const account = await incrementAccount(client, current, session.createdAt);
-      await appendSecurityEvent(client, account, "SESSION_CREATED", session.createdAt, {
-        sessionId: session.sessionId,
-      });
-      return { account, session };
-    });
+    return this.transaction(client => createAccountSessionInTransaction(client, input));
   }
 
   async findAccountSession(sessionId: string): Promise<AccountSession | undefined> {
@@ -217,23 +197,7 @@ export class PostgresIdentityPersistence implements IdentityPersistence {
   }
 
   revokeAccountSession(input: Parameters<IdentityPersistence["revokeAccountSession"]>[0]): Promise<Readonly<{ account: Account; session: AccountSession }>> {
-    if (input.revokedAt) validateTimestamp(input.revokedAt, "Session revocation time");
-    return this.transaction(async (client) => {
-      const current = await lockAccount(client, input.accountId);
-      requireVersion(current, input.expectedAccountVersion);
-      const result = await client.query(
-        `UPDATE account_sessions SET revoked_at=COALESCE($3::timestamptz,now())
-         WHERE session_id=$1 AND account_id=$2 AND revoked_at IS NULL RETURNING *`,
-        [input.sessionId, input.accountId, input.revokedAt ?? null],
-      );
-      if (!result.rows[0]) throw new Error(`Session ${input.sessionId} was not found or is already revoked.`);
-      const session = mapAccountSession(result.rows[0]);
-      const account = await incrementAccount(client, current, session.revokedAt as string);
-      await appendSecurityEvent(client, account, "SESSION_REVOKED", session.revokedAt as string, {
-        sessionId: session.sessionId,
-      });
-      return { account, session };
-    });
+    return this.transaction(client => revokeAccountSessionInTransaction(client, input));
   }
 
   async listAccountSecurityEvents(accountId: string): Promise<AccountSecurityEvent[]> {
@@ -340,4 +304,47 @@ function mapSecurityEvent(row: QueryResultRow): AccountSecurityEvent {
 
 function isUniqueViolation(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "23505";
+}
+
+/** Canonical lifecycle logic shared by the repository and authenticated readiness service. Caller owns BEGIN/COMMIT. */
+export async function createAccountSessionInTransaction(client: PoolClient, input: Parameters<IdentityPersistence["createAccountSession"]>[0]): ReturnType<IdentityPersistence["createAccountSession"]> {
+  validateUuid(input.sessionId, "Session ID");
+  validateTimestamp(input.expiresAt, "Session expiry time");
+  if (input.createdAt) validateTimestamp(input.createdAt, "Session creation time");
+  if (input.createdAt && Date.parse(input.expiresAt) <= Date.parse(input.createdAt)) {
+    throw new Error("Session expiry must be after creation.");
+  }
+
+  const current = await lockAccount(client, input.accountId);
+  requireVersion(current, input.expectedAccountVersion);
+  const result = await client.query(
+    `INSERT INTO account_sessions (session_id,account_id,created_at,expires_at)
+     VALUES ($1,$2,COALESCE($3::timestamptz,now()),$4) RETURNING *`,
+    [input.sessionId, input.accountId, input.createdAt ?? null, input.expiresAt],
+  );
+  const session = mapAccountSession(result.rows[0]);
+  const account = await incrementAccount(client, current, session.createdAt);
+  await appendSecurityEvent(client, account, "SESSION_CREATED", session.createdAt, {
+    sessionId: session.sessionId,
+  });
+  return { account, session };
+}
+
+export async function revokeAccountSessionInTransaction(client: PoolClient, input: Parameters<IdentityPersistence["revokeAccountSession"]>[0]): ReturnType<IdentityPersistence["revokeAccountSession"]> {
+  if (input.revokedAt) validateTimestamp(input.revokedAt, "Session revocation time");
+
+  const current = await lockAccount(client, input.accountId);
+  requireVersion(current, input.expectedAccountVersion);
+  const result = await client.query(
+    `UPDATE account_sessions SET revoked_at=COALESCE($3::timestamptz,now())
+     WHERE session_id=$1 AND account_id=$2 AND revoked_at IS NULL RETURNING *`,
+    [input.sessionId, input.accountId, input.revokedAt ?? null],
+  );
+  if (!result.rows[0]) throw new Error(`Session ${input.sessionId} was not found or is already revoked.`);
+  const session = mapAccountSession(result.rows[0]);
+  const account = await incrementAccount(client, current, session.revokedAt as string);
+  await appendSecurityEvent(client, account, "SESSION_REVOKED", session.revokedAt as string, {
+    sessionId: session.sessionId,
+  });
+  return { account, session };
 }

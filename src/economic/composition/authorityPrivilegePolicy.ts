@@ -1,5 +1,17 @@
 // Explicit reviewed allowlist, independent of live role grants. Update deliberately with the SQL provisioning contract.
 export const authorityPrivilegePolicy = {
+  identity: {
+    tables: {
+      accounts: {SELECT:["*"], INSERT:["*"], UPDATE:["status","version","updated_at"]},
+      external_identities: {SELECT:["*"], INSERT:["*"]},
+      account_sessions: {SELECT:["*"], INSERT:["*"], UPDATE:["revoked_at"]},
+      account_security_events: {SELECT:["*"], INSERT:["*"]},
+      economic_session_bindings: {SELECT:["*"], INSERT:["issuer","provider_subject","provider_session_reference","account_session_id"]},
+      economic_authority_events: {INSERT:["event_type","actor","intent_id","generation","finalization_id","consent_id","runtime_id","reference"]},
+    },
+    functions: [],
+    sequences: {account_security_events_event_id_seq:{USAGE:["*"]}, economic_authority_events_event_id_seq:{USAGE:["*"]}},
+  },
   app: {
     tables: {
       "economic_authority_incidents": {"SELECT":["*"]},
