@@ -41,6 +41,7 @@ export async function verifyAuthorityLogin(pool: Pool, role: EconomicAuthorityRo
     if ((await client.query("SELECT pg_has_role(current_user,datdba,'MEMBER') AS owner FROM pg_database WHERE datname=current_database()")).rows[0].owner) problems.push("database ownership");
     const tables:TablePolicy = {...expected.tables,
       economic_deployment_identity:{SELECT:["*"]},economic_deployment_logins:{SELECT:["*"]}};
+    if(role==="issuer") tables.economic_deployment_identity.UPDATE=["singleton"];
     if(role==="identity" || role==="issuer") tables.economic_provider_token_uses={SELECT:["*"],INSERT:["*"]};
     if(options.syntheticFixtures) {
       if(role==="signer") { tables["economic_synthetic.signer_plans"]={SELECT:["*"]};tables["economic_synthetic.signer_operations"]={SELECT:["*"],INSERT:["*"]}; }

@@ -43,6 +43,12 @@ export const authorityPrivilegePolicy = {
   },
   issuer: {
     tables: {
+      economic_confirmation_policies: {SELECT:["*"]},
+      economic_confirmation_policy_heads: {SELECT:["*"], UPDATE:["deployment_id"]},
+      economic_confirmation_summary: {SELECT:["*"]},
+      economic_confirmation_challenges: {SELECT:["*"], INSERT:["challenge_id","request_id","account_id","principal_id","account_session_id","account_version","envelope_digest","intent_id","generation","action","environment","issuer","provider_subject","configuration","configuration_revision","policy_fingerprint","policy_revision","provider_revision","authentication_digest","transaction_id","nonce","requested_at","expires_at","reauthentication"]},
+      economic_confirmation_consumptions: {SELECT:["*"], INSERT:["challenge_id","consent_id","authentication_digest","reauthentication_digest","confirmation_request_digest","authentication_time","assurance","confirmed_at","expires_at"]},
+      economic_attempt_heads: {SELECT:["*"], UPDATE:["intent_id"]},
       "accounts": {"SELECT":["*"],"UPDATE":["account_id"]},
       "account_sessions": {"SELECT":["*"],"UPDATE":["session_id"]},
       "external_identities": {"SELECT":["*"]},
@@ -94,6 +100,7 @@ export const authorityPrivilegePolicy = {
   },
   reader: {
     tables: {
+      economic_confirmation_summary: {SELECT:["*"]},
       "economic_signer_report_summary": {"SELECT":["*"]},
       "economic_authority_incidents": {"SELECT":["*"]},
       "economic_observer_report_summary": {"SELECT":["*"]},

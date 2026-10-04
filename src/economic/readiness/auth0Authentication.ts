@@ -24,6 +24,7 @@ function strictHeader(raw: string): void {
 /** Auth0 default-profile adapter; deliberately cannot mint a generic ProviderTokenVerifier proof or economic consent. */
 export class Auth0AuthenticationVerifier {
   private readonly proofs = new WeakSet<object>();
+  private readonly reauthProofs = new WeakMap<object, Readonly<{ tokenDigest: string; issuedAt: number; expiresAt: number }>>();
   constructor(readonly snapshots: Auth0Snapshots) {}
   async verifyAccess(raw: string, requiredScope: string): Promise<Auth0Authentication> {
     strictHeader(raw); requireCondition(text(requiredScope) && !requiredScope.includes(" "), "Explicit scope required.");
@@ -57,6 +58,20 @@ export class Auth0AuthenticationVerifier {
       challenge.requestedAt <= now && challenge.expiresAt > now && text(c.acr) && challenge.acceptedAcr.includes(c.acr), "Recent authentication/assurance unavailable or mismatched.");
     await this.snapshots.assertCurrent(snapshot);
     requireCondition(challenge.expiresAt > Date.now()/1000 && c.exp > Date.now()/1000 && Date.now()/1000-c.auth_time <= challenge.maxAuthenticationAgeSeconds, "Reauthentication expired during verification.");
-    return frozen({ kind: "reauthentication-only", subject: c.sub, authenticationTime: c.auth_time, acr: c.acr, challengeDigest: sha256(JSON.stringify(challenge)), keyRevision: snapshot.provenance.revision });
+    const proof = frozen({ kind: "reauthentication-only" as const, subject: c.sub, authenticationTime: c.auth_time, acr: c.acr, challengeDigest: sha256(JSON.stringify(challenge)), keyRevision: snapshot.provenance.revision });
+    this.reauthProofs.set(proof, frozen({ tokenDigest: sha256(rawIdToken), issuedAt: c.iat, expiresAt: c.exp }));
+    return proof;
+  }
+  /** Provenance and freshness recheck after database waits; copying a proof never grants authority. */
+  async assertReauthentication(proof: Auth0Reauthentication, challenge: ReauthenticationChallenge, databaseNow: number) {
+    const metadata = this.reauthProofs.get(proof);
+    requireCondition(metadata && proof.challengeDigest === sha256(JSON.stringify(challenge)) && proof.subject === challenge.subject,
+      "Unverified or substituted reauthentication.");
+    const snapshot = await this.snapshots.current();
+    for (const now of [databaseNow, Date.now()/1000]) requireCondition(Number.isFinite(now) && proof.keyRevision === snapshot.provenance.revision &&
+      metadata.issuedAt <= now && metadata.expiresAt > now && challenge.requestedAt <= proof.authenticationTime && proof.authenticationTime <= now &&
+      now - proof.authenticationTime <= challenge.maxAuthenticationAgeSeconds && challenge.expiresAt > now && challenge.acceptedAcr.includes(proof.acr),
+      "Retired, expired or insufficient reauthentication.");
+    return metadata;
   }
 }
