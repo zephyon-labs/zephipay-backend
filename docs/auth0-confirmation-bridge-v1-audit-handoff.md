@@ -1,90 +1,93 @@
-# Auth0 confirmation bridge V1 — independent audit handoff
+# Auth0 confirmation bridge V1 — focused corrective re-audit
 
-Scope: the local, non-value Backend continuation on `feat/auth0-confirmation-bridge-v1`, based on `9bc94e24a3cd70fb1d83f226ad6bd76bd28ca1d3`. Review the single feature commit relative to that base. The final external manifest supplies the exact commit, parent, tree, changed-file inventory, per-file SHA-256 values and binary patch SHA-256, avoiding a self-referential commit fingerprint in this document.
+Scope: the local, non-value Backend candidate on `feat/auth0-confirmation-bridge-v1`, based on canonical `9bc94e24a3cd70fb1d83f226ad6bd76bd28ca1d3`. Original audited commit: `6930f211688c7b0602bb4322913f06ec87daf565`. Its verdict was **REVISE BEFORE MERGE**, with AUD-CONF-01 P1 and AUD-CONF-02 P2. Review the one corrective commit and the combined candidate. The external audit manifest supplies the exact commit/parent/tree, changed-file inventory, per-file hashes and both binary patch fingerprints without creating a self-referential commit hash in this document.
 
-## Protected closure already completed
+**Current closure status: CORRECTION REQUIRED.** The scoped confirmation suite passes 86/86, but required full PostgreSQL validation is not clean in this environment. The complete first run passed 463/465; the two failures passed in isolation, while one bounded full retry hit a different unchanged expiry test and was stopped. A PostgreSQL clock trace independently recorded a 0.771709-second backward step. Do not treat this package as ready for focused re-audit until the full suite passes under stable clock conditions. No accepted finalization/Runtime/provider implementation or existing downstream test was modified to mask these failures.
 
-- Exact accepted predecessor: `94b0b3ba7bba9569d281c59b917caee05c44429f`, based on `4d9b6e4529559f480896278ea6d2a6e7eda670f7`.
-- Independent verdict: ACCEPT. Exact combined patch SHA-256: `a2e4c0068047c1e1159b056e3052a8be0664914d00edfbbcdad326ab4f78f44a`.
-- [Backend PR #8](https://github.com/zephyon-labs/zephipay-backend/pull/8) merged normally with required protected verification and matching accepted head; no bypass or semantic correction.
-- [Required PR CI](https://github.com/zephyon-labs/zephipay-backend/actions/runs/37167391801) and [canonical-main CI](https://github.com/zephyon-labs/zephipay-backend/actions/runs/37167597739) succeeded.
-- Merge `9bc94e24a3cd70fb1d83f226ad6bd76bd28ca1d3` has the accepted tree. Canonical main equals origin/main and is clean. The merged worktree and local/remote predecessor branch were removed safely; normal metadata pruning completed.
-- Phase B has not been pushed, opened as a PR, merged or deployed.
+## Prior protected closure
+
+The accepted provider-readiness predecessor `94b0b3ba7bba9569d281c59b917caee05c44429f` merged normally through [Backend PR #8](https://github.com/zephyon-labs/zephipay-backend/pull/8). [PR verification](https://github.com/zephyon-labs/zephipay-backend/actions/runs/37167391801) and [main verification](https://github.com/zephyon-labs/zephipay-backend/actions/runs/37167597739) passed. Canonical main is `9bc94e24a3cd70fb1d83f226ad6bd76bd28ca1d3`. This bridge candidate and correction remain local: no push, PR, merge or deployment.
+
+## Findings and correction
+
+| Finding | Root cause | Corrected contract |
+| --- | --- | --- |
+| AUD-CONF-01, P1 | Issuer INSERT grants made terminal-shaped challenge/consumption/consent rows possible without the service ceremony. Nullable reauthentication JSON and incomplete database policy/provenance checks allowed stale and fabricated evidence. | Remove direct confirmation mutation grants, including old column grants. Guard challenge issuance and terminal admission under the existing NOLOGIN administrative owner. A separate existing identity credential registers mandatory scalar provider evidence; issuer cannot register it or write terminal rows. |
+| AUD-CONF-02, P2 | `SET CONSTRAINTS ALL IMMEDIATE` can run deferred expiry triggers before the physical commit; waiting afterwards invalidated the claimed invariant. | Model B: database-observed, locked admission before expiry; consent expiry bounded by the challenge. Late visibility can preserve historical CONFIRMED while the already expired consent is immediately downstream-ineligible. No physical-COMMIT-time promise remains. |
+
+See the [architecture contract](auth0-confirmation-bridge-v1.md) for exact function signatures, ACL inventory, credential trust and migration ordering. PostgreSQL documents early [constraint scheduling](https://www.postgresql.org/docs/16/sql-set-constraints.html) and [security-definer hardening](https://www.postgresql.org/docs/16/sql-createfunction.html).
 
 ## Review map
 
-| Files | Main responsibility |
+| Files | Corrective responsibility |
 | --- | --- |
-| `src/economic/confirmation/confirmationBridge.ts` | Exact request parsing; authenticated service caller; canonical locks; Protocol binding; issue/roundtrip/confirm/recover; atomic admission |
-| `src/economic/confirmation/confirmationPolicy.ts` | Pinned signed operator policy, registration, immutable policy identity, retirement and production claim gate |
-| `src/economic/readiness/auth0Authentication.ts` | Small additive provenance/freshness recheck for already accepted reauthentication verification |
-| `migrations/028_auth0_confirmation_bridge.sql` | Four durable tables, bounded state view, append-only and deferred commit guards |
-| `sql/economic-database-roles-v1.sql`, `authorityPrivilegePolicy.ts`, `verifyAuthorityLogin.ts` | Exact issuer-only insertion columns and lock-only privileges; reader projection; actual-LOGIN verification remains fail-closed |
-| `tests/auth0Confirmation.test.ts`, `tests/helpers/confirmationFixtures.ts`, `tests/postgresAuth0Confirmation.integration.ts` | Synthetic proof/profile fixtures, adversarial and durable PostgreSQL tests; no new transaction signing |
-| `package.json`, `scripts/validate-migrations.ts` | New suite in normal PostgreSQL regression and explicit migration validation |
-| `docs/auth0-confirmation-bridge-v1.md`, `docs/auth0-confirmation-profile-attestation-v1.json` | Architecture/operational contract and truthful local UNATTESTED record |
+| `migrations/029_confirmation_database_authority.sql` | Mandatory scalar proofs, configuration rules, admission records, canonical locks/validation, guarded operations, root-only markers, legacy quarantine, support projection, legacy table/column grant revocation and removal of the false expiry guard |
+| `sql/economic-database-roles-v1.sql`, `src/economic/composition/authorityPrivilegePolicy.ts` | NOLOGIN ownership, exact EXECUTE grants, private helpers/tables, issuer read-only challenge/consumption privileges, identity-only proof registration |
+| `src/economic/confirmation/confirmationProofAuthority.ts` | Accepted access/reauthentication verification in the separate identity compartment; exact confirmation-body digest registration |
+| `src/economic/confirmation/confirmationBridge.ts` | Existing authenticated service contract with guarded SQL issuance/admission and an internal opaque proof reference |
+| `src/economic/confirmation/confirmationPolicy.ts` | Persist the configuration revision from the already verified deployment alongside the immutable signed policy |
+| `tests/postgresAuth0Confirmation.integration.ts` | Actual restricted LOGIN negative/positive matrix, mandatory evidence, atomicity, late commit, bounded races, recovery and downstream expiry |
+| `tests/postgresConfirmationUpgrade.integration.ts` | Actual 028-to-029 upgrade with old malformed terminal rows, historical row preservation, consent quarantine, repeat migrations and role provisioning |
+| `package.json`, `scripts/validate-migrations.ts` | Include the upgrade test in normal PostgreSQL regression and recognize migration 029 |
+| Architecture and this handoff | Corrected trust/expiry claims and focused re-audit evidence |
 
-Existing migrations 001–027, package lock, generic provider token verifier, Protocol dependency pin and public Send wiring are unchanged. No other repository is modified. The ZERA baseline remains exactly 200,000,000 units with the same canonical allocation artifact and SHA-256 `182299950ae49c2bd2d8d5a99d2f73b3d0f77520982ab3c04ff8e2b9c1bbdff1`.
+Migrations 001–028, package lock, accepted Auth0 verification, provider/readiness implementation, generic evidence ingestion, finalization, signer/observer implementation, Protocol v0.4.0 dependency and public Send wiring are unchanged from the audited commit. The combined candidate retains the original accepted-verifier provenance addition relative to canonical main; this corrective commit does not revise it. No other repository is modified. ZERA's baseline SHA-256 remains `182299950ae49c2bd2d8d5a99d2f73b3d0f77520982ab3c04ff8e2b9c1bbdff1`.
 
-## Audit priorities
+## Security review priorities
 
-1. Trace the authenticated identity-service request to its canonical session; distinguish it from caller-supplied session IDs. The future client adapter must derive this session and explicit confirmation from trusted context.
-2. Check issuer/subject account resolution, canonical payment principal, session chronology, account version and current attempt generation. Confirm Protocol owns the envelope digest.
-3. Follow nonce, server transaction ID, exact envelope and fixed action across roundtrip and confirmation. Copied proof objects, callback substitution and another challenge must fail.
-4. Check freshness against `auth_time`, configured ACR and both database/current provider time. No `iat` fallback or inference that a token proves a wallet signature.
-5. Review head/account/session/policy/provider lock order, simultaneous confirmations and both revocation orderings. Examine the deferred commit guard after asynchronous provider checks.
-6. Verify consumption/consent binding and rollback at both insertion points. Test crash-equivalent lost responses and object reconstruction without repeating confirmation.
-7. Check operator registration privileges, policy retirement, configuration and key rotation. Historical projection must not be confused with current external provider readiness.
-8. Check actual LOGIN ACLs, column provenance, append-only records and bounded reader exposure. No expanded Runtime/signer/observer authority is added by this bridge.
-9. Verify source reachability: no production route imports the bridge. No wallet signing, exposure reservation, Runtime approval or settlement adapter is called by the new integration tests.
-10. Preserve the explicit gaps: TEST fixtures are not tenant attestation; volatile transport ledgers are not durable replay; source inspection is not a live Site compatibility test.
+1. Verify every ordinary LOGIN lacks direct challenge/consumption/proof/admission mutation, and cannot use reserved bridge consent/audit markers. Confirm column privileges as well as table privileges. The existing generic consent authority is deliberately preserved outside the bridge markers.
+2. Trace identity-only attestation and issuer-only issuance/admission through actual registered `session_user`, credential generation, pinned search paths and NOLOGIN ownership. Helpers and proof tables must remain private. PostgreSQL checks canonical data and evidence scalars; it does not verify JWT signatures. The trusted identity application owns that cryptographic step. A single issuer LOGIN cannot invent the missing identity attestation; a single identity LOGIN cannot admit terminal state. Joint compromise and administrator control are outside this single-credential claim.
+3. Compare account/principal/session/version, current intent/generation, environment, stored Protocol envelope, server transaction ID, fixed action, immutable current policy, configuration fingerprint/revision, provider revision, nonce, exact body digest, freshness and assurance at guarded admission. Identity proof registration also checks the body transaction ID against the challenge. Reload and lock the attempt after acquiring the intent head so a cancellation/finalization committed during the wait cannot leave a stale OPEN snapshot. Caller comparisons cannot replace stored truth.
+4. Check explicit non-null proof fields and exact stored reauthentication structure. Empty JSON, omitted/null security fields and unapproved assurance must fail independently of service parsing. Approved labels are trusted only as an identity-verifier attestation, never accepted from issuer/browser JSON.
+5. Review serialized canonical revocation/version ordering, duplicate challenge/proof constraints and atomic consent/consumption/admission/audit insertion. Proof registration may remain after a failed terminal transaction; it grants no authority alone.
+6. Reproduce valid admission, early `SET CONSTRAINTS ALL IMMEDIATE`, wait beyond challenge expiry and commit. History may say CONFIRMED; expired consent must grant no subsequent claim, first-contact, sponsor-finalization, signing or submission authority. Preserve accepted recovery semantics for operations already contacted while valid.
+7. Review 028 upgrade quarantine: immutable challenge/consumption rows retained byte-for-byte, only linked consent revoked, generic unlinked consent untouched, old rows never promoted to CONFIRMED. New policy-rule registration is required before new ceremonies.
+8. Verify source reachability and unchanged economic boundaries. No public route imports the bridge, and no new code invokes Runtime approval or a signer/observer port. TEST fixtures, volatile transport replay ledgers and local multi-role fixtures are not a real tenant or deployment-isolation attestation.
 
-## Validation and failure evidence
+## Validation evidence
 
-All new PostgreSQL cases use a dedicated disposable local PostgreSQL 16 database and distinct restricted fixture LOGINs. No real provider, production database, live signer, live observer or RPC endpoint is configured. The full existing regression contains historical offline dummy transaction-signing fixtures; the new bridge suite has no transaction-signing code and no signer/observer port attached.
+All PostgreSQL commands target a disposable local PostgreSQL 16 fixture. Distinct actual restricted LOGIN connections exercise identity, application, issuer, signer-result, observer and reader roles. Suites run sequentially because they reset fixture data. No real Auth0, production credentials, deployed database, live signer, observer or RPC endpoint is configured.
+
+The existing full regression includes historical offline dummy transaction-signing fixtures. This correction adds no transaction signing. The new downstream test uses a privileged pre-contact database fixture with a deliberately non-valid dummy artifact and a throwing signer spy; it never represents that fixture as a verified customer signature. It tests the shared authoritative loader used by claim/sponsor-finalization, the real SQL first-contact gate, and recovery before signer invocation. Existing full regression supplies the unchanged complete claim-path coverage.
 
 | Validation | Result |
 | --- | --- |
 | `npm run lint` / TypeScript no-emit | PASS |
 | `npm run build` | PASS |
 | `npm test` | 607 passed, 0 failed |
-| Focused Auth0 readiness, accepted correction and new confirmation unit tests | 136 passed, 0 failed; includes 13 new confirmation tests |
-| `npm run test:postgres:confirmation` | 34 passed, 0 failed |
-| All six actual restricted LOGINs | PASS within new suite |
-| `npm run migrate:validate` | 28 ordered migrations validated |
-| Fresh local migration and role installation | PASS |
-| Full PostgreSQL regression | 412 passed, 0 failed |
-| Checksummed migration reapplication | PASS; no migrations reapplied |
+| Focused readiness, accepted artifact correction and confirmation unit tests | 136 passed, 0 failed |
+| `npm run test:postgres:confirmation` | 86 passed, 0 failed |
+| All six actual restricted LOGINs | Included in confirmation and normal PostgreSQL suites |
+| `npm run migrate:validate` | 29 ordered migrations validated |
+| Fresh local migrations and role installation | PASS |
+| Explicit 028-to-029 historical-row upgrade | 1 passed, 0 failed |
+| Checksummed repeat migration and repeat role installation | PASS in upgrade test |
+| Isolated retry of the two unchanged timing-related failures | 2 passed, 0 failed; no implementation changes |
+| Full PostgreSQL regression | NOT CLEAN: complete run 463/465; 2 isolated retries passed; bounded full retry stopped after another unchanged expiry failure |
 | Final `git diff --check` | PASS |
 
-The initial 28-case development run had one fixture-setup failure: synthetic ACL tables expected by six-role verification were missing. The fixture now installs the existing synthetic schema without invoking its services. The subsequent 34-case suite passed. No ACL check was weakened. Commit-time expiry was strengthened before the final validation run; only the new uncommitted migration was revised, and this task's disposable database was rebuilt. Previously accepted migration bytes were not changed.
+Development failures are retained in the external manifest. An upgrade fixture initially omitted an existing required session binding; adding that fixture prerequisite resolved it. Synthetic callbacks, endpoint attestations and service messages encountered timing rejections; final fixture issuance uses a small validity margin, without changing production verification. A database-expiry test also woke before the PostgreSQL deadline when using the application clock; final deadline waits and expiry assertions use PostgreSQL clock observations. One targeted run accidentally overlapped a resetting confirmation suite and failed in setup; that run is discarded and final suites run sequentially. Intermediate runs were stopped during final review to add explicit transaction binding and reload the attempt after lock waits; only the uncommitted 029 migration changed, and the correction database was rebuilt before final validation. The first full regression passed 463/465, with two failures in unchanged signer recovery and short-lived-intent setup. An independent 100-sample PostgreSQL clock trace observed time moving backward by 0.771709 seconds. The two cases passed in isolation. The one bounded full retry then failed `expired intent and Runtime evidence deny contact; expiry selection remains advisory` with a missing expected rejection after an application-clock wait, and was stopped. These failures are consistent with the independently observed clock instability, but the exact cause of each failure is not independently proven; the original log and clock trace remain audit evidence. No security assertion, ACL check or downstream expiry check was relaxed.
 
-| Failure class | Demonstrated result |
+| Regression | Evidence |
 | --- | --- |
-| Lost creation response | Repeated same session/request ID returns same challenge, transaction and timestamps; another envelope conflicts |
-| Authentication/callback without explicit confirmation | Zero consent records |
-| Lost confirmation response / two instances | One committed consumption and consent; authenticated read recovers result |
-| Duplicate confirmation / reconstructed process | Rejected from durable storage, including reverified old provider response |
-| Concurrent confirmation | Exactly one winner, repeated three times |
-| Revocation wins first | Confirmation rejects after canonical lock wait, repeated three times |
-| Confirmation wins first | Revocation waits; immutable confirmed history remains, repeated three times |
-| Account version/status, cancellation/replacement | Prior challenge becomes unusable |
-| Wrong session/envelope/challenge/transaction/action/proof/nonce/subject/caller/environment | Rejected; no authority admitted |
-| Missing/stale `auth_time`, missing/insufficient assurance, wrong issuer/client | Accepted adapter rejects callback |
-| Provider/key/configuration/policy retirement | Old proof/policy or challenge rejected; mid-admission key retirement rolls back, repeated three times |
-| Durable key revision changes during confirmation | Rotation waits for eligible confirmation transaction, then blocks old revision |
-| Database-clock expiry and final readiness delay | No consent; deferred guard rejects expiry reached before commit |
-| Database error inserting consent or consumption | Both records roll back; ISSUED recovery and safe later retry |
-| Unattested/expired operator facts | Creation/use blocked; TEST and ATTESTED records still cannot claim production readiness |
+| Direct terminal fabrication | All six LOGINs denied direct confirmation-table writes and reserved bridge consent/audit writes; unsupported guarded functions denied |
+| Guarded positive path | Separate accepted identity proof then issuer admission; exactly one admission and consumption |
+| Negative evidence matrix | Empty JSON; missing/null auth time, assurance, provider evidence, nonce, transaction ID and digests; unapproved assurance; wrong nonce/session/envelope/transaction/body; stale provider/policy/config/account evidence and retired identity credential generation rejected |
+| Legacy malformed stored challenge | Empty requirements, stale account/provider/configuration/policy rejected; existing account/principal constraint also preserved |
+| Partial terminal writes | Injected failure at consent, consumption, admission and audit leaves zero terminal authority; valid retry succeeds |
+| Expiry model B | Early constraint scheduling and late commit retain history but expired consent fails the shared authority loader; fresh Runtime cannot substitute; SQL first-contact and recovery reject, signer calls zero |
+| Bounded races | Three repetitions each for concurrent confirmation, revocation orderings and account-version advancement; cancellation lock waits under Read Committed and Repeatable Read; duplicates rejected from durable storage |
+| Multi-instance recovery | Lost response and reconstructed service recover the same durable admission; no process-local terminal authority |
+| Migration/repeat | 028 fabricated-shaped history remains immutable, linked consent revoked, generic consent unchanged, LEGACY_UNVERIFIED projection, old column grants removed, 29 checksums, repeated provisioning |
 
-## Reproduction
+## Reproduction and artifact boundary
 
-Use Node 22 and a new disposable PostgreSQL 16 database under a fixture administrator. Supply connection URLs without printing credentials. Run `npm ci`, lint/build/unit tests, migration validation, `npm run migrate`, `npm run db:economic:roles`, the confirmation suite and normal `npm run test:postgres` sequentially. Tests intentionally truncate their isolated fixture data. Do not point them at any shared or deployed database.
+Use Node 22 and a new disposable PostgreSQL 16 database under a fixture administrator. Supply connection URLs without printing credentials. Run lint/build/unit tests, migration validation, migrations through 029, role provisioning, confirmation tests, upgrade test and full PostgreSQL tests. Use `TEST_DATABASE_URL` for tests and `DATABASE_URL` for migration/role commands. The upgrade test creates and drops its own disposable database, so its fixture administrator requires that authority. Do not point these truncating fixtures at a shared or deployed database; do not run two suites on the same fixture concurrently.
 
-Use `TEST_DATABASE_URL` for test commands and `DATABASE_URL` for migration/role commands. Do not run live canary/provision/submission commands. `git diff --check <base> HEAD` must pass. Verify the patch's SHA-256 against the manifest before audit. Recompute the binary patch with `git diff --binary <base> HEAD`.
+The original audit package is preserved at `/tmp/auth0-confirmation-bridge-v1-audit`. The corrective package is `/tmp/auth0-confirmation-bridge-v1-correction-audit`. Recompute its two patches with `git diff --binary 6930f211688c7b0602bb4322913f06ec87daf565 HEAD` and `git diff --binary 9bc94e24a3cd70fb1d83f226ad6bd76bd28ca1d3 HEAD`, then compare SHA-256 values to the updated manifest. The manifest records exact final validation, development failures and unchanged-boundary hashes. Do not run canary, live provisioning or submission commands.
 
-## Remaining gates and recommended next task
+## Remaining gates
 
-Actual tenant profile, allowed connections, required claims/scopes, ACR semantics, grant/refresh policy and deployed flow remain UNATTESTED. Pinned operator root selection, real deployment/TLS/workload evidence, durable shared service-transport replay, operational retention/quotas and a trusted client transaction adapter remain open. No browser session, mobile callback or real Auth0 roundtrip is claimed to have been tested.
+Actual tenant profile, allowed connections, claims/scopes, ACR semantics, grant/refresh policy and deployed flow remain UNATTESTED. Operator root selection, real deployment/TLS/workload and identity/issuer isolation, durable shared service-transport replay, operational retention/quotas and a trusted explicit-confirmation client transaction adapter remain open. No browser/mobile or real Auth0 roundtrip is claimed.
 
-Recommend independent audit of this exact local commit before any protected closure. After acceptance, the next architecture/integration task is an operator-attested Auth0 profile and isolated non-value identity/SDK transaction adapter, including durable transport replay. No live payment, custody, signing, settlement or ZERA activation is authorized by this handoff.
+First obtain a clean full PostgreSQL regression in a stable clock environment. The correction cannot yet be declared ready. Then recommend focused independent re-audit of AUD-CONF-01/AUD-CONF-02, the new dual-credential trust boundary, the precise admission-time expiry model and migration quarantine before protected closure. After acceptance, the next bounded task remains an operator-attested Auth0 profile and isolated non-value identity/SDK transaction adapter with durable transport replay. Stop after the local corrective commit and audit artifacts; this handoff authorizes no deployment, live payment or ZERA activation.

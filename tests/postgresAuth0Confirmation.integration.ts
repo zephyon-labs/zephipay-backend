@@ -4,8 +4,9 @@ import { readFileSync } from "node:fs";
 import { after, afterEach, before, beforeEach, test } from "node:test";
 import { Pool, type PoolConfig } from "pg";
 import { parse } from "pg-connection-string";
-import { createEconomicIntentEnvelopeV1 } from "zephyon-protocol";
+import { createEconomicIntentEnvelopeV1, createSponsorFinalizationTupleV1, sponsorTupleDigestV1 } from "zephyon-protocol";
 import { Auth0ConfirmationBridge, confirmationRoutes } from "../src/economic/confirmation/confirmationBridge";
+import { ConfirmationProofAuthority } from "../src/economic/confirmation/confirmationProofAuthority";
 import { registerConfirmationPolicy, type VerifiedConfirmationPolicy } from "../src/economic/confirmation/confirmationPolicy";
 import { verifyAuthorityLogin, type DeploymentExpectation } from "../src/economic/composition/verifyAuthorityLogin";
 import { databaseTime, sha256, transaction } from "../src/economic/foundation/database";
@@ -18,10 +19,10 @@ import { DeploymentReadiness, readinessRoles } from "../src/economic/readiness/d
 import { ProviderDeploymentReadiness } from "../src/economic/readiness/providerDeploymentReadiness";
 import { ReadinessServiceTransport } from "../src/economic/readiness/serviceTransport";
 import type { Auth0Authentication, Auth0Reauthentication, ReauthenticationChallenge } from "../src/economic/readiness/auth0Authentication";
-import { PostgresIdentityPersistence, revokeAccountSessionInTransaction } from "../src/storage/postgres/postgresIdentityPersistence";
+import { PostgresIdentityPersistence, createAccountSessionInTransaction, revokeAccountSessionInTransaction } from "../src/storage/postgres/postgresIdentityPersistence";
 import { confirmationPolicyFixture } from "./helpers/confirmationFixtures";
 import { installSyntheticStore } from "./helpers/syntheticAuthorityAdapters";
-import { accessFixture, endpointFixture, endpointKeys, headFixture, profileFixture, readyFixture, serviceKeys, snapshotFixture } from "./helpers/realProviderFixtures";
+import { accessFixture, endpointFixture, endpointKeys, headFixture, profileFixture, readyFixture, serviceKeys, signedFixture, snapshotFixture } from "./helpers/realProviderFixtures";
 
 const url = process.env.TEST_DATABASE_URL?.trim();
 if (!url) throw new Error("TEST_DATABASE_URL required; disposable fixtures only.");
@@ -32,15 +33,32 @@ const identities = new PostgresIdentityPersistence(db.identity), registry = new 
 const fixture = JSON.parse(readFileSync("tests/fixtures/economic-intent-v1.json","utf8"));
 let databaseName: string, identityOwner: string, accountId: string, sessionId: string, principalId: string, version: bigint;
 let f: Awaited<ReturnType<typeof readyFixture>>, policy: VerifiedConfirmationPolicy, bridge: Auth0ConfirmationBridge, sender: ReadinessServiceTransport;
+let proofAuthority: ConfirmationProofAuthority;
 let receiver: ReadinessServiceTransport, authentication: Auth0Authentication, repo: PostgresFinalizationRepository;
 let evidence: EvidencePolicy;
 const pause = (ms: number) => new Promise(resolve=>setTimeout(resolve,ms));
+async function waitForDatabaseDeadline(deadline: string|Date) {
+  const limit=process.hrtime.bigint()+15_000_000_000n;
+  while(process.hrtime.bigint()<limit) {
+    const row=(await admin.query("SELECT clock_timestamp()>$1::timestamptz+interval '100 milliseconds' AS elapsed, extract(epoch FROM ($1::timestamptz-clock_timestamp()))*1000 AS remaining",[deadline])).rows[0];
+    if(row.elapsed)return;
+    await pause(Math.max(10,Math.min(500,Number(row.remaining)+110)));
+  }
+  assert.fail("disposable database did not reach the bounded test deadline");
+}
+function confirmationEndpoint() {
+  // Keep fixture issuance away from a wall-clock second boundary; production expiry checks stay unchanged.
+  const now=Math.floor(Date.now()/1000);
+  return endpointFixture(f.configuration,"fixture-nonce",{verifiedAt:now-1,expiresAt:now+59});
+}
 function expected(role: typeof readinessRoles[number]): DeploymentExpectation {
   return {deploymentId:profileFixture().deploymentId,environment:"offline-fixture",databaseName,login:`provider_fixture_${role}`,
     credentialGeneration:"1",schemaOwner:"pg_database_owner",identityOwner};
 }
 function volatileFixtureLedger() { const ids = new Set<string>(); return {async consume(id: string) {if(ids.has(id)) return false;ids.add(id);return true;}}; }
 function rebuild() {
+  proofAuthority=new ConfirmationProofAuthority(new ProviderDeploymentReadiness(new DeploymentReadiness(
+    new AuthorityProcess("identity",db.identity,expected("identity")),f.configuration,endpointKeys.publicKey),f.auth),policy);
   const keys = Object.fromEntries(readinessRoles.map(r=>[r,serviceKeys[r].publicKey])) as any;
   sender = new ReadinessServiceTransport("identity",f.configuration,serviceKeys.identity.privateKey,keys,volatileFixtureLedger(),[]);
   receiver = new ReadinessServiceTransport("issuer",f.configuration,serviceKeys.issuer.privateKey,keys,volatileFixtureLedger(),confirmationRoutes);
@@ -90,10 +108,12 @@ async function prepare(changes: Record<string,unknown>={}) {
   const envelope=createEconomicIntentEnvelopeV1(e,e.amount.asset), digest=await repo.registerAttempt(envelope,fixture.recentBlockhash);
   return {envelope,digest};
 }
-async function call(action: string, input: Record<string,unknown>, reauth?: Auth0Reauthentication, auth=authentication) {
+async function call(action: string, input: Record<string,unknown>, reauth?: Auth0Reauthentication, auth=authentication, proofId?: string) {
   const path=`/confirmation/${action}`, body=JSON.stringify({accountSessionId:sessionId,authenticationDigest:auth.tokenDigest,...input});
-  const request=sender.request("issuer","POST",path,body);
-  const response=await bridge.execute(path,body,request,endpointFixture(f.configuration),"fixture-nonce",auth,reauth);
+  const generated=JSON.parse(sender.request("issuer","POST",path,body).payload);
+  // A valid past issuance avoids second-boundary jitter in this SQL-focused fixture; the accepted transport still verifies it normally.
+  const request=signedFixture({...generated,issuedAt:generated.issuedAt-1,expiresAt:generated.expiresAt-1},serviceKeys.identity.privateKey);
+  const response=await bridge.execute(path,body,request,confirmationEndpoint(),"fixture-nonce",auth,reauth,proofId);
   await sender.verifyResponse(request,response.signature,response.body);
   return JSON.parse(response.body);
 }
@@ -102,16 +122,35 @@ async function issued() {const p=await prepare(), c=await start(p.digest);return
 function ref(p: Awaited<ReturnType<typeof issued>>) {return {envelopeDigest:p.digest,challengeId:p.c.challenge_id,transactionId:p.c.transaction_id};}
 async function callback(p: Awaited<ReturnType<typeof issued>>, changes: Record<string,unknown>={}) {
   const result=await call("roundtrip",ref(p)), challenge=result.reauthentication as ReauthenticationChallenge;
-  await pause(Math.max(0,challenge.requestedAt*1000-Date.now()+5));
-  const now=Math.floor(Date.now()/1000), raw=await accessFixture({aud:f.configuration.profile.clientId,iat:now,auth_time:now,
+  while(Date.now()<challenge.requestedAt*1000+200) await pause(Math.max(1,challenge.requestedAt*1000-Date.now()+200));
+  await waitForDatabaseDeadline(new Date(challenge.requestedAt*1000));
+  const raw=await accessFixture({aud:f.configuration.profile.clientId,iat:challenge.requestedAt,auth_time:challenge.requestedAt,
     nonce:challenge.nonce,acr:"fixture:mfa",...changes});
-  return {proof:await f.auth.verifyReauthentication(raw,challenge),digest:sha256(raw),raw,challenge};
+  const proof=await f.auth.verifyReauthentication(raw,challenge), digest=sha256(raw);
+  const body=JSON.stringify({accountSessionId:sessionId,authenticationDigest:authentication.tokenDigest,...ref(p),action:"confirm-economic-intent",reauthenticationDigest:digest});
+  const proofId=await proofAuthority.record(p.c.challenge_id,challenge,body,authentication,proof,confirmationEndpoint(),"fixture-nonce");
+  return {proof,digest,raw,challenge,proofId,body};
 }
 async function confirm(p: Awaited<ReturnType<typeof issued>>, cb: Awaited<ReturnType<typeof callback>>, changes: Record<string,unknown>={}) {
-  return call("confirm",{...ref(p),action:"confirm-economic-intent",reauthenticationDigest:cb.digest,...changes},cb.proof);
+  return call("confirm",{...ref(p),action:"confirm-economic-intent",reauthenticationDigest:cb.digest,...changes},cb.proof,authentication,cb.proofId);
 }
 async function count(table: string) {return Number((await admin.query(`SELECT count(*) FROM ${table}`)).rows[0].count);}
 async function revoke() {return identities.revokeAccountSession({accountId,sessionId,expectedAccountVersion:version,revokedAt:new Date().toISOString()});}
+function admitArgs(p: Awaited<ReturnType<typeof issued>>, cb: Awaited<ReturnType<typeof callback>>) {
+  return [p.c.challenge_id,cb.proofId,sessionId,p.digest,p.c.transaction_id,sha256(cb.body)];
+}
+const admitSql="SELECT economic_admit_confirmation($1,$2,$3,$4,$5,$6) AS id";
+async function directAdmit(p: Awaited<ReturnType<typeof issued>>, cb: Awaited<ReturnType<typeof callback>>) {
+  return (await db.issuer.query(admitSql,admitArgs(p,cb))).rows[0].id as string;
+}
+async function evidenceFor(cb: Awaited<ReturnType<typeof callback>>) {
+  const m=await f.auth.assertReauthentication(cb.proof,cb.challenge,Date.now()/1000);
+  return {authenticationDigest:authentication.tokenDigest,authenticationIssuedAt:authentication.issuedAt,authenticationExpiresAt:authentication.expiresAt,
+    providerEvidence:m.tokenDigest,issuedAt:m.issuedAt,expiresAt:m.expiresAt,authTime:cb.proof.authenticationTime,assurance:cb.proof.acr,
+    nonce:cb.challenge.nonce,subject:authentication.subject,issuer:authentication.issuer,configuration:authentication.configuration,providerRevision:authentication.keyRevision,
+    requestDigest:sha256(cb.body),transactionId:JSON.parse(cb.body).transactionId,accountSessionId:sessionId,envelopeDigest:cb.challenge.envelopeDigest,action:cb.challenge.action,
+    policyFingerprint:policy.fingerprint,scope:policy.policy.requiredScope};
+}
 
 test("lost creation response recovers the same durable challenge and transaction without consent",async()=>{
   const p=await prepare(), requestId=randomUUID(), first=await start(p.digest,requestId), second=await start(p.digest,requestId);
@@ -167,7 +206,7 @@ test("wrong environment, signed caller, or altered request body fails the servic
 });
 test("database-clock expiry is derived without mutation and never creates consent",async()=>{
   policy=confirmationPolicyFixture(f.configuration,{revision:2,challengeSeconds:3});await registerConfirmationPolicy(admin,policy);rebuild();
-  const p=await issued(),cb=await callback(p);await pause(Math.max(0,Date.parse(p.c.expires_at)-Date.now()+25));
+  const p=await issued(),cb=await callback(p);await waitForDatabaseDeadline(p.c.expires_at);
   assert.equal((await call("recover",ref(p))).state,"EXPIRED");await assert.rejects(()=>confirm(p,cb),/expired/);
   assert.equal(await count("economic_consent_evidence"),0);
 });
@@ -243,13 +282,15 @@ for(let repetition=1;repetition<=3;repetition++) test(`key snapshot retirement d
   await assert.rejects(()=>confirm(p,cb),/Retired|revision/);
   assert.equal(await count("economic_consent_evidence"),0);assert.equal(await count("economic_confirmation_consumptions"),0);
 });
-test("database commit guard catches expiry during the final provider readiness wait",async()=>{
+test("consent becoming visible after admission expiry is immediately downstream-ineligible",async()=>{
   policy=confirmationPolicyFixture(f.configuration,{revision:2,consentSeconds:1});await registerConfirmationPolicy(admin,policy);rebuild();
   const p=await issued(),cb=await callback(p),original=f.auth.assertCurrent.bind(f.auth);let checks=0;
-  f.auth.assertCurrent=async proof=>{await original(proof);if(++checks===2)await pause(1200);};
-  await assert.rejects(()=>confirm(p,cb),/expired before commit/);
-  assert.equal(await count("economic_consent_evidence"),0);assert.equal(await count("economic_confirmation_consumptions"),0);
-  f.auth.assertCurrent=original;assert.equal((await call("recover",ref(p))).state,"ISSUED");
+  f.auth.assertCurrent=async proof=>{await original(proof);if(++checks===2)await waitForDatabaseDeadline((await admin.query("SELECT clock_timestamp()+interval '1200 milliseconds' AS deadline")).rows[0].deadline);};
+  const result=await confirm(p,cb);assert.equal(result.state,"CONFIRMED");
+  const consent=(await admin.query("SELECT * FROM economic_consent_evidence WHERE consent_id=$1",[result.consent_id])).rows[0];
+  assert((await admin.query("SELECT $1::timestamptz<clock_timestamp() AS expired",[consent.expires_at])).rows[0].expired);
+  await assert.rejects(()=>transaction(db.app,async client=>loadAuthoritativeEvidence(client,p.envelope,result.consent_id,evidence,await databaseTime(client))),/consent/);
+  f.auth.assertCurrent=original;assert.equal((await call("recover",ref(p))).state,"CONFIRMED");
 });
 test("durable provider rotation waits for an already admitted confirmation transaction",async()=>{
   const p=await issued(),cb=await callback(p),original=f.auth.assertReauthentication.bind(f.auth);
@@ -267,11 +308,15 @@ test("cancellation and replacement never preserve authority for the old envelope
   const digest=await repo.registerAttempt(next,fixture.recentBlockhash);await assert.rejects(()=>confirm(p,cb),/replaced/);
   await assert.rejects(()=>confirm(p,cb,{envelopeDigest:digest}),/mismatch/);
 });
-for(const table of ["economic_consent_evidence","economic_confirmation_consumptions"]) test(`database failure at ${table} rolls back both records and permits safe retry`,async()=>{
+for(const table of ["economic_consent_evidence","economic_confirmation_consumptions","economic_confirmation_admissions","economic_authority_events"]) test(`database failure at ${table} rolls back both records and permits safe retry`,async()=>{
   const p=await issued(),cb=await callback(p);
   await admin.query("CREATE FUNCTION fixture_reject_confirmation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected consent admission failure'; END $$");
   await admin.query(`CREATE TRIGGER fixture_confirmation_failure BEFORE INSERT ON ${table} FOR EACH ROW EXECUTE FUNCTION fixture_reject_confirmation()`);
-  try {await assert.rejects(()=>confirm(p,cb),/injected/);assert.equal(await count("economic_consent_evidence"),0);assert.equal(await count("economic_confirmation_consumptions"),0);}
+  try {
+    await assert.rejects(()=>confirm(p,cb),/injected/);assert.equal(await count("economic_consent_evidence"),0);assert.equal(await count("economic_confirmation_consumptions"),0);
+    assert.equal(await count("economic_confirmation_admissions"),0);
+    assert.equal((await admin.query("SELECT count(*)::integer AS n FROM economic_authority_events WHERE actor='auth0-confirmation-bridge'")).rows[0].n,0);
+  }
   finally {await admin.query(`DROP TRIGGER fixture_confirmation_failure ON ${table}`);await admin.query("DROP FUNCTION fixture_reject_confirmation()");}
   assert.equal((await call("recover",ref(p))).state,"ISSUED");rebuild();assert.equal((await confirm(p,cb)).state,"CONFIRMED");
 });
@@ -286,4 +331,172 @@ test("all actual LOGINs preserve ACL separation, reader projection, append-only 
   await assert.rejects(()=>db.reader.query("SELECT nonce FROM economic_confirmation_challenges"),/permission denied/);
   await assert.rejects(()=>db.app.query("INSERT INTO economic_confirmation_consumptions(challenge_id) VALUES($1)",[p.c.challenge_id]),/permission denied/);
   const row=(await db.reader.query("SELECT * FROM economic_confirmation_summary")).rows[0];assert.equal(row.state,"ISSUED");assert(!("nonce" in row));
+});
+
+for(const role of readinessRoles) test(`AUD-CONF-01: ${role} LOGIN cannot manufacture terminal rows or bridge audit/consent`,async()=>{
+  const p=await issued(),cb=await callback(p);
+  for(const table of ["economic_confirmation_challenges","economic_confirmation_consumptions","economic_confirmation_proofs","economic_confirmation_admissions"]) {
+    await assert.rejects(()=>db[role].query(`INSERT INTO ${table}(challenge_id) VALUES($1)`,[p.c.challenge_id]),/permission denied/);
+    await assert.rejects(()=>db[role].query(`UPDATE ${table} SET challenge_id=challenge_id`),/permission denied/);
+  }
+  await assert.rejects(()=>db[role].query("INSERT INTO economic_authority_events(event_type,actor) VALUES('CONSENT_ACCEPTED','auth0-confirmation-bridge')"),/permission denied|guarded/);
+  await assert.rejects(()=>db[role].query("INSERT INTO economic_consent_evidence(consent_id,session_reference) VALUES($1,$2)",
+    [randomUUID(),`zephipay:canonical:${sessionId}`]),/permission denied|guarded/);
+  if(role!=="identity") await assert.rejects(()=>db[role].query("SELECT economic_record_confirmation_proof($1,$2)",[p.c.challenge_id,{}]),/permission denied/);
+  if(role!=="issuer") await assert.rejects(()=>db[role].query(admitSql,admitArgs(p,cb)),/permission denied/);
+  // An issuer database credential cannot invent the missing independent identity attestation.
+  await assert.rejects(()=>db.issuer.query(admitSql,[p.c.challenge_id,randomUUID(),sessionId,p.digest,p.c.transaction_id,sha256(cb.body)]),/no rows/);
+  assert.equal(await count("economic_confirmation_consumptions"),0);
+  assert.equal((await db.reader.query("SELECT state FROM economic_confirmation_summary")).rows[0].state,"ISSUED");
+});
+test("issuer guarded function succeeds only with separate identity evidence and cannot consume twice",async()=>{
+  const p=await issued(),cb=await callback(p),id=await directAdmit(p,cb);
+  assert(id);assert.equal(await count("economic_confirmation_admissions"),1);
+  await assert.rejects(()=>directAdmit(p,cb),/consumed/);
+  assert.equal((await call("recover",ref(p))).consent_id,id);
+});
+test("guarded admission binds the independent proof to the exact session, envelope, transaction and body",async()=>{
+  const p=await issued(),cb=await callback(p);
+  for(const [index,value] of [[2,randomUUID()],[3,"00".repeat(32)],[4,randomUUID()],[5,"00".repeat(32)]] as const) {
+    const args=admitArgs(p,cb);args[index]=value;
+    await assert.rejects(()=>db.issuer.query(admitSql,args),/mismatch/);
+  }
+  assert.equal(await count("economic_confirmation_admissions"),0);assert.equal(await count("economic_consent_evidence"),0);
+});
+test("identity proof registration rejects a different transaction in an otherwise verified confirmation body",async()=>{
+  const p=await issued(),cb=await callback(p),body=JSON.stringify({...JSON.parse(cb.body),transactionId:randomUUID()}),prior=await count("economic_confirmation_proofs");
+  await assert.rejects(()=>proofAuthority.record(p.c.challenge_id,cb.challenge,body,authentication,cb.proof,confirmationEndpoint(),"fixture-nonce"),/evidence rejected/);
+  assert.equal(await count("economic_confirmation_proofs"),prior);assert.equal(await count("economic_confirmation_admissions"),0);
+});
+test("guarded admission rejects an attestation from a retired identity credential generation",async()=>{
+  const p=await issued(),cb=await callback(p);
+  await admin.query("UPDATE economic_deployment_logins SET credential_generation=2 WHERE authority_role='identity'");
+  await assert.rejects(()=>directAdmit(p,cb),/retired proof verifier/);assert.equal(await count("economic_consent_evidence"),0);
+});
+for(const [name,change] of [
+  ["empty JSON",()=>({})],
+  ...["authTime","assurance","providerEvidence","nonce","requestDigest","authenticationDigest","policyFingerprint","transactionId"].flatMap(key=>[
+    [`missing ${key}`,(v:any)=>{delete v[key];return v;}],
+    [`null ${key}`,(v:any)=>({...v,[key]:null})]
+  ]),
+  ["unapproved assurance",(v:any)=>({...v,assurance:"caller-invented"})],
+  ["wrong nonce",(v:any)=>({...v,nonce:"00".repeat(32)})],
+  ["wrong transaction",(v:any)=>({...v,transactionId:randomUUID()})],
+  ["wrong session",(v:any)=>({...v,accountSessionId:randomUUID()})],
+  ["wrong envelope",(v:any)=>({...v,envelopeDigest:"00".repeat(32)})],
+  ["stale provider revision",(v:any)=>({...v,providerRevision:999})],
+  ["stale configuration",(v:any)=>({...v,configuration:"00".repeat(32)})],
+  ["stale policy",(v:any)=>({...v,policyFingerprint:"00".repeat(32)})],
+] as [string,(v:any)=>any][]) test(`guarded proof registration rejects ${name}`,async()=>{
+  const p=await issued(),cb=await callback(p),before=await count("economic_confirmation_proofs");
+  const candidate=change(await evidenceFor(cb));
+  await assert.rejects(()=>db.identity.query("SELECT economic_record_confirmation_proof($1,$2)",[p.c.challenge_id,candidate]));
+  assert.equal(await count("economic_confirmation_proofs"),before);assert.equal(await count("economic_confirmation_consumptions"),0);
+});
+// Deliberately malformed pre-existing rows model the audited 028 SQL reproduction; only the fixture administrator can create these after 029.
+for(const [name,column,value] of [["empty reauthentication","reauthentication",{}],["wrong account","account_id",null],
+  ["stale account version","account_version","999"],["stale provider revision","provider_revision","999"],
+  ["stale configuration revision","configuration_revision","999"],["stale configuration fingerprint","configuration","00".repeat(32)],
+  ["stale policy version","policy_revision","999"]] as const) test(`guarded terminal admission independently rejects ${name}`,async()=>{
+  const p=await issued(),cb=await callback(p);
+  const client=await admin.connect();
+  try {
+    await client.query("BEGIN");await client.query("ALTER TABLE economic_confirmation_challenges DISABLE TRIGGER economic_confirmation_challenges_immutable");
+    if(column==="account_id") {
+      // Existing CHECK ties principal/account: exercise the DB rejection without weakening it.
+      await assert.rejects(()=>client.query("UPDATE economic_confirmation_challenges SET account_id=$1 WHERE challenge_id=$2",[randomUUID(),p.c.challenge_id]));
+      await client.query("ROLLBACK");
+      await assert.rejects(()=>db.issuer.query(admitSql,[p.c.challenge_id,cb.proofId,randomUUID(),p.digest,p.c.transaction_id,sha256(cb.body)]),/mismatch/);
+      return;
+    }
+    await client.query(`UPDATE economic_confirmation_challenges SET ${column}=$1 WHERE challenge_id=$2`,[value,p.c.challenge_id]);
+    await client.query("ALTER TABLE economic_confirmation_challenges ENABLE TRIGGER economic_confirmation_challenges_immutable");await client.query("COMMIT");
+  } finally {await client.query("ROLLBACK");client.release();}
+  await assert.rejects(()=>directAdmit(p,cb),/malformed|invalidated/);assert.equal(await count("economic_consent_evidence"),0);
+});
+test("guarded terminal operation rejects expired and invalidated challenges without service checks",async()=>{
+  policy=confirmationPolicyFixture(f.configuration,{revision:2,challengeSeconds:3});await registerConfirmationPolicy(admin,policy);rebuild();
+  const p=await issued(),cb=await callback(p);await waitForDatabaseDeadline(p.c.expires_at);
+  await assert.rejects(()=>directAdmit(p,cb),/expired/);
+  policy=confirmationPolicyFixture(f.configuration,{revision:3});await registerConfirmationPolicy(admin,policy);rebuild();
+  const q=await issued(),cq=await callback(q);await revoke();await assert.rejects(()=>directAdmit(q,cq),/ineligible/);
+});
+test("AUD-CONF-02: SET CONSTRAINTS early then late commit preserves admission history but grants no usable consent",async()=>{
+  policy=confirmationPolicyFixture(f.configuration,{revision:2,challengeSeconds:3});await registerConfirmationPolicy(admin,policy);rebuild();
+  const p=await issued(),cb=await callback(p),client=await db.issuer.connect();let id!:string;
+  try {
+    await client.query("BEGIN");id=(await client.query(admitSql,admitArgs(p,cb))).rows[0].id;
+    await client.query("SET CONSTRAINTS ALL IMMEDIATE");await waitForDatabaseDeadline(p.c.expires_at);await client.query("COMMIT");
+  } finally {await client.query("ROLLBACK");client.release();}
+  const c=(await admin.query("SELECT * FROM economic_consent_evidence WHERE consent_id=$1",[id])).rows[0];
+  assert(c.confirmed_at<new Date(p.c.expires_at));assert(c.expires_at<=new Date(p.c.expires_at));
+  assert((await admin.query("SELECT $1::timestamptz<clock_timestamp() AS expired",[c.expires_at])).rows[0].expired);
+  assert.equal((await call("recover",ref(p))).state,"CONFIRMED");
+  // This exact authority loader is used by both repository claim/sponsor-finalization and first-contact paths before signer invocation.
+  await assert.rejects(()=>transaction(db.app,async cl=>loadAuthoritativeEvidence(cl,p.envelope,id,evidence,await databaseTime(cl))),/consent/);
+  await assert.rejects(()=>directAdmit(p,cb),/expired/);
+  assert.equal(await count("economic_finalizations"),0);assert.equal(await count("economic_signer_contact_authority"),0);
+});
+for(let repetition=1;repetition<=3;repetition++) test(`guarded admission rejects account-version advancement while waiting ${repetition}`,async()=>{
+  const p=await issued(),cb=await callback(p),client=await db.identity.connect();
+  try {
+    await client.query("BEGIN");await createAccountSessionInTransaction(client,{accountId,sessionId:randomUUID(),expectedAccountVersion:version,createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+60000).toISOString()});
+    const rejected=assert.rejects(()=>directAdmit(p,cb),/invalidated/);await pause(80);await client.query("COMMIT");await rejected;
+  } finally {await client.query("ROLLBACK");client.release();}
+  assert.equal(await count("economic_confirmation_admissions"),0);
+});
+test("expired bridge consent defeats fresh Runtime evidence and first-contact/signing authority independently",async()=>{
+  policy=confirmationPolicyFixture(f.configuration,{revision:2,consentSeconds:2});await registerConfirmationPolicy(admin,policy);rebuild();
+  const p=await issued(),cb=await callback(p),consentId=await directAdmit(p,cb),id=randomUUID();
+  let signerCalls=0;
+  const stoppedSigner={async finalize(){signerCalls++;throw new Error("No signing permitted");},async query(){signerCalls++;throw new Error("No signer query permitted");}};
+  const guardedRepo=new PostgresFinalizationRepository(db.app,evidence,stoppedSigner,undefined,{signerResults:db.signer});
+  try {
+    // Privileged fixture models an existing pre-contact operation. No customer/sponsor transaction is signed or inspected as valid.
+    // Fresh Runtime evidence deliberately cannot substitute for the expired consent gate.
+    const e=p.envelope;
+    await db.issuer.query(`INSERT INTO economic_runtime_evidence(decision_id,envelope_digest,issuer,policy_version,evidence_digest,binding,network,scope,valid_from,valid_until)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,[e.runtime.decisionId,p.digest,evidence.runtimeIssuer,e.runtime.policyVersion,e.runtime.evidenceDigest,
+      {schema:"zephyon.runtime-binding/v1",reference:e.runtime,envelopeDigest:p.digest,result:"approved"},e.amount.asset.network,e.runtime.scope,e.runtime.validFrom,e.runtime.validUntil]);
+    await registry.installBudget({id:"confirmation-expiry-fixture",network:e.amount.asset.network,sponsorPublicKey:e.fee.signer,sponsorKeyVersion:e.fee.keyVersion,
+      base:"1000000",priority:"1000000",rent:"10000000",outstanding:2});
+    const a=(await admin.query("SELECT * FROM economic_attempts WHERE envelope_digest=$1",[p.digest])).rows[0];
+    const tuple=createSponsorFinalizationTupleV1({schema:"zephyon.sponsor-finalization/v1",attempt:e.attempt,network:e.amount.asset.network,messageDigest:a.message_digest,
+      requiredSigners:[e.fee.signer,e.source.signer],userSigner:e.source.signer,customerSignatureDigest:"ab".repeat(32),sponsorPublicKey:e.fee.signer,sponsorKeyVersion:e.fee.keyVersion,
+      envelopeDigest:p.digest,consentId,runtime:e.runtime,reservedExposureId:a.requested_exposure_id});
+    const assets=(await admin.query("SELECT registry_id,use_role FROM economic_asset_registry")).rows;
+    await transaction(admin,async client=>{
+      await client.query(`INSERT INTO economic_finalizations(finalization_id,intent_id,generation,tuple,tuple_digest,consent_id,runtime_id,payment_registry_id,fee_registry_id,
+        budget_id,budget_version,exposure_id,base_requested,priority_requested,rent_requested,signer_operation_id,customer_artifact)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'confirmation-expiry-fixture',1,$10,$11,$12,$13,$14,$15)`,
+        [id,e.attempt.intentId,e.attempt.generation,tuple,sponsorTupleDigestV1(tuple),consentId,e.runtime.decisionId,assets.find(v=>v.use_role==="PAYMENT").registry_id,
+          assets.find(v=>v.use_role==="FEE").registry_id,a.requested_exposure_id,e.fee.maxBaseFee,e.fee.maxPriorityFee,e.fee.maxRent,randomUUID(),Buffer.from([1])]);
+      await client.query("UPDATE economic_attempts SET state='FINALIZATION_COMMITTED',finalization_id=$1 WHERE envelope_digest=$2",[id,p.digest]);
+    });
+    const c=(await admin.query("SELECT expires_at FROM economic_consent_evidence WHERE consent_id=$1",[consentId])).rows[0];
+    await waitForDatabaseDeadline(c.expires_at);
+    await assert.rejects(()=>transaction(db.app,async client=>loadAuthoritativeEvidence(client,e,consentId,evidence,await databaseTime(client))),/consent/);
+    await assert.rejects(()=>db.app.query("SELECT economic_commit_signer_contact($1)",[id]),/expired or revoked/);
+    await assert.rejects(()=>guardedRepo.recover(id),/consent/);
+    assert.equal(signerCalls,0);assert.equal(await count("economic_signer_contact_authority"),0);
+    const state=(await admin.query("SELECT signer_state,result_artifact FROM economic_finalizations WHERE finalization_id=$1",[id])).rows[0];
+    assert.equal(state.signer_state,"NOT_CONTACTED");assert.equal(state.result_artifact,null);
+  } finally {await admin.query("TRUNCATE economic_runtime_evidence CASCADE");}
+});
+for(const isolation of ["READ COMMITTED","REPEATABLE READ"] as const) test(`guarded admission rechecks attempt state after a cancellation lock wait (${isolation})`,async()=>{
+  const p=await issued(),cb=await callback(p),locker=await db.app.connect(),issuer=await db.issuer.connect();
+  try {
+    const pid=(await issuer.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+    await locker.query("BEGIN");await locker.query("SELECT intent_id FROM economic_attempt_heads WHERE intent_id=$1 FOR UPDATE",[p.envelope.attempt.intentId]);
+    await locker.query("UPDATE economic_attempts SET state='CANCELLED' WHERE envelope_digest=$1",[p.digest]);
+    await issuer.query(`BEGIN ISOLATION LEVEL ${isolation}`);
+    const denied=assert.rejects(()=>issuer.query(admitSql,admitArgs(p,cb)),/ineligible|could not serialize/);
+    let waiting=false;
+    for(let i=0;i<50;i++) {
+      waiting=(await admin.query("SELECT cardinality(pg_blocking_pids($1))>0 AS waiting",[pid])).rows[0].waiting;
+      if(waiting)break;await pause(10);
+    }
+    assert(waiting,"guarded admission must reach the canonical lock wait");await locker.query("COMMIT");await denied;
+    assert.equal(await count("economic_confirmation_admissions"),0);assert.equal(await count("economic_consent_evidence"),0);
+  } finally {await locker.query("ROLLBACK");await issuer.query("ROLLBACK");locker.release();issuer.release();}
 });

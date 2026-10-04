@@ -14,7 +14,7 @@ export type ConfirmationPolicy = Readonly<{
   issuedAt: number; expiresAt: number; requiredScope: string; challengeSeconds: number;
   maxAuthenticationAgeSeconds: number; consentSeconds: number; acceptedAcr: readonly string[];
 }>;
-export type VerifiedConfirmationPolicy = Readonly<{ policy: ConfirmationPolicy; fingerprint: string; artifact: SignedArtifact }>;
+export type VerifiedConfirmationPolicy = Readonly<{ policy: ConfirmationPolicy; fingerprint: string; artifact: SignedArtifact; configurationRevision: number }>;
 const verified = new WeakSet<object>();
 
 export function loadConfirmationPolicy(artifact: SignedArtifact, root: KeyObject, deployment: VerifiedDeployment, expectedFingerprint: string): VerifiedConfirmationPolicy {
@@ -30,7 +30,7 @@ export function loadConfirmationPolicy(artifact: SignedArtifact, root: KeyObject
     [p.operator,p.reference,p.requiredScope].every(text) && !p.requiredScope.includes(" ") &&
     [p.attestation,p.reauthentication].every(v=>["TEST","ATTESTED","UNATTESTED"].includes(v)) &&
     [p.allowedConnections,p.acceptedAcr].every(v=>Array.isArray(v)&&v.length>0&&v.length<=16&&v.every(text)&&new Set(v).size===v.length), "Explicit bounded confirmation policy required.");
-  const value = frozen({ policy:p, fingerprint:result.fingerprint, artifact:{...artifact} }); verified.add(value); return value;
+  const value = frozen({ policy:p, fingerprint:result.fingerprint, artifact:{...artifact}, configurationRevision:d.revision }); verified.add(value); return value;
 }
 export function assertConfirmationPolicy(value: VerifiedConfirmationPolicy): void {
   requireCondition(verified.has(value), "Verified confirmation policy required.");
@@ -42,6 +42,8 @@ export async function registerConfirmationPolicy(pool: Pool, value: VerifiedConf
     const p = value.policy;
     await client.query("INSERT INTO economic_confirmation_policies(fingerprint,deployment_id,revision,payload,signature) VALUES($1,$2,$3,$4,$5) ON CONFLICT(fingerprint) DO NOTHING",
       [value.fingerprint,p.deploymentId,p.revision,value.artifact.payload,value.artifact.signature]);
+    await client.query("INSERT INTO economic_confirmation_policy_rules(fingerprint,configuration_revision) VALUES($1,$2) ON CONFLICT DO NOTHING",
+      [value.fingerprint,value.configurationRevision]);
     const prior = (await client.query("SELECT * FROM economic_confirmation_policy_heads WHERE deployment_id=$1 FOR UPDATE", [p.deploymentId])).rows[0];
     if(prior?.fingerprint===value.fingerprint) return;
     await client.query(`INSERT INTO economic_confirmation_policy_heads VALUES($1,$2,$3)

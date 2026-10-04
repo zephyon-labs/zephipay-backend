@@ -1,12 +1,10 @@
-import { randomBytes, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { authorizationBindingDigestV1 } from "zephyon-protocol";
-import { audit, databaseTime, requireCondition, sha256 } from "../foundation/database";
+import { databaseTime, requireCondition, sha256 } from "../foundation/database";
 import { loadEnvelope } from "../foundation/evidenceIngestion";
-import { bindEconomicSession } from "../foundation/sessionAuthority";
 import { exactObject, parseEconomicJson } from "../foundation/strictJson";
 import { qualifyAsset } from "../foundation/trustedRegistry";
-import type { Auth0Authentication, Auth0Reauthentication, ReauthenticationChallenge } from "../readiness/auth0Authentication";
+import type { Auth0Authentication, Auth0Reauthentication } from "../readiness/auth0Authentication";
 import { ProviderDeploymentReadiness } from "../readiness/providerDeploymentReadiness";
 import { ReadinessServiceTransport } from "../readiness/serviceTransport";
 import { digest, frozen, type SignedArtifact } from "../readiness/signedArtifact";
@@ -33,7 +31,7 @@ export class Auth0ConfirmationBridge {
   }
 
   async execute(path: string, body: string, invocation: SignedArtifact, endpoint: SignedArtifact, endpointNonce: string,
-    authentication: Auth0Authentication, reauthentication?: Auth0Reauthentication): Promise<{ body: string; signature: SignedArtifact }> {
+    authentication: Auth0Authentication, reauthentication?: Auth0Reauthentication, proofId?: string): Promise<{ body: string; signature: SignedArtifact }> {
     requireCondition(confirmationRoutes.some(r => r.path === path), "Unknown confirmation action.");
     const verifiedRequest = await this.transport.receive(invocation, "POST", path, body);
     requireCondition(verifiedRequest.caller === "identity", "Canonical identity caller required.");
@@ -79,24 +77,10 @@ export class Auth0ConfirmationBridge {
           requireCondition(existing.envelope_digest === input.envelopeDigest, "Creation request already bound to another envelope.");
           return this.summary(client, existing.challenge_id); // Creation retry never mints another challenge or extends expiry.
         }
-        const p = this.policy.policy, config = this.transport.configuration;
-        const expires = Math.floor(Math.min(now + p.challengeSeconds, canonical.session.expires_at.getTime()/1000,
-          Date.parse(envelope.expiresAt)/1000, authentication.expiresAt, p.expiresAt));
-        const requestedAt = Math.ceil(now); // Never accept an auth_time second preceding issuance.
-        requireCondition(expires > requestedAt, "Insufficient challenge lifetime.");
-        const challengeId = randomUUID(), transactionId = randomUUID(), nonce = randomBytes(32).toString("hex");
-        const reauth: ReauthenticationChallenge = { nonce, subject: authentication.subject, accountSessionId: input.accountSessionId,
-          envelopeDigest: input.envelopeDigest, action: "confirm-economic-intent", requestedAt, expiresAt: expires,
-          maxAuthenticationAgeSeconds: p.maxAuthenticationAgeSeconds, acceptedAcr: p.acceptedAcr };
-        await client.query(`INSERT INTO economic_confirmation_challenges(challenge_id,request_id,account_id,principal_id,account_session_id,account_version,
-          envelope_digest,intent_id,generation,action,environment,issuer,provider_subject,configuration,configuration_revision,policy_fingerprint,policy_revision,
-          provider_revision,authentication_digest,transaction_id,nonce,requested_at,expires_at,reauthentication)
-          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'confirm-economic-intent',$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
-        [challengeId,input.requestId,canonical.account.account_id,canonical.account.actor_subject,input.accountSessionId,canonical.account.version,
-          input.envelopeDigest,envelope.attempt.intentId,envelope.attempt.generation,p.environment,p.issuer,authentication.subject,config.fingerprint,
-          config.profile.revision,this.policy.fingerprint,p.revision,authentication.keyRevision,authentication.tokenDigest,transactionId,nonce,iso(now),iso(expires),reauth]);
-        // Returned transaction reference comes from durable storage; the nonce is released only to the trusted roundtrip operation.
-        return { ...await this.summary(client, challengeId), transaction_id: transactionId };
+        const issued = await client.query("SELECT economic_issue_confirmation($1,$2,$3,$4) AS id", [input.requestId,input.accountSessionId,input.envelopeDigest,
+          {subject:authentication.subject,issuer:authentication.issuer,configuration:authentication.configuration,providerRevision:authentication.keyRevision,
+            digest:authentication.tokenDigest,issuedAt:authentication.issuedAt,expiresAt:authentication.expiresAt,scope:this.policy.policy.requiredScope}]);
+        return this.summary(client,issued.rows[0].id);
       }
       requireCondition(challenge, "Missing challenge.");
       requireCondition(challenge.account_version === canonical.account.version && challenge.configuration === this.transport.configuration.fingerprint &&
@@ -109,27 +93,11 @@ export class Auth0ConfirmationBridge {
       requireCondition(input.action === "confirm-economic-intent" && reauthentication && digest(input.reauthenticationDigest), "Explicit exact-intent confirmation required.");
       const metadata = await this.readiness.authentication.assertReauthentication(reauthentication, challenge.reauthentication, now);
       requireCondition(metadata.tokenDigest === input.reauthenticationDigest, "Provider callback substitution.");
-      const reference = `zephipay:canonical:${input.accountSessionId}`; // Server session reference; never an Auth0-signed sid claim.
-      await bindEconomicSession(client, { issuer: authentication.issuer, providerSubject: authentication.subject,
-        providerSessionReference: reference, accountSessionId: input.accountSessionId });
-      const consentId = randomUUID(), expires = Math.min(challenge.expires_at.getTime()/1000, canonical.session.expires_at.getTime()/1000,
-        Date.parse(envelope.expiresAt)/1000, authentication.expiresAt, metadata.expiresAt,
-        reauthentication.authenticationTime + this.policy.policy.maxAuthenticationAgeSeconds, now + this.policy.policy.consentSeconds);
-      requireCondition(expires > now, "Expired consent admission.");
-      await client.query(`INSERT INTO economic_consent_evidence(consent_id,envelope_digest,principal_id,issuer,audience,context,provider_subject,
-        authentication_reference,session_reference,authenticated_at,confirmed_at,expires_at,account_session_id)
-        VALUES($1,$2,$3,$4,$5,'zephipay-economic-consent-v1',$6,$7,$8,$9,$10,$11,$12)`,
-      [consentId,input.envelopeDigest,canonical.account.actor_subject,authentication.issuer,this.policy.policy.audience,authentication.subject,
-        metadata.tokenDigest,reference,iso(metadata.issuedAt),iso(now),iso(expires),input.accountSessionId]);
-      await client.query(`INSERT INTO economic_confirmation_consumptions(challenge_id,consent_id,authentication_digest,reauthentication_digest,
-        confirmation_request_digest,authentication_time,assurance,confirmed_at,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-      [challenge.challenge_id,consentId,authentication.tokenDigest,metadata.tokenDigest,sha256(body),iso(reauthentication.authenticationTime),reauthentication.acr,iso(now),iso(expires)]);
-      await audit(client, {type:"CONSENT_ACCEPTED", actor:"auth0-confirmation-bridge", consentId, intentId:envelope.attempt.intentId,
-        generation:envelope.attempt.generation, reference:challenge.challenge_id});
-      // Recheck after every potentially blocking write. Locks remain held through the outer transaction's commit.
-      const finalNow = Date.parse(await databaseTime(client))/1000;
-      await this.readiness.authentication.assertReauthentication(reauthentication, challenge.reauthentication, finalNow);
-      requireCondition(expires > finalNow && authentication.expiresAt > finalNow, "Authority expired during consent admission.");
+      requireCondition(uuid(proofId), "Identity-verifier proof reference required.");
+      await client.query("SELECT economic_admit_confirmation($1,$2,$3,$4,$5,$6)",
+        [challenge.challenge_id,proofId,input.accountSessionId,input.envelopeDigest,input.transactionId,sha256(body)]);
+      // Service rechecks may reject before commit. The DB invariant is admission-time eligibility, not physical commit time.
+      await this.readiness.authentication.assertReauthentication(reauthentication,challenge.reauthentication,Date.parse(await databaseTime(client))/1000);
       return this.summary(client, challenge.challenge_id);
     });
     const responseBody = JSON.stringify(result);

@@ -9,7 +9,7 @@ export const authorityPrivilegePolicy = {
       economic_session_bindings: {SELECT:["*"], INSERT:["issuer","provider_subject","provider_session_reference","account_session_id"]},
       economic_authority_events: {INSERT:["event_type","actor","intent_id","generation","finalization_id","consent_id","runtime_id","reference"]},
     },
-    functions: [],
+    functions: ["economic_record_confirmation_proof(uuid,jsonb)"],
     sequences: {account_security_events_event_id_seq:{USAGE:["*"]}, economic_authority_events_event_id_seq:{USAGE:["*"]}},
   },
   app: {
@@ -46,8 +46,8 @@ export const authorityPrivilegePolicy = {
       economic_confirmation_policies: {SELECT:["*"]},
       economic_confirmation_policy_heads: {SELECT:["*"], UPDATE:["deployment_id"]},
       economic_confirmation_summary: {SELECT:["*"]},
-      economic_confirmation_challenges: {SELECT:["*"], INSERT:["challenge_id","request_id","account_id","principal_id","account_session_id","account_version","envelope_digest","intent_id","generation","action","environment","issuer","provider_subject","configuration","configuration_revision","policy_fingerprint","policy_revision","provider_revision","authentication_digest","transaction_id","nonce","requested_at","expires_at","reauthentication"]},
-      economic_confirmation_consumptions: {SELECT:["*"], INSERT:["challenge_id","consent_id","authentication_digest","reauthentication_digest","confirmation_request_digest","authentication_time","assurance","confirmed_at","expires_at"]},
+      economic_confirmation_challenges: {SELECT:["*"]},
+      economic_confirmation_consumptions: {SELECT:["*"]},
       economic_attempt_heads: {SELECT:["*"], UPDATE:["intent_id"]},
       "accounts": {"SELECT":["*"],"UPDATE":["account_id"]},
       "account_sessions": {"SELECT":["*"],"UPDATE":["session_id"]},
@@ -60,7 +60,7 @@ export const authorityPrivilegePolicy = {
       "economic_session_bindings": {"SELECT":["*"],"INSERT":["issuer","provider_subject","provider_session_reference","account_session_id"]},
       "economic_authority_events": {"INSERT":["event_type","actor","intent_id","generation","finalization_id","consent_id","runtime_id","reference"]},
     },
-    functions: [],
+    functions: ["economic_issue_confirmation(uuid,uuid,text,jsonb)","economic_admit_confirmation(uuid,uuid,uuid,text,uuid,text)"],
     sequences: {"economic_authority_events_event_id_seq": {"USAGE": ["*"]}},
   },
   signer: {
