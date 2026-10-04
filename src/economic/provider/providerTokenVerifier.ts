@@ -52,6 +52,22 @@ function validateKeySet(input: JSONWebKeySet): JSONWebKeySet {
   return jwks;
 }
 
+export async function initializeProviderKeyResolver(input: JSONWebKeySet): Promise<ReturnType<typeof createLocalJWKSet>> {
+  const jwks = validateKeySet(input), resolver = createLocalJWKSet(jwks);
+  // Resolve every kid eagerly through the exact JOSE resolver used by jwtVerify. This imports
+  // and caches each public CryptoKey before publication; no provider JWT is needed.
+  for (const jwk of jwks.keys) {
+    const key = await resolver({ alg: "RS256", kid: jwk.kid });
+    const algorithm = key.algorithm as RsaHashedKeyAlgorithm;
+    requireCondition(key.type === "public" && key.usages.length === 1 && key.usages[0] === "verify" &&
+      algorithm.name === "RSASSA-PKCS1-v1_5" && algorithm.hash.name === "SHA-256" && algorithm.modulusLength >= MIN_PROVIDER_RSA_BITS, "Unusable RS256 verification key.");
+    // A deliberately invalid zero signature exercises the same WebCrypto verification
+    // primitive as JOSE. It must execute and reject, not fail to initialize or verify true.
+    requireCondition(await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, new Uint8Array(Math.ceil(algorithm.modulusLength / 8)), new Uint8Array()) === false, "Unusable RSA verification operation.");
+  }
+  return resolver;
+}
+
 /** Pinned public keys only. Provider discovery/refresh transport is deliberately not installed here. */
 export class ProviderTokenVerifier {
   readonly contract: ProviderContract;
@@ -84,18 +100,7 @@ export class ProviderTokenVerifier {
     const revision = input.revision;
     requireCondition(positive(revision) && revision > (this.active?.revision ?? 0), "Provider key revision must increase.");
     try {
-      const jwks = validateKeySet(input.jwks), resolver = createLocalJWKSet(jwks);
-      // Resolve every kid eagerly through the exact JOSE resolver used by jwtVerify. This imports
-      // and caches each public CryptoKey before publication; no provider JWT is needed.
-      for (const jwk of jwks.keys) {
-        const key = await resolver({ alg: "RS256", kid: jwk.kid });
-        const algorithm = key.algorithm as RsaHashedKeyAlgorithm;
-        requireCondition(key.type === "public" && key.usages.length === 1 && key.usages[0] === "verify" &&
-          algorithm.name === "RSASSA-PKCS1-v1_5" && algorithm.hash.name === "SHA-256" && algorithm.modulusLength >= MIN_PROVIDER_RSA_BITS, "Unusable RS256 verification key.");
-        // A deliberately invalid zero signature exercises the same WebCrypto verification
-        // primitive as JOSE. It must execute and reject, not fail to initialize or verify true.
-        requireCondition(await crypto.subtle.verify("RSASSA-PKCS1-v1_5", key, new Uint8Array(Math.ceil(algorithm.modulusLength / 8)), new Uint8Array()) === false, "Unusable RSA verification operation.");
-      }
+      const resolver = await initializeProviderKeyResolver(input.jwks);
       // An overlapping newer replacement may have won while imports awaited. Never roll it back.
       requireCondition(revision > (this.active?.revision ?? 0), "Provider key revision must increase.");
       this.active = Object.freeze({ revision, resolver });

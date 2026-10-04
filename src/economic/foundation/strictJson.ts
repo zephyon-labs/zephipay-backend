@@ -1,5 +1,7 @@
+export const MAX_ECONOMIC_JSON_BYTES = 32_768;
+
 /** Bounded UTF-8 transport parser. Duplicate names (including escaped aliases) fail before JSON.parse. */
-export function parseEconomicJson(raw: Uint8Array, maxBytes = 32_768): unknown {
+export function parseEconomicJson(raw: Uint8Array, maxBytes = MAX_ECONOMIC_JSON_BYTES): unknown {
   if (!(raw instanceof Uint8Array) || raw.byteLength > maxBytes) throw new Error("Invalid economic transport size.");
   const source = new TextDecoder("utf-8", { fatal: true }).decode(raw);
   let at = 0;
