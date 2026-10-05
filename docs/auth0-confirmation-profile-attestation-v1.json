@@ -1,0 +1,37 @@
+{
+  "type": "zephipay-auth0-local-attestation-record-v1",
+  "mode": "non-value",
+  "review_date": "2026-10-03",
+  "status": "UNATTESTED",
+  "production_ready": false,
+  "basis": "Read-only source inspection; no tenant management API, deployed environment, secret, cookie or bearer-token inspection.",
+  "site_source_commit": "80883547ca42b83f8f80e417e733feeca9c11ae8",
+  "source_observations": {
+    "auth0_nextjs_sdk_lock_version": "4.26.0",
+    "configuration_names": ["AUTH0_DOMAIN", "AUTH0_AUDIENCE", "AUTH0_CLIENT_ID"],
+    "allowed_web_routes": ["GET /auth/login", "GET /auth/callback", "GET /auth/logout"],
+    "offline_access_requested": false,
+    "refresh_token_removed_before_session_save": true,
+    "confirmation_bridge_mounted": false
+  },
+  "accepted_backend_profile": {
+    "dialect": "auth0",
+    "algorithm": "RS256",
+    "access_required_claims": ["iss", "aud", "sub", "azp", "scope", "iat", "exp"],
+    "reauthentication_required_claims": ["iss", "aud", "sub", "nonce", "iat", "exp", "auth_time", "acr"],
+    "modeled_flow": "authorization-code-pkce"
+  },
+  "deployed_facts": {
+    "issuer_domain": {"status": "UNATTESTED", "value": null},
+    "api_audience": {"status": "UNATTESTED", "value": null},
+    "web_client_id": {"status": "UNATTESTED", "value": null},
+    "token_dialect": {"status": "UNATTESTED", "value": null},
+    "signing_algorithm": {"status": "UNATTESTED", "value": null},
+    "authorization_flow_and_pkce": {"status": "UNATTESTED", "value": null},
+    "required_claims_and_scopes": {"status": "UNATTESTED", "value": null},
+    "reauthentication_auth_time_and_assurance": {"status": "UNATTESTED", "value": null},
+    "allowed_connections": {"status": "UNATTESTED", "value": null},
+    "tenant_refresh_and_grant_policy": {"status": "UNATTESTED", "value": null}
+  },
+  "next_evidence": "Operator-reviewed signed nonsecret ConfirmationPolicy, exact pinned deployment profile, approved assurance/connection policy and isolated SDK roundtrip evidence. TEST fixtures do not attest a tenant."
+}
