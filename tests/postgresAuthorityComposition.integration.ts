@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { assertPostgresBeforeExpiry, postgresDeadline, waitForPostgresPast } from "./helpers/postgresClock";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
@@ -217,9 +218,14 @@ for(const kind of ["session","runtime"] as const)test(`revoked ${kind} after cla
   assert.equal((await composition.runExpiryBatch()).expired.length,1);assert.equal((await repo.find(p.id))?.signerState,"EXPIRED_NEVER_CONTACTED");assert.equal((await composition.recover(p.id)).signerState,"EXPIRED_NEVER_CONTACTED");
 });
 
-test("expired intent and Runtime evidence deny contact; expiry selection remains advisory",async()=>{
-  const p=await claimed(envelope(e=>{e.expiresAt=new Date(Date.now()+4000).toISOString();e.runtime.validUntil=e.expiresAt;}));await signerPlan(p.id);
-  await new Promise(resolve=>setTimeout(resolve,Math.max(0,Date.parse(p.e.expiresAt)-Date.now()+20)));
+test("expired intent and Runtime evidence deny contact; expiry selection remains advisory",async t=>{
+  await budget();const deadline=await postgresDeadline(pool);
+  const preparedIntent=await prepared(envelope(e=>{e.expiresAt=deadline;e.runtime.validUntil=e.expiresAt;}));
+  const consent=(await pool.query("SELECT confirmed_at::text FROM economic_consent_evidence WHERE consent_id=$1",[preparedIntent.claim.consentId])).rows[0];
+  t.diagnostic(JSON.stringify(await waitForPostgresPast(pool,consent.confirmed_at)));
+  await assertPostgresBeforeExpiry(pool,deadline);await composition.claim(preparedIntent.claim);
+  const p={...preparedIntent,id:preparedIntent.claim.sponsorFinalizationId};await signerPlan(p.id);
+  t.diagnostic(JSON.stringify(await waitForPostgresPast(pool,p.e.expiresAt)));
   await assert.rejects(()=>composition.recover(p.id));assert.equal((await composition.runExpiryBatch()).expired.length,1);assert.equal((await composition.runExpiryBatch()).selected,0);
 });
 
@@ -230,8 +236,13 @@ test("disabled/versioned budget blocks new reservations while old reserved opera
   const plan=await observerPlan(p.id);await (await make({observerPlan:plan.planId})).observe(p.id);assert.equal((await repo.find(p.id))?.exposureState,"CONSUMED");
 });
 
-for(const mode of ["SIGNED","UNKNOWN","REFUSED"] as const)test(`durable synthetic signer ${mode} persists exact same-operation lookup across instances`,async()=>{
-  const p=await claimed();await signerPlan(p.id,mode);const first=await composition.recover(p.id);const second=await (await make()).recover(p.id);
+for(const mode of ["SIGNED","UNKNOWN","REFUSED"] as const)test(`durable synthetic signer ${mode} persists exact same-operation lookup across instances`,async t=>{
+  const p=await claimed();await signerPlan(p.id,mode);const first=await composition.recover(p.id);
+  if(mode==="UNKNOWN") {
+    const previous=(await pool.query("SELECT updated_at::text FROM economic_finalizations WHERE finalization_id=$1",[p.id])).rows[0];
+    t.diagnostic(JSON.stringify(await waitForPostgresPast(pool,previous.updated_at)));
+  }
+  const second=await (await make()).recover(p.id);
   assert.equal(first.signerOperationId,second.signerOperationId);assert.equal(await count("economic_synthetic.signer_operations"),1);
   assert.equal(second.signerState,mode==="SIGNED"?"RESULT_AVAILABLE":mode==="UNKNOWN"?"RESULT_UNKNOWN":"REFUSED");
   assert.equal(second.exposureState,mode==="REFUSED"?"RELEASED":"UNCERTAIN");

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { assertPostgresBeforeExpiry, postgresDeadline, waitForPostgresPast } from "./helpers/postgresClock";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { after, before, beforeEach, test } from "node:test";
@@ -189,13 +190,20 @@ for(const kind of ["consent","runtime","session","asset","network"] as const) te
   if(kind==="session")assert.deepEqual((await pool.query("SELECT * FROM economic_consent_evidence WHERE consent_id=$1",[p.claim.consentId])).rows[0],before);
 });
 
-test("expired intent releases capacity without cancellation or generation replacement",async()=>{
-  await budget({outstanding:1});const e=envelope(v=>{v.expiresAt=new Date(Date.now()+2200).toISOString();v.runtime.validUntil=v.expiresAt;});const p=await prepared(e);await repo.claim(p.claim);
-  await new Promise(resolve=>setTimeout(resolve,Math.max(0,Date.parse(e.expiresAt)-Date.now()+20)));
+test("expired intent releases capacity without cancellation or generation replacement",async t=>{
+  await budget({outstanding:1});const deadline=await postgresDeadline(pool);
+  const e=envelope(v=>{v.expiresAt=deadline;v.runtime.validUntil=v.expiresAt;});const p=await prepared(e);
+  const consent=(await pool.query("SELECT confirmed_at::text FROM economic_consent_evidence WHERE consent_id=$1",[p.claim.consentId])).rows[0];
+  t.diagnostic(JSON.stringify(await waitForPostgresPast(pool,consent.confirmed_at)));
+  await assertPostgresBeforeExpiry(pool,e.expiresAt);await repo.claim(p.claim);
+  t.diagnostic(JSON.stringify(await waitForPostgresPast(pool,e.expiresAt)));
   await repo.expireNeverContacted(p.claim.sponsorFinalizationId);await assertReleasedOnce(p.claim.sponsorFinalizationId);
   assert((await expiryRecord(p.claim.sponsorFinalizationId)).reasons.some((r:any)=>r.reason==="INTENT_EXPIRED"));
   assert.equal(await repo.cancel(e.attempt.intentId,"1",e.attempt.fenceToken,principalId),"FINALIZATION_WON");
-  const next=await prepared();assert.equal((await repo.claim(next.claim)).disposition,"CREATED");
+  const next=await prepared();
+  const nextConsent=(await pool.query("SELECT confirmed_at::text FROM economic_consent_evidence WHERE consent_id=$1",[next.claim.consentId])).rows[0];
+  t.diagnostic(JSON.stringify(await waitForPostgresPast(pool,nextConsent.confirmed_at)));
+  assert.equal((await repo.claim(next.claim)).disposition,"CREATED");
 });
 
 test("revoked canonical session rejects new consent, claim and first contact without changing historical evidence",async()=>{
