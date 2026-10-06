@@ -140,7 +140,7 @@
       "value": null
     }
   },
-  "next_evidence": "A reviewed immutable SDK transaction/challenge binding decision, then the narrow Site/Backend adapter; operator-reviewed nonsecret application/connection facts and a real non-value SDK roundtrip. Preserve UNATTESTED and production_ready=false until proved.",
+  "next_evidence": "Independent audit of the approved separate SDK transaction binding; then a reviewed Site host/canonical-session bootstrap and operator-attested non-value real-tenant roundtrip. Production remains false.",
   "backend_source_commit": "c583e8a87d4b34257ce8d834d2ed2c5008e1bc30",
   "verified_local_configuration": {
     "status": "VERIFIED",
@@ -182,9 +182,14 @@
     "reason": "Required assurance, connection policy, production deployment identity and trust-root facts are unavailable; do not fill them with TEST claims or sign a purported production attestation."
   },
   "integration_blockers": [
-    "SDK-owned OIDC nonce differs from the immutable database-issued bridge nonce; no supported nonce override exists in the installed public SDK flow.",
     "Current Site flow does not establish a durable server-owned binding to canonical account_sessions for confirmation.",
     "Actual fresh-human authentication and accepted ACR values are unproven for enabled tenant connections.",
     "Production operator/deployment and durable replay attestations are absent."
-  ]
+  ],
+  "approved_nonce_contract": {
+    "status": "IMPLEMENTED_NON_VALUE_CANDIDATE",
+    "production_attestation": false,
+    "contract": "SDK nonce/state/PKCE stay SDK-owned; immutable economic nonce is retained and associated through guarded durable SDK transaction and callback records.",
+    "surface": "Unmounted trusted Backend adapter plus actual SDK integration fixture; live Site unchanged."
+  }
 }

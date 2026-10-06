@@ -24,6 +24,17 @@ export class ConfirmationProofAuthority {
       requireCondition(body.challengeId===challengeId && body.accountSessionId===challenge.accountSessionId && body.envelopeDigest===challenge.envelopeDigest &&
         body.action===challenge.action && body.authenticationDigest===authentication.tokenDigest && body.reauthenticationDigest===metadata.tokenDigest &&
         authentication.subject===challenge.subject && authentication.scopes.includes(this.policy.policy.requiredScope),"Exact confirmation proof request required.");
+      if (metadata.sdkBindingId) {
+        const binding=(await client.query("SELECT economic_read_confirmation_sdk($1,$2) AS binding",[metadata.sdkBindingId,authentication])).rows[0].binding;
+        requireCondition(binding.challenge_id===challengeId && binding.callback?.token_digest===metadata.tokenDigest,
+          "Durable SDK callback required for bound proof.");
+        if (binding.proof) {
+          requireCondition(binding.proof.request_digest===sha256(confirmationBody) && binding.proof.authentication_digest===authentication.tokenDigest,
+            "SDK proof retry must preserve the exact confirmation request.");
+          await this.readiness.authentication.assertReauthentication(reauthentication,challenge,Date.parse(await databaseTime(client))/1000);
+          return binding.proof.proof_id as string;
+        }
+      }
       const evidence={authenticationDigest:authentication.tokenDigest,authenticationIssuedAt:authentication.issuedAt,authenticationExpiresAt:authentication.expiresAt,
         providerEvidence:metadata.tokenDigest,issuedAt:metadata.issuedAt,expiresAt:metadata.expiresAt,authTime:reauthentication.authenticationTime,
         assurance:reauthentication.acr,nonce:challenge.nonce,subject:authentication.subject,issuer:authentication.issuer,configuration:authentication.configuration,

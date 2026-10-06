@@ -24,7 +24,7 @@ function strictHeader(raw: string): void {
 /** Auth0 default-profile adapter; deliberately cannot mint a generic ProviderTokenVerifier proof or economic consent. */
 export class Auth0AuthenticationVerifier {
   private readonly proofs = new WeakSet<object>();
-  private readonly reauthProofs = new WeakMap<object, Readonly<{ tokenDigest: string; issuedAt: number; expiresAt: number }>>();
+  private readonly reauthProofs = new WeakMap<object, Readonly<{ tokenDigest: string; issuedAt: number; expiresAt: number; sdkBindingId?: string }>>();
   constructor(readonly snapshots: Auth0Snapshots) {}
   async verifyAccess(raw: string, requiredScope: string): Promise<Auth0Authentication> {
     strictHeader(raw); requireCondition(text(requiredScope) && !requiredScope.includes(" "), "Explicit scope required.");
@@ -46,6 +46,15 @@ export class Auth0AuthenticationVerifier {
   }
   /** Only a server-stored SDK callback challenge may call this seam; browser-supplied ID tokens/challenge fields are not an API. */
   async verifyReauthentication(rawIdToken: string, input: ReauthenticationChallenge): Promise<Auth0Reauthentication> {
+    return this.verifyIdToken(rawIdToken,input,input.nonce);
+  }
+  /** Trusted SDK adapter only. The durable callback/proof guards independently enforce this association. */
+  async verifySdkReauthentication(rawIdToken: string, input: ReauthenticationChallenge, sdkNonce: string, bindingId: string): Promise<Auth0Reauthentication> {
+    requireCondition(/^[A-Za-z0-9_-]{32,128}$/.test(sdkNonce) && sdkNonce !== input.nonce &&
+      /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(bindingId), "Explicit separate SDK transaction required.");
+    return this.verifyIdToken(rawIdToken,input,sdkNonce,bindingId);
+  }
+  private async verifyIdToken(rawIdToken: string, input: ReauthenticationChallenge, expectedNonce: string, sdkBindingId?: string): Promise<Auth0Reauthentication> {
     const challenge = frozen(structuredClone(input)); strictHeader(rawIdToken);
     requireCondition(text(challenge.nonce) && text(challenge.subject) && text(challenge.accountSessionId) && /^[a-f0-9]{64}$/.test(challenge.envelopeDigest) && challenge.action === "confirm-economic-intent" &&
       positive(challenge.requestedAt) && positive(challenge.expiresAt) && challenge.expiresAt > challenge.requestedAt && positive(challenge.maxAuthenticationAgeSeconds) &&
@@ -53,13 +62,13 @@ export class Auth0AuthenticationVerifier {
     const snapshot = await this.snapshots.current(), p = this.snapshots.configuration.profile;
     const { payload: c } = await jwtVerify(rawIdToken, snapshot.resolver, { issuer: p.issuer, audience: p.clientId, algorithms: ["RS256"], typ: "JWT", clockTolerance: 0, requiredClaims: ["iss","aud","sub","nonce","iat","exp","auth_time","acr"] });
     const now = Date.now()/1000;
-    requireCondition(c.aud === p.clientId && (c.azp === undefined || c.azp === p.clientId) && c.sub === challenge.subject && c.nonce === challenge.nonce && positive(c.iat) && positive(c.exp) && c.iat <= now && c.exp > c.iat &&
+    requireCondition(c.aud === p.clientId && (c.azp === undefined || c.azp === p.clientId) && c.sub === challenge.subject && c.nonce === expectedNonce && positive(c.iat) && positive(c.exp) && c.iat <= now && c.exp > c.iat &&
       c.exp - c.iat <= p.maxTokenLifetimeSeconds && positive(c.auth_time) && c.auth_time <= c.iat && c.auth_time >= challenge.requestedAt && now - c.auth_time <= challenge.maxAuthenticationAgeSeconds &&
       challenge.requestedAt <= now && challenge.expiresAt > now && text(c.acr) && challenge.acceptedAcr.includes(c.acr), "Recent authentication/assurance unavailable or mismatched.");
     await this.snapshots.assertCurrent(snapshot);
     requireCondition(challenge.expiresAt > Date.now()/1000 && c.exp > Date.now()/1000 && Date.now()/1000-c.auth_time <= challenge.maxAuthenticationAgeSeconds, "Reauthentication expired during verification.");
     const proof = frozen({ kind: "reauthentication-only" as const, subject: c.sub, authenticationTime: c.auth_time, acr: c.acr, challengeDigest: sha256(JSON.stringify(challenge)), keyRevision: snapshot.provenance.revision });
-    this.reauthProofs.set(proof, frozen({ tokenDigest: sha256(rawIdToken), issuedAt: c.iat, expiresAt: c.exp }));
+    this.reauthProofs.set(proof, frozen({ tokenDigest: sha256(rawIdToken), issuedAt: c.iat, expiresAt: c.exp, ...(sdkBindingId ? {sdkBindingId} : {}) }));
     return proof;
   }
   /** Provenance and freshness recheck after database waits; copying a proof never grants authority. */

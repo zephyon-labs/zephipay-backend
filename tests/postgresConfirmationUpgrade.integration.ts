@@ -14,7 +14,7 @@ import { PostgresFinalizationRepository } from "../src/economic/foundation/postg
 import { TrustedRegistryAdministration, devnetUsdcConfiguration } from "../src/economic/foundation/trustedRegistry";
 import { profileFixture } from "./helpers/realProviderFixtures";
 
-test("028 to 029 preserves historical evidence, quarantines legacy bridge authority, closes old grants and repeats safely",async()=>{
+test("028 to 029 to 030 preserves historical evidence, quarantines legacy bridge authority, closes old grants and repeats safely",async()=>{
   const url=process.env.TEST_DATABASE_URL?.trim();assert(url,"Disposable TEST_DATABASE_URL required");
   const root=new Pool({connectionString:url}), name=`confirmation_upgrade_${randomUUID().replaceAll("-","").slice(0,12)}`;
   const folder=await mkdtemp(join(tmpdir(),"confirmation-upgrade-"));const project=process.cwd();let pool:Pool|undefined;
@@ -70,9 +70,16 @@ test("028 to 029 preserves historical evidence, quarantines legacy bridge author
     assert((await pool.query("SELECT revoked_at FROM economic_consent_evidence WHERE consent_id=$1",[consent])).rows[0].revoked_at);
     assert.equal((await pool.query("SELECT state FROM economic_confirmation_summary")).rows[0].state,"LEGACY_UNVERIFIED");
     const repeat=await migrate();assert(!repeat.stdout.includes("Applied"));
-    await pool.query(await readFile(join(project,"sql/economic-database-roles-v1.sql"),"utf8"));
-    await pool.query(await readFile(join(project,"sql/economic-database-roles-v1.sql"),"utf8"));
     assert.equal((await pool.query("SELECT count(*)::integer AS n FROM payment_schema_migrations")).rows[0].n,29);
+    await writeFile(join(folder,"migrations/030_confirmation_sdk_transactions.sql"),await readFile("migrations/030_confirmation_sdk_transactions.sql"));
+    await migrate();
+    assert.deepEqual((await pool.query("SELECT * FROM economic_confirmation_challenges")).rows,before.challenges);
+    assert.deepEqual((await pool.query("SELECT * FROM economic_confirmation_consumptions")).rows,before.consumptions);
+    assert.equal((await pool.query("SELECT count(*)::integer AS n FROM economic_confirmation_sdk_transactions")).rows[0].n,0);
+    await pool.query(await readFile(join(project,"sql/economic-database-roles-v1.sql"),"utf8"));
+    await pool.query(await readFile(join(project,"sql/economic-database-roles-v1.sql"),"utf8"));
+    assert.equal((await pool.query("SELECT count(*)::integer AS n FROM payment_schema_migrations")).rows[0].n,30);
+    assert(!(await migrate()).stdout.includes("Applied"));
     assert.equal((await pool.query("SELECT has_function_privilege('zephipay_economic_issuer','economic_admit_confirmation(uuid,uuid,uuid,text,uuid,text)','EXECUTE') AS admitted")).rows[0].admitted,true);
     assert.equal((await pool.query("SELECT has_function_privilege('zephipay_economic_issuer','economic_record_confirmation_proof(uuid,jsonb)','EXECUTE') AS allowed")).rows[0].allowed,false);
   } finally {
