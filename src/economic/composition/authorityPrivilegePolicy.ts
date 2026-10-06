@@ -9,7 +9,7 @@ export const authorityPrivilegePolicy = {
       economic_session_bindings: {SELECT:["*"], INSERT:["issuer","provider_subject","provider_session_reference","account_session_id"]},
       economic_authority_events: {INSERT:["event_type","actor","intent_id","generation","finalization_id","consent_id","runtime_id","reference"]},
     },
-    functions: ["economic_record_confirmation_proof(uuid,jsonb)"],
+    functions: ["economic_record_confirmation_proof(uuid,jsonb)", "economic_bind_confirmation_sdk(uuid,uuid,jsonb,jsonb)", "economic_read_confirmation_sdk(uuid,jsonb)", "economic_record_confirmation_sdk_callback(uuid,jsonb,jsonb)"],
     sequences: {account_security_events_event_id_seq:{USAGE:["*"]}, economic_authority_events_event_id_seq:{USAGE:["*"]}},
   },
   app: {

@@ -6,6 +6,9 @@ import { Pool, type PoolConfig } from "pg";
 import { parse } from "pg-connection-string";
 import { createEconomicIntentEnvelopeV1, createSponsorFinalizationTupleV1, sponsorTupleDigestV1 } from "zephyon-protocol";
 import { Auth0ConfirmationBridge, confirmationRoutes } from "../src/economic/confirmation/confirmationBridge";
+import { Auth0SdkConfirmationAdapter } from "../src/economic/confirmation/auth0SdkConfirmationAdapter";
+import { auth0SdkHostFixture } from "./helpers/auth0SdkHostFixture";
+import { waitForPostgresPast } from "./helpers/postgresClock";
 import { ConfirmationProofAuthority } from "../src/economic/confirmation/confirmationProofAuthority";
 import { registerConfirmationPolicy, type VerifiedConfirmationPolicy } from "../src/economic/confirmation/confirmationPolicy";
 import { verifyAuthorityLogin, type DeploymentExpectation } from "../src/economic/composition/verifyAuthorityLogin";
@@ -499,4 +502,155 @@ for(const isolation of ["READ COMMITTED","REPEATABLE READ"] as const) test(`guar
     assert(waiting,"guarded admission must reach the canonical lock wait");await locker.query("COMMIT");await denied;
     assert.equal(await count("economic_confirmation_admissions"),0);assert.equal(await count("economic_consent_evidence"),0);
   } finally {await locker.query("ROLLBACK");await issuer.query("ROLLBACK");locker.release();issuer.release();}
+});
+
+function sdkAdapter(web: ReturnType<typeof auth0SdkHostFixture>) {
+  return new Auth0SdkConfirmationAdapter(new ProviderDeploymentReadiness(new DeploymentReadiness(
+    new AuthorityProcess("identity",db.identity,expected("identity")),f.configuration,endpointKeys.publicKey),f.auth),policy,web.host,web.callbackUrl);
+}
+async function sdkStart() {
+  const web=auth0SdkHostFixture(), adapter=sdkAdapter(web);
+  await web.login();const initial=web.readSession;
+  await adapter.bindExistingSession(sessionId,initial,confirmationEndpoint(),"fixture-nonce");
+  authentication=await f.auth.verifyAccess((await initial())!.tokenSet.accessToken,"confirm:economic");
+  const p=await issued();
+  const started=await adapter.start(p.c.challenge_id,initial,confirmationEndpoint(),"fixture-nonce");web.save(started.response);
+  const challenge=(await call("roundtrip",ref(p))).reauthentication as ReauthenticationChallenge;
+  const clock=await waitForPostgresPast(admin,new Date(challenge.requestedAt*1000).toISOString());
+  return {p,web,adapter,initial,started,challenge,clock};
+}
+async function sdkCallback(s: Awaited<ReturnType<typeof sdkStart>>,claims:Record<string,unknown>={}) {
+  return s.adapter.callback(s.web.request(claims),confirmationEndpoint(),"fixture-nonce");
+}
+async function sdkProof(s: Awaited<ReturnType<typeof sdkStart>>) {
+  return s.adapter.prepareConfirmation(s.started.bindingId,s.web.readSession,confirmationEndpoint(),"fixture-nonce");
+}
+async function sdkAdmit(proof: Awaited<ReturnType<typeof sdkProof>>) {
+  const path="/confirmation/confirm", generated=JSON.parse(sender.request("issuer","POST",path,proof.body).payload);
+  const invocation=signedFixture({...generated,issuedAt:generated.issuedAt-1,expiresAt:generated.expiresAt-1},serviceKeys.identity.privateKey);
+  return bridge.execute(path,proof.body,invocation,confirmationEndpoint(),"fixture-nonce",proof.authentication,proof.reauthentication,proof.proofId);
+}
+
+test("real SDK: distinct nonces, canonical binding, explicit guarded confirmation and reconstruction",async t=>{
+  const s=await sdkStart();t.diagnostic(JSON.stringify(s.clock));
+  const nonce=s.web.authorize().searchParams.get("nonce");assert.notEqual(nonce,s.challenge.nonce);
+  const before=(await admin.query("SELECT * FROM economic_confirmation_challenges")).rows;
+  assert.equal((await sdkCallback(s)).status,303);assert.equal(s.web.successfulHooks(),1);
+  assert.equal(await count("economic_consent_evidence"),0);
+  // Reconstruct both verifier and SDK host; only durable rows and the real encrypted SDK session survive.
+  f=await readyFixture(profileFixture({databaseName}));authentication=await f.auth.verifyAccess(await accessFixture({scope:"confirm:economic"}),"confirm:economic");rebuild();s.adapter=sdkAdapter(s.web);
+  const proof=await sdkProof(s), retry=await sdkProof(s);assert.equal(retry.proofId,proof.proofId);
+  const result=await sdkAdmit(proof);assert.equal(JSON.parse(result.body).state,"CONFIRMED");
+  assert.equal(await count("economic_confirmation_admissions"),1);assert.equal(await count("economic_consent_evidence"),1);
+  const bound=(await admin.query("SELECT * FROM economic_confirmation_sdk_transactions")).rows[0];
+  const dbProof=(await admin.query("SELECT * FROM economic_confirmation_proofs")).rows[0];
+  assert.equal(bound.context.challenge.nonce,s.challenge.nonce);assert.equal(bound.sdk_nonce,nonce);
+  assert.equal(bound.context.challenge.account_session_id,sessionId);assert.equal(bound.context.challenge.envelope_digest,s.p.digest);
+  assert.equal(bound.context.challenge.environment,"offline-fixture");assert.equal(bound.context.clientId,f.configuration.profile.clientId);
+  assert.equal(dbProof.nonce,s.challenge.nonce);assert.equal(dbProof.sdk_binding_id,s.started.bindingId);
+  assert.deepEqual((await admin.query("SELECT * FROM economic_confirmation_challenges")).rows,before);
+  await assert.rejects(()=>sdkAdmit(proof));
+  assert.equal((await call("recover",ref(s.p))).state,"CONFIRMED"); // Lost issuer response recovery.
+  for(const table of ["economic_confirmation_sdk_transactions","economic_confirmation_sdk_callbacks"])
+    assert(!JSON.stringify((await admin.query(`SELECT * FROM ${table}`)).rows).includes(s.web.providerTokens().idToken));
+});
+for(const failure of ["state","cookie","nonce","PKCE","issuer","audience","expired token"] as const)
+  test(`real SDK: rejects ${failure} before successful callback attestation`,async()=>{
+    const s=await sdkStart();const claims:Record<string,unknown>={};let changes:{}={};
+    if(failure==="state") changes={state:"wrong-state"};
+    if(failure==="cookie") changes={cookie:""};
+    if(failure==="nonce") claims.nonce="wrong-provider-nonce";
+    if(failure==="PKCE") s.web.rejectPkce();
+    if(failure==="issuer") claims.iss="https://foreign.example/";
+    if(failure==="audience") claims.aud="wrong-client";
+    if(failure==="expired token") claims.exp=Math.floor(Date.now()/1000)-120;
+    await assert.rejects(()=>s.adapter.callback(s.web.request(claims,changes),confirmationEndpoint(),"fixture-nonce"));
+    assert.equal(s.web.successfulHooks(),0);assert.equal(await count("economic_confirmation_sdk_callbacks"),0);
+    assert.equal(await count("economic_confirmation_proofs"),0);
+  });
+for(const [label,claims] of [["wrong subject",{sub:"subject:bob"}],["missing auth_time",{auth_time:undefined}],
+  ["silent old SSO",{auth_time:Math.floor(Date.now()/1000)-60}],["missing assurance",{acr:undefined}],["unapproved assurance",{acr:"password-only"}]] as const)
+  test(`real SDK: no canonical callback for ${label}`,async()=>{
+    const s=await sdkStart();await assert.rejects(()=>sdkCallback(s,claims));
+    assert.equal(await count("economic_confirmation_sdk_callbacks"),0);assert.equal(await count("economic_consent_evidence"),0);
+  });
+test("real SDK: durable callback replay fails with the original encrypted transaction cookie",async()=>{
+  const s=await sdkStart(), originalCookie=s.web.cookie();await sdkCallback(s);
+  await assert.rejects(()=>s.adapter.callback(s.web.request({}, {cookie:originalCookie}),confirmationEndpoint(),"fixture-nonce"));
+  assert.equal(await count("economic_confirmation_sdk_callbacks"),1);assert.equal(await count("economic_consent_evidence"),0);
+});
+test("real SDK: signed ID token alone cannot register a bound proof before a validated callback",async()=>{
+  const s=await sdkStart(), raw=await accessFixture({aud:f.configuration.profile.clientId,iat:s.challenge.requestedAt,auth_time:s.challenge.requestedAt,
+    nonce:s.web.authorize().searchParams.get("nonce"),acr:"fixture:mfa"});
+  const proof=await f.auth.verifySdkReauthentication(raw,s.challenge,s.web.authorize().searchParams.get("nonce")!,s.started.bindingId);
+  const body=JSON.stringify({accountSessionId:sessionId,authenticationDigest:authentication.tokenDigest,...ref(s.p),action:"confirm-economic-intent",reauthenticationDigest:sha256(raw)});
+  await assert.rejects(()=>proofAuthority.record(s.p.c.challenge_id,s.challenge,body,authentication,proof,confirmationEndpoint(),"fixture-nonce"),/Durable SDK/);
+  await assert.rejects(()=>callback(s.p)); // Legacy canonical-nonce path cannot bypass the callback requirement.
+  assert.equal(await count("economic_confirmation_proofs"),0);
+});
+test("real SDK: another canonical challenge cannot reuse this callback or token",async()=>{
+  const s=await sdkStart();await sdkCallback(s);const other=await issued();
+  const proof=await sdkProof(s);
+  await assert.rejects(()=>call("confirm",{...ref(other),action:"confirm-economic-intent",reauthenticationDigest:sha256(s.web.providerTokens().idToken)},
+    proof.reauthentication),/substituted/);
+  const otherWeb=auth0SdkHostFixture(), otherAdapter=sdkAdapter(otherWeb);
+  const otherStart=await otherAdapter.start(other.c.challenge_id,s.web.readSession,confirmationEndpoint(),"fixture-nonce");
+  await assert.rejects(()=>otherAdapter.prepareConfirmation(otherStart.bindingId,s.web.readSession,confirmationEndpoint(),"fixture-nonce"),/Durable SDK/);
+});
+for(const phase of ["callback","confirmation"] as const) for(const invalidation of ["session revocation","account version","policy","provider revision"] as const)
+  test(`real SDK: ${invalidation} invalidates ${phase}`,async()=>{
+    const s=await sdkStart();if(phase==="confirmation") await sdkCallback(s);
+    if(invalidation==="session revocation") await revoke();
+    if(invalidation==="account version") await identities.createAccountSession({accountId,sessionId:randomUUID(),expectedAccountVersion:version,
+      createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+60000).toISOString()});
+    if(invalidation==="policy") await registerConfirmationPolicy(admin,confirmationPolicyFixture(f.configuration,{revision:2}));
+    if(invalidation==="provider revision") await admin.query("UPDATE economic_deployment_identity SET provider_key_revision=2");
+    await assert.rejects(()=>phase==="callback" ? sdkCallback(s) : sdkProof(s));
+    assert.equal(await count("economic_consent_evidence"),0);
+  });
+test("real SDK: database-observed expired challenge cannot accept a late callback",async t=>{
+  policy=confirmationPolicyFixture(f.configuration,{revision:2,challengeSeconds:8});await registerConfirmationPolicy(admin,policy);rebuild();
+  const s=await sdkStart();t.diagnostic(JSON.stringify(await waitForPostgresPast(admin,s.p.c.expires_at)));
+  await assert.rejects(()=>sdkCallback(s));assert.equal(await count("economic_confirmation_sdk_callbacks"),0);
+});
+test("SDK durable tables are append-only and excluded from operational direct privileges",async()=>{
+  const s=await sdkStart();await sdkCallback(s);
+  for(const pool of Object.values(db)) for(const table of ["economic_confirmation_sdk_transactions","economic_confirmation_sdk_callbacks"])
+    await assert.rejects(()=>pool.query(`SELECT * FROM ${table}`),/permission/);
+  for(const table of ["economic_confirmation_sdk_transactions","economic_confirmation_sdk_callbacks"])
+    await assert.rejects(()=>admin.query(`DELETE FROM ${table}`),/append.only/i);
+  for(const role of readinessRoles) if(role!=="identity") await assert.rejects(()=>db[role].query(
+    "SELECT economic_read_confirmation_sdk($1,$2)",[s.started.bindingId,authentication]),/permission/);
+});
+
+test("real SDK: an authenticated session cannot select an unbound or different canonical session",async()=>{
+  const secondId=randomUUID();version=(await identities.createAccountSession({accountId,sessionId:secondId,expectedAccountVersion:version,
+    createdAt:new Date(Date.now()-5000).toISOString(),expiresAt:new Date(Date.now()+60000).toISOString()})).account.version;
+  const p=await issued(),web=auth0SdkHostFixture(),adapter=sdkAdapter(web);await web.login();
+  await assert.rejects(()=>adapter.start(p.c.challenge_id,web.readSession,confirmationEndpoint(),"fixture-nonce"),/SDK transaction binding rejected/);
+  await adapter.bindExistingSession(secondId,web.readSession,confirmationEndpoint(),"fixture-nonce");
+  await assert.rejects(()=>adapter.start(p.c.challenge_id,web.readSession,confirmationEndpoint(),"fixture-nonce"),/SDK transaction binding rejected/);
+  await assert.rejects(()=>adapter.bindExistingSession(sessionId,web.readSession,confirmationEndpoint(),"fixture-nonce"),/rebound/);
+  assert.equal(await count("economic_confirmation_sdk_transactions"),0);
+});
+
+test("real SDK: encrypted returnTo for another transaction cannot select its challenge",async()=>{
+  const s=await sdkStart(), other=await issued(), web=auth0SdkHostFixture();await web.login();
+  const originalHost=web.host;
+  const adapter=sdkAdapter({...web,host:onCallback=>{
+    const sdk=originalHost(onCallback);
+    return {...sdk,start:()=>sdk.start(`/confirmation/auth0/result?binding=${s.started.bindingId}`)};
+  }});
+  await adapter.bindExistingSession(sessionId,web.readSession,confirmationEndpoint(),"fixture-nonce");
+  const started=await adapter.start(other.c.challenge_id,web.readSession,confirmationEndpoint(),"fixture-nonce");web.save(started.response);
+  await assert.rejects(()=>adapter.callback(web.request(),confirmationEndpoint(),"fixture-nonce"),/transaction substitution/);
+  assert.equal(await count("economic_confirmation_sdk_callbacks"),0);
+});
+test("real SDK: exact canonical body survives neither session, envelope, challenge nor action substitution",async()=>{
+  const s=await sdkStart();await sdkCallback(s);const proof=await sdkProof(s);
+  for(const change of [{accountSessionId:randomUUID()},{envelopeDigest:"ff".repeat(32)},{challengeId:randomUUID()},
+    {transactionId:randomUUID()},{action:"approve-payment"}])
+    await assert.rejects(()=>sdkAdmit({...proof,body:JSON.stringify({...JSON.parse(proof.body),...change})}));
+  assert.equal(await count("economic_consent_evidence"),0);
+  assert.equal(JSON.parse((await sdkAdmit(proof)).body).state,"CONFIRMED");
 });

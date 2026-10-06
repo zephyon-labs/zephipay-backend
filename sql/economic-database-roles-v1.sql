@@ -3,8 +3,8 @@
 BEGIN;
 SELECT pg_advisory_xact_lock(827346192045711002);
 DO $$ DECLARE role_name text; r record; BEGIN
-  IF NOT EXISTS(SELECT 1 FROM payment_schema_migrations WHERE version='029_confirmation_database_authority.sql') THEN
-    RAISE EXCEPTION 'migration 029 required before role provisioning';
+  IF NOT EXISTS(SELECT 1 FROM payment_schema_migrations WHERE version='030_confirmation_sdk_transactions.sql') THEN
+    RAISE EXCEPTION 'migration 030 required before role provisioning';
   END IF;
   FOREACH role_name IN ARRAY ARRAY['zephipay_economic_admin','zephipay_economic_app','zephipay_economic_issuer','zephipay_economic_signer','zephipay_economic_observer','zephipay_economic_reader','zephipay_economic_identity'] LOOP
     IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname=role_name) THEN
@@ -22,7 +22,7 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 GRANT USAGE ON SCHEMA public TO zephipay_economic_admin,zephipay_economic_app,zephipay_economic_issuer,zephipay_economic_signer,zephipay_economic_observer,zephipay_economic_reader,zephipay_economic_identity;
 GRANT CREATE ON SCHEMA public TO zephipay_economic_admin;
 DO $$ DECLARE name text; f record; BEGIN
-  FOREACH name IN ARRAY ARRAY['economic_confirmation_policy_rules','economic_confirmation_proofs','economic_confirmation_admissions','economic_confirmation_policies','economic_confirmation_policy_heads','economic_confirmation_challenges','economic_confirmation_consumptions','economic_confirmation_summary','economic_deployment_identity','economic_deployment_logins','economic_provider_token_uses','economic_network_registry','economic_asset_registry','economic_attempt_heads','economic_attempts',
+  FOREACH name IN ARRAY ARRAY['economic_confirmation_sdk_transactions','economic_confirmation_sdk_callbacks','economic_confirmation_policy_rules','economic_confirmation_proofs','economic_confirmation_admissions','economic_confirmation_policies','economic_confirmation_policy_heads','economic_confirmation_challenges','economic_confirmation_consumptions','economic_confirmation_summary','economic_deployment_identity','economic_deployment_logins','economic_provider_token_uses','economic_network_registry','economic_asset_registry','economic_attempt_heads','economic_attempts',
     'economic_consent_evidence','economic_runtime_evidence','economic_sponsor_budgets','economic_finalizations','economic_authority_events',
     'economic_callback_evidence','economic_exposure_projection','economic_session_bindings','economic_budget_heads','economic_budget_versions',
     'economic_signer_contact_authority','economic_expiry_records','economic_effect_evidence','economic_observer_operations',
@@ -35,7 +35,7 @@ DO $$ DECLARE name text; f record; BEGIN
     END LOOP;
   END LOOP;
   FOR f IN SELECT p.oid::regprocedure AS signature FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-    WHERE n.nspname='public' AND p.proname=ANY(ARRAY['economic_confirmation_root_write','economic_confirmation_caller','economic_confirmation_context','economic_confirmation_issued','economic_issue_confirmation','economic_record_confirmation_proof','economic_admit_confirmation','economic_confirmation_policy_guard','economic_revocation_only','economic_attempt_guard','economic_head_guard',
+    WHERE n.nspname='public' AND p.proname=ANY(ARRAY['economic_confirmation_sdk_context','economic_bind_confirmation_sdk','economic_read_confirmation_sdk','economic_record_confirmation_sdk_callback','economic_confirmation_sdk_proof_guard','economic_confirmation_sdk_admission_guard','economic_confirmation_root_write','economic_confirmation_caller','economic_confirmation_context','economic_confirmation_issued','economic_issue_confirmation','economic_record_confirmation_proof','economic_admit_confirmation','economic_confirmation_policy_guard','economic_revocation_only','economic_attempt_guard','economic_head_guard',
       'economic_finalization_guard','economic_finalization_consistency','economic_attempt_finalization_consistency','economic_budget_capacity',
       'economic_callback_authority_guard','economic_session_binding_guard','economic_consent_session_guard','economic_budget_head_guard','economic_budget_version_guard',
       'economic_finalization_initial_state','economic_operation_authority_guard','economic_lock_operation','economic_locked_invalidation_reasons',
@@ -111,6 +111,6 @@ GRANT UPDATE(deployment_id) ON economic_confirmation_policy_heads TO zephipay_ec
 GRANT UPDATE(singleton) ON economic_deployment_identity TO zephipay_economic_issuer;
 GRANT UPDATE(intent_id) ON economic_attempt_heads TO zephipay_economic_issuer;
 GRANT EXECUTE ON FUNCTION economic_issue_confirmation(uuid,uuid,text,jsonb),economic_admit_confirmation(uuid,uuid,uuid,text,uuid,text) TO zephipay_economic_issuer;
-GRANT EXECUTE ON FUNCTION economic_record_confirmation_proof(uuid,jsonb) TO zephipay_economic_identity;
+GRANT EXECUTE ON FUNCTION economic_bind_confirmation_sdk(uuid,uuid,jsonb,jsonb),economic_read_confirmation_sdk(uuid,jsonb),economic_record_confirmation_sdk_callback(uuid,jsonb,jsonb),economic_record_confirmation_proof(uuid,jsonb) TO zephipay_economic_identity;
 GRANT SELECT ON economic_confirmation_summary TO zephipay_economic_reader;
 COMMIT;
