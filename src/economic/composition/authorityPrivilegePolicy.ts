@@ -14,6 +14,11 @@ export const authorityPrivilegePolicy = {
   },
   app: {
     tables: {
+      payments: {SELECT:["*"], UPDATE:["id"]},
+      economic_envelopes: {SELECT:["*"], INSERT:["intent_id","generation","attempt_id","fence_token","envelope_digest","envelope"]},
+      economic_envelope_context: {SELECT:["*"]},
+      economic_payment_preparations: {SELECT:["*"], INSERT:["payment_id","account_session_id","envelope_digest","payment_snapshot"]},
+      economic_payment_preparation_profiles: {SELECT:["*"]},
       "economic_authority_incidents": {"SELECT":["*"]},
       "economic_observer_report_summary": {"SELECT":["*"]},
       "economic_authority_trace": {"SELECT":["*"]},
@@ -38,11 +43,13 @@ export const authorityPrivilegePolicy = {
       "economic_effect_evidence": {"SELECT":["*"]},
       "economic_exposure_projection": {"SELECT":["*"]},
     },
-    functions: ["economic_record_incident(uuid,text,text)", "economic_commit_signer_contact(uuid)", "economic_expire_never_contacted(uuid,text)", "economic_record_signer_unknown(uuid)", "economic_apply_finalized_accounting(uuid,uuid)"],
+    functions: ["economic_payment_snapshot(payments)", "economic_record_incident(uuid,text,text)", "economic_commit_signer_contact(uuid)", "economic_expire_never_contacted(uuid,text)", "economic_record_signer_unknown(uuid)", "economic_apply_finalized_accounting(uuid,uuid)"],
     sequences: {"economic_authority_events_event_id_seq": {"USAGE": ["*"]}},
   },
   issuer: {
     tables: {
+      economic_envelopes: {SELECT:["*"]},
+      economic_envelope_context: {SELECT:["*"]},
       economic_confirmation_policies: {SELECT:["*"]},
       economic_confirmation_policy_heads: {SELECT:["*"], UPDATE:["deployment_id"]},
       economic_confirmation_summary: {SELECT:["*"]},
@@ -60,7 +67,7 @@ export const authorityPrivilegePolicy = {
       "economic_session_bindings": {"SELECT":["*"],"INSERT":["issuer","provider_subject","provider_session_reference","account_session_id"]},
       "economic_authority_events": {"INSERT":["event_type","actor","intent_id","generation","finalization_id","consent_id","runtime_id","reference"]},
     },
-    functions: ["economic_issue_confirmation(uuid,uuid,text,jsonb)","economic_admit_confirmation(uuid,uuid,uuid,text,uuid,text)"],
+    functions: ["economic_payment_snapshot(payments)","economic_issue_confirmation(uuid,uuid,text,jsonb)","economic_admit_confirmation(uuid,uuid,uuid,text,uuid,text)"],
     sequences: {"economic_authority_events_event_id_seq": {"USAGE": ["*"]}},
   },
   signer: {
@@ -115,7 +122,7 @@ export const authorityPrivilegePolicy = {
       "economic_budget_heads": {"SELECT":["*"]},
       "economic_budget_versions": {"SELECT":["*"]},
     },
-    functions: [],
+    functions: ["economic_payment_snapshot(payments)"],
     sequences: {},
   },
 } as const;

@@ -654,3 +654,126 @@ test("real SDK: exact canonical body survives neither session, envelope, challen
   assert.equal(await count("economic_consent_evidence"),0);
   assert.equal(JSON.parse((await sdkAdmit(proof)).body).state,"CONFIRMED");
 });
+
+// Metadata-only preparation reuses actual payment persistence and the accepted SDK/guarded issuer.
+async function paymentPreparationFixture() {
+  const { PostgresPaymentPersistence } = await import("../src/storage/postgres/postgresPaymentPersistence");
+  const { devnetPreparationPolicy } = await import("../src/devnet/devnetPreparationPolicy");
+  const { PaymentEnvelopePreparation } = await import("../src/economic/preparation/paymentEnvelopePreparation");
+  const { bindEconomicSession } = await import("../src/economic/foundation/sessionAuthority");
+  const devnet=fixture.devnetEnvelope, now=Date.now();
+  await admin.query("INSERT INTO beta_allowlist(actor_subject) VALUES($1) ON CONFLICT DO NOTHING",[principalId]);
+  const payments=new PostgresPaymentPersistence(admin);
+  const created=await payments.claimIdempotencyKey({id:randomUUID(),actorSubject:principalId,idempotencyKey:randomUUID(),requestHash:"ab".repeat(32),
+    network:"solana-devnet",rail:"solana",asset:"USDC",mintAddress:fixture.qualifiedAsset.mint,recipientAddress:devnet.recipient.wallet,
+    amountRaw:1000000n,purpose:"Controlled preparation",recipientType:"DIRECT_WALLET"});
+  await admin.query("INSERT INTO economic_payment_preparation_profiles(principal_id,profile) VALUES($1,$2) ON CONFLICT DO NOTHING",[principalId,{
+    mode:"controlled-non-value",attestation:"TEST",asset:fixture.qualifiedAsset,lifetimeSeconds:300,
+    devnetPolicy:devnetPreparationPolicy({mint:fixture.qualifiedAsset.mint,decimals:6,sourceTokenAccount:devnet.source.account,
+      signerKeyId:devnet.source.bindingId,signerKeyVersion:devnet.fee.keyVersion,signerPublicKey:devnet.source.signer,
+      submissionProviderId:"TEST:submission",reconciliationProviderId:"TEST:reconciliation"}),fee:devnet.fee,
+    runtime:{policyVersion:"policy-v1",evidenceDigest:devnet.runtime.evidenceDigest,scope:"devnet-test-only",
+      validFrom:new Date(now-60000).toISOString(),validUntil:new Date(now+600000).toISOString()}}]);
+  await transaction(db.identity,client=>bindEconomicSession(client,{issuer:authentication.issuer,providerSubject:authentication.subject,
+    providerSessionReference:"TEST:prepared-session",accountSessionId:sessionId}));
+  const make=()=>new PaymentEnvelopePreparation(new ProviderDeploymentReadiness(new DeploymentReadiness(
+    new AuthorityProcess("app",db.app,expected("app")),f.configuration,endpointKeys.publicKey),f.auth));
+  const run=(service=make(),reference="TEST:prepared-session")=>service.prepare(created.payment.id,authentication,reference,confirmationEndpoint(),"fixture-nonce");
+  return {payment:created.payment,make,run};
+}
+
+test("payment preparation: durable duplicate, concurrent and lost-response recovery use one envelope without a transaction",async()=>{
+  const p=await paymentPreparationFixture();
+  const rows=await Promise.all([p.run(),p.run(),p.run()]);
+  assert.deepEqual(rows[1],rows[0]);assert.deepEqual(rows[2],rows[0]);
+  assert.deepEqual(await p.run(p.make()),rows[0],"fresh service recovers committed response");
+  assert.equal(await count("economic_payment_preparations"),1);
+  assert.equal(await count("economic_envelopes"),1);
+  assert.equal(await count("economic_attempts"),0,"no message, blockhash or exposure record");
+  assert.equal(rows[0].envelope.amount.atomicUnits,"1000000");
+  assert.equal(rows[0].envelope.purpose.reference,p.payment.id);
+  assert.equal(rows[0].envelope.source.mode,"devnet-server");
+  assert.equal((await admin.query("SELECT status FROM payments WHERE id=$1",[p.payment.id])).rows[0].status,"AWAITING_CONFIRMATION");
+});
+for(const column of ["recipient_address","amount_raw","purpose","mint_address"] as const) {
+  test(`payment preparation: immutable ${column} and direct binding substitution rejected`,async()=>{
+    const p=await paymentPreparationFixture(), prepared=await p.run();
+    const replacement=column==="amount_raw"?"2":column==="recipient_address"?fixture.envelope.source.signer:"conflicting-value";
+    await assert.rejects(()=>admin.query(`UPDATE payments SET ${column}=$2 WHERE id=$1`,[p.payment.id,replacement]),/prepared payment/);
+    await assert.rejects(()=>db.app.query("UPDATE economic_envelopes SET envelope=envelope||'{}'::jsonb WHERE envelope_digest=$1",[prepared.envelopeDigest]));
+    assert.deepEqual(await p.run(),prepared);
+  });
+}
+test("payment preparation: another account, unknown session and stale payment are rejected",async()=>{
+  const p=await paymentPreparationFixture();
+  await assert.rejects(()=>p.run(p.make(),"TEST:unknown-session"),/session binding/);
+  const stranger=await f.auth.verifyAccess(await accessFixture({sub:"subject:stranger",scope:"confirm:economic"}),"confirm:economic");
+  await assert.rejects(()=>p.make().prepare(p.payment.id,stranger,"TEST:prepared-session",confirmationEndpoint(),"fixture-nonce"),/identity/);
+  await admin.query("UPDATE payments SET user_confirmed_at=clock_timestamp(),version=version+1 WHERE id=$1",[p.payment.id]);
+  await assert.rejects(()=>p.run(),/no longer eligible/);
+  assert.equal(await count("economic_payment_preparations"),0);
+});
+test("payment preparation: another canonical session cannot claim or confirm the existing binding",async()=>{
+  const p=await paymentPreparationFixture(), prepared=await p.run(), other=randomUUID();
+  await identities.createAccountSession({accountId,sessionId:other,expectedAccountVersion:version,
+    createdAt:new Date(Date.now()-10000).toISOString(),expiresAt:new Date(Date.now()+600000).toISOString()});
+  const {bindEconomicSession}=await import("../src/economic/foundation/sessionAuthority");
+  await transaction(db.identity,client=>bindEconomicSession(client,{issuer:authentication.issuer,providerSubject:authentication.subject,
+    providerSessionReference:"TEST:other-session",accountSessionId:other}));
+  await assert.rejects(()=>p.run(p.make(),"TEST:other-session"),/session conflict/);
+  await assert.rejects(()=>call("start",{accountSessionId:other,envelopeDigest:prepared.envelopeDigest,requestId:randomUUID()}),/session mismatch/);
+});
+test("payment preparation: exact prepared envelope reaches real SDK and guarded confirmation without transaction registration",async()=>{
+  const p=await paymentPreparationFixture(), prepared=await p.run();
+  const web=auth0SdkHostFixture(), adapter=sdkAdapter(web);await web.login();
+  await adapter.bindExistingSession(sessionId,web.readSession,confirmationEndpoint(),"fixture-nonce");
+  authentication=await f.auth.verifyAccess((await web.readSession())!.tokenSet.accessToken,"confirm:economic");
+  const c=await start(prepared.envelopeDigest), started=await adapter.start(c.challenge_id,web.readSession,confirmationEndpoint(),"fixture-nonce");
+  web.save(started.response);
+  const challenge=(await call("roundtrip",{envelopeDigest:prepared.envelopeDigest,challengeId:c.challenge_id,transactionId:c.transaction_id})).reauthentication;
+  await waitForPostgresPast(admin,new Date(challenge.requestedAt*1000).toISOString());
+  assert.equal((await adapter.callback(web.request(),confirmationEndpoint(),"fixture-nonce")).status,303);
+  assert.equal(await count("economic_consent_evidence"),0,"callback is not consent");
+  const proof=await adapter.prepareConfirmation(started.bindingId,web.readSession,confirmationEndpoint(),"fixture-nonce");
+  assert.equal(JSON.parse((await sdkAdmit(proof)).body).state,"CONFIRMED");
+  assert.equal((await call("recover",{envelopeDigest:prepared.envelopeDigest,challengeId:c.challenge_id,transactionId:c.transaction_id},undefined,proof.authentication)).state,"CONFIRMED");
+  assert.equal(await count("economic_attempts"),0);
+  assert.equal((await admin.query("SELECT envelope_digest FROM economic_consent_evidence")).rows[0].envelope_digest,prepared.envelopeDigest);
+  assert.deepEqual(await transaction(db.issuer,client=>import("../src/economic/foundation/evidenceIngestion").then(m=>m.loadEnvelope(client,prepared.envelopeDigest))),prepared.envelope,
+    "future Runtime consumer loads the identical Protocol object");
+});
+for(const field of ["amount","recipient","purpose"] as const) test(`payment preparation: future transaction registration cannot change confirmed ${field}`,async()=>{
+  const p=await paymentPreparationFixture(), prepared=await p.run();
+  const candidate=structuredClone(prepared.envelope) as any;
+  if(field==="amount") candidate.amount.atomicUnits="2000000";
+  if(field==="recipient") candidate.recipient.wallet=fixture.envelope.source.signer;
+  if(field==="purpose") candidate.purpose.reference="different-payment";
+  const {authorizationBindingDigestV1}=await import("zephyon-protocol");
+  const changed=createEconomicIntentEnvelopeV1(candidate,candidate.amount.asset);
+  // Deliberately rejected SQL input only. Never construct or persist an execution transaction.
+  await assert.rejects(()=>db.app.query(`INSERT INTO economic_attempts(intent_id,generation,attempt_id,fence_token,envelope_digest,envelope,
+    message_digest,recent_blockhash,requested_exposure_id) VALUES($1,1,$2,$3,$4,$5,$6,$7,$8)`,
+    [changed.attempt.intentId,changed.attempt.attemptId,changed.attempt.fenceToken,authorizationBindingDigestV1(changed,changed.amount.asset),changed,
+      "ee".repeat(32),fixture.recentBlockhash,randomUUID()]),/conflicts with prepared envelope/);
+  assert.equal(await count("economic_attempts"),0);
+  assert.deepEqual(await p.run(),prepared);
+});
+test("payment preparation: a second payment cannot reuse an existing envelope",async()=>{
+  const first=await paymentPreparationFixture(), prepared=await first.run(), second=await paymentPreparationFixture();
+  const snapshot=(await admin.query("SELECT economic_payment_snapshot(p) AS snapshot FROM payments p WHERE id=$1",[second.payment.id])).rows[0].snapshot;
+  await assert.rejects(()=>db.app.query(`INSERT INTO economic_payment_preparations(payment_id,account_session_id,envelope_digest,payment_snapshot)
+    VALUES($1,$2,$3,$4)`,[second.payment.id,sessionId,prepared.envelopeDigest,snapshot]),/binding mismatch/);
+  assert.equal(await count("economic_payment_preparations"),1);
+});
+test("payment preparation: no operational role gains configuration, terminal or canonical state authority",async()=>{
+  const p=await paymentPreparationFixture();await p.run();
+  for(const role of readinessRoles) {
+    await verifyAuthorityLogin(db[role],role,{deployment:expected(role),syntheticFixtures:true});
+    await assert.rejects(()=>db[role].query("UPDATE economic_payment_preparation_profiles SET profile=profile"));
+    await assert.rejects(()=>db[role].query("UPDATE economic_envelopes SET state='FINALIZATION_COMMITTED'"));
+    if(role!=="app") await assert.rejects(()=>db[role].query("INSERT INTO economic_payment_preparations DEFAULT VALUES"));
+  }
+  await assert.rejects(()=>db.app.query("INSERT INTO economic_confirmation_consumptions DEFAULT VALUES"));
+  await assert.rejects(()=>db.app.query("INSERT INTO economic_confirmation_admissions DEFAULT VALUES"));
+  await assert.rejects(()=>db.app.query("INSERT INTO economic_signer_contact_authority DEFAULT VALUES"));
+});

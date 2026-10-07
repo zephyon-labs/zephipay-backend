@@ -7,7 +7,7 @@ import type { SignedArtifact } from "./signedArtifact";
 /** Combines authenticated external endpoint/configuration identity with actual LOGIN and durable key revision. No mounted routes. */
 export class ProviderDeploymentReadiness {
   constructor(readonly deployment: DeploymentReadiness, readonly authentication: Auth0AuthenticationVerifier) {
-    requireCondition(deployment.configuration === authentication.snapshots.configuration && ["identity","issuer"].includes(deployment.process.role), "Identity/issuer provider deployment required.");
+    requireCondition(deployment.configuration === authentication.snapshots.configuration && ["identity","issuer","app"].includes(deployment.process.role), "Identity/issuer/preparation app provider deployment required.");
   }
   private async check(client: PoolClient): Promise<void> {
     const snapshot = await this.authentication.snapshots.current();
