@@ -14,7 +14,7 @@ import { PostgresFinalizationRepository } from "../src/economic/foundation/postg
 import { TrustedRegistryAdministration, devnetUsdcConfiguration } from "../src/economic/foundation/trustedRegistry";
 import { profileFixture } from "./helpers/realProviderFixtures";
 
-test("028 through 031 preserves historical evidence, quarantines legacy bridge authority, closes old grants and repeats safely",async()=>{
+test("028 through 032 preserves historical evidence, quarantines legacy bridge authority, closes old grants and repeats safely",async()=>{
   const url=process.env.TEST_DATABASE_URL?.trim();assert(url,"Disposable TEST_DATABASE_URL required");
   const root=new Pool({connectionString:url}), name=`confirmation_upgrade_${randomUUID().replaceAll("-","").slice(0,12)}`;
   const folder=await mkdtemp(join(tmpdir(),"confirmation-upgrade-"));const project=process.cwd();let pool:Pool|undefined;
@@ -81,9 +81,11 @@ test("028 through 031 preserves historical evidence, quarantines legacy bridge a
     assert.deepEqual((await pool.query("SELECT envelope FROM economic_envelopes WHERE envelope_digest=$1",[digest])).rows[0].envelope,createEconomicIntentEnvelopeV1(e,e.amount.asset));
     assert.deepEqual((await pool.query("SELECT * FROM economic_confirmation_challenges")).rows,before.challenges);
     assert.deepEqual((await pool.query("SELECT * FROM economic_confirmation_consumptions")).rows,before.consumptions);
+    await writeFile(join(folder,"migrations/032_controlled_web_confirmation.sql"),await readFile("migrations/032_controlled_web_confirmation.sql"));
+    await migrate();
     await pool.query(await readFile(join(project,"sql/economic-database-roles-v1.sql"),"utf8"));
     await pool.query(await readFile(join(project,"sql/economic-database-roles-v1.sql"),"utf8"));
-    assert.equal((await pool.query("SELECT count(*)::integer AS n FROM payment_schema_migrations")).rows[0].n,31);
+    assert.equal((await pool.query("SELECT count(*)::integer AS n FROM payment_schema_migrations")).rows[0].n,32);
     assert(!(await migrate()).stdout.includes("Applied"));
     assert.equal((await pool.query("SELECT has_function_privilege('zephipay_economic_issuer','economic_admit_confirmation(uuid,uuid,uuid,text,uuid,text)','EXECUTE') AS admitted")).rows[0].admitted,true);
     assert.equal((await pool.query("SELECT has_function_privilege('zephipay_economic_issuer','economic_record_confirmation_proof(uuid,jsonb)','EXECUTE') AS allowed")).rows[0].allowed,false);

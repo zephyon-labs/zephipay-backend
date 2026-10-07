@@ -165,3 +165,7 @@ ordinary public payment entry points are byte-for-byte unchanged.
 Site's separate stale Activity harness repair passed lint, Next route type
 generation, standalone `tsc --noEmit --incremental false`, 287 tests and build.
 No controlled Site confirmation UX is implemented or claimed as validated.
+
+## Controlled web continuation
+
+The Site-hosted SDK and bounded private handoff continuation is described in [controlled-web-confirmation-v1.md](controlled-web-confirmation-v1.md). That TEST-only composition integrates this unchanged preparation contract; earlier pending-web notes above describe the preserved checkpoint, not an activation claim. Production readiness remains false.

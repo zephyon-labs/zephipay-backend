@@ -9,7 +9,7 @@ import { providerJwks } from "./providerTokens";
 /** The installed public SDK, unmodified. Only its provider network is a deterministic offline fixture.
  * No real Auth0 tenant, wallet, sponsor, signer, Runtime or settlement service is contacted.
  */
-export function auth0SdkHostFixture() {
+export function auth0SdkHostFixture(beforeSave?: (session: import("@auth0/nextjs-auth0/types").SessionData) => import("@auth0/nextjs-auth0/types").SessionData) {
   const p = profileFixture(), origin = "http://localhost:3000", callbackUrl = `${origin}/auth/callback`;
   const jar = new Map<string,string>(), codes = new Map<string,{claims:Record<string,unknown>; used:boolean}>();
   let authorization: URL, successfulHooks = 0, lastIdToken = "", lastAccessToken = "";
@@ -43,7 +43,7 @@ export function auth0SdkHostFixture() {
     enableAccessTokenEndpoint:false,enableConnectAccountEndpoint:false,
     session:{rolling:false,cookie:{name:"__zephipay_confirmation_fixture",sameSite:"lax",secure:false}},
     transactionCookie:{prefix:"__zephipay_confirmation_fixture_tx"},
-    beforeSessionSaved:async session=>{delete session.tokenSet.refreshToken;return session;},
+    beforeSessionSaved:async session=>{delete session.tokenSet.refreshToken;return beforeSave ? beforeSave(session) : session;},
     customFetch,
     onCallback:onCallback ? async (error,context,session)=>{
       if(!error) successfulHooks++;
@@ -66,7 +66,7 @@ export function auth0SdkHostFixture() {
       },
     };
   };
-  return {host,callbackUrl,save,cookie,
+  return {host,callbackUrl,save,cookie,makeSdk,observeAuthorization:(response:Response)=>{authorization=new URL(response.headers.get("location")!);},
     async login() {
       const sdk=makeSdk(), response=await sdk.middleware(new NextRequest(`${origin}/auth/login`));
       authorization=new URL(response.headers.get("location")!);save(response);

@@ -1,3 +1,4 @@
+import { createControlledWebConfirmationRouter } from "./routes/controlledWebConfirmation";
 import cors from "cors";
 import dotenv from "dotenv";
 import { randomUUID } from "node:crypto";
@@ -68,6 +69,9 @@ import {
 } from "./growth/growthZpProjectionWorker";
 
 const app = express();
+// Public runtime has no controlled authority credentials or execution bridge. The isolated
+// TEST composition mounts this router with its explicitly constructed restricted services.
+app.use("/internal/controlled-confirmation",createControlledWebConfirmationRouter());
 const harnessAuth = localHarnessAuth();
 let executionLoop: AdaptiveWorkerLoop | undefined;
 let devnetComposition: LiveDevnetComposition | undefined;

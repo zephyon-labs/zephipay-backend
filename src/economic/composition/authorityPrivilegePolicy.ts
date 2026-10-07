@@ -2,6 +2,11 @@
 export const authorityPrivilegePolicy = {
   identity: {
     tables: {
+      economic_web_revocations: {SELECT:["*"], INSERT:["*"]},
+      economic_web_status: {SELECT:["*"]},
+      economic_web_sessions: {SELECT:["*"], INSERT:["*"]},
+      economic_web_ceremonies: {SELECT:["*"], INSERT:["*"]},
+      economic_web_handoff_requests: {SELECT:["*"], INSERT:["*"]},
       accounts: {SELECT:["*"], INSERT:["*"], UPDATE:["status","version","updated_at"]},
       external_identities: {SELECT:["*"], INSERT:["*"]},
       account_sessions: {SELECT:["*"], INSERT:["*"], UPDATE:["revoked_at"]},

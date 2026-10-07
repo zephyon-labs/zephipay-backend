@@ -97,7 +97,9 @@ beforeEach(async () => {
   repo=new PostgresFinalizationRepository(db.app,evidence); // No signer or observer injected; no transaction is signed in this suite.
   await registry.install(devnetUsdcConfiguration(fixture.qualifiedAsset.network.genesisHash,"2026-01-01T00:00:00.000Z"));
 });
+const webServers: import("node:http").Server[]=[];
 afterEach(async () => {
+  for(const server of webServers.splice(0)){server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
   for(const table of ["economic_runtime_evidence","economic_finalizations","economic_signer_contact_authority","economic_effect_evidence"])
     assert.equal(Number((await admin.query(`SELECT count(*) FROM ${table}`)).rows[0].count),0,`${table} must remain empty`);
 });
@@ -777,3 +779,149 @@ test("payment preparation: no operational role gains configuration, terminal or 
   await assert.rejects(()=>db.app.query("INSERT INTO economic_confirmation_admissions DEFAULT VALUES"));
   await assert.rejects(()=>db.app.query("INSERT INTO economic_signer_contact_authority DEFAULT VALUES"));
 });
+
+// Cross-repository vertical slice deliberately imports the candidate Site implementation.
+// Set CONTROLLED_SITE_SOURCE to its checkout; no copied SDK validation or mocked callback success.
+async function controlledWebFixture(http=false) {
+  const source=process.env.CONTROLLED_SITE_SOURCE;
+  assert(source,"CONTROLLED_SITE_SOURCE must identify the reviewed Site checkout for the cross-repository non-value regression");
+  const site=await import(`${source}/src/lib/controlledConfirmation/sdkFlow.ts`);
+  const sessions=await import(`${source}/src/lib/controlledConfirmation/session.ts`);
+  const {NextRequest}=await import("next/server.js");
+  const {ControlledWebConfirmation}=await import("../src/economic/web/controlledWebConfirmation");
+  const contract=await import("../src/economic/web/handoffContract");
+  const {generateKeyPairSync}=await import("node:crypto");
+  const siteKeys=generateKeyPairSync("ed25519"),responseKeys=generateKeyPairSync("ed25519");
+  const p=await paymentPreparationFixture(),web=auth0SdkHostFixture(sessions.withWebSessionReference);await web.login();
+  const context={environment:f.configuration.profile.environment,configuration:f.configuration.fingerprint,siteOrigin:"http://localhost:3000",backendOrigin:"http://localhost:3001",clientId:policy.policy.clientId,issuer:policy.policy.issuer};
+  const make=()=>new ControlledWebConfirmation(new ProviderDeploymentReadiness(new DeploymentReadiness(
+    new AuthorityProcess("identity",db.identity,expected("identity")),f.configuration,endpointKeys.publicKey),f.auth),policy,context,siteKeys.publicKey,responseKeys.privateKey,
+    ()=>({artifact:confirmationEndpoint(),nonce:"fixture-nonce"}),{
+      prepare:(id,auth,reference)=>p.make().prepare(id,auth,reference,confirmationEndpoint(),"fixture-nonce"),
+      challenge:(prepared,auth,requestId)=>call("start",{accountSessionId:prepared.accountSessionId,envelopeDigest:prepared.envelopeDigest,requestId},undefined,auth),
+      admit:async proof=>{await sdkAdmit(proof);},
+    },"controlled-non-value");
+  let service=make();
+  if(http) {
+    const {createControlledWebApplication}=await import("../src/economic/web/application");
+    const app=createControlledWebApplication({handle:(action,request)=>service.handle(action,request)});
+    const server=app.listen(0,"localhost");webServers.push(server);
+    await new Promise<void>((resolve,reject)=>{server.once("listening",resolve);server.once("error",reject);});
+    context.backendOrigin=`http://localhost:${(server.address() as import("node:net").AddressInfo).port}`;
+    service=make();
+  }
+  const packet=(action:import("../src/economic/web/handoffContract").WebAction,body:import("../src/economic/web/handoffContract").HandoffBody)=>{
+    const generated=contract.signWebRequest(context,action,body,siteKeys.privateKey),m=JSON.parse(generated.payload);
+    // Backward clock evidence belongs to existing host; keep issue time one second behind DB without changing any guard.
+    return signedFixture({...m,issuedAt:m.issuedAt-1,expiresAt:m.expiresAt-1},siteKeys.privateKey);
+  };
+  const backendFetch=globalThis.fetch;
+  const callWeb=async(action:import("../src/economic/web/handoffContract").WebAction,body:import("../src/economic/web/handoffContract").HandoffBody)=>{
+    const request=packet(action,body);
+    let response: import("../src/economic/web/handoffContract").Handoff;
+    if(http) {
+      const result=await backendFetch(`${context.backendOrigin}/internal/controlled-confirmation/${action}`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(request)});
+      assert.equal(result.status,200);response=await result.json() as typeof response;
+    } else response=await service.handle(action,request);
+    return contract.verifyWebResponse(request,response,responseKeys.publicKey);
+  };
+  const body=async()=>({paymentId:p.payment.id,session:sessions.toWebSession(await web.readSession())});
+  async function startWeb() {
+    const request=new NextRequest("http://localhost:3000/api/payment-intents/test/controlled-confirmation/start",{method:"POST",headers:{cookie:web.cookie(),origin:context.siteOrigin}});
+    const sdk=web.makeSdk();
+    const middleware=sdk.middleware.bind(sdk);sdk.middleware=async req=>{const response=await middleware(req);web.observeAuthorization(response);return response;};
+    const response=await site.startControlledSdk(request,p.payment.id,await web.readSession(),sdk,callWeb);web.save(response);return response;
+  }
+  async function callbackWeb() {
+    const challenge=(await admin.query("SELECT c.reauthentication FROM economic_confirmation_challenges c JOIN economic_web_ceremonies w USING(challenge_id) WHERE w.payment_id=$1",[p.payment.id])).rows[0].reauthentication;
+    await waitForPostgresPast(admin,new Date(challenge.requestedAt*1000).toISOString());
+    const request=new NextRequest(web.request()),previous=await web.readSession();
+    const hook=site.controlledCallback(request,previous,callWeb),sdk=web.makeSdk(hook);
+    const response=await sdk.middleware(request);web.save(response);return {response,request};
+  }
+  return {p,web,body,callWeb,packet,contract,context,siteKeys,responseKeys,make,get service(){return service;},rebuild:()=>{service=make();},startWeb,callbackWeb,sessions,site,NextRequest};
+}
+
+// The separate cross-repository target requires CONTROLLED_SITE_SOURCE; ordinary standalone
+// Backend regression remains runnable without a sibling checkout. Validation for this package sets it.
+if(process.env.CONTROLLED_SITE_SOURCE) {
+test("web handoff: actual Site SDK to canonical session, preparation, callback and guarded consent; reconstruction and duplicates",async t=>{
+  const w=await controlledWebFixture(true),body=await w.body();
+  const starts=await Promise.all([w.callWeb("prepare",body),w.callWeb("prepare",body)]);
+  assert.deepEqual(starts[0],starts[1]);assert.equal(starts[0].state,"READY");
+  assert.equal(await count("economic_web_sessions"),1);assert.equal(await count("economic_web_ceremonies"),1);
+  const mapped=(await admin.query("SELECT account_session_id FROM economic_web_sessions")).rows[0].account_session_id;
+  assert.notEqual(mapped,sessionId,"a distinct web session is durably established");
+  assert.equal((await w.startWeb()).status,303);
+  const cb=await w.callbackWeb();assert.match(cb.response.headers.get("location")!,/controlled=1&intent=/);
+  assert.equal(await count("economic_consent_evidence"),0,"callback alone does not confirm");
+  assert.equal((await w.callWeb("recover",await w.body())).state,"CONFIRMABLE");
+  const sdk=w.web.makeSdk(w.site.controlledCallback(cb.request,await w.web.readSession(),w.callWeb));
+  await assert.rejects(()=>sdk.middleware(cb.request),/callback rejected|invalid|transaction/i);
+  const source=process.env.CONTROLLED_SITE_SOURCE!;
+  const product=await import(`${source}/tests/helpers/controlledWebProductFixture.tsx`);
+  const bff=await import(`${source}/src/lib/controlledConfirmation/routeAction.ts`);
+  const displayed=await product.exerciseControlledProduct(w.p.payment.id,async(input:RequestInfo|URL,init?:RequestInit)=>{
+    const request=new Request(new URL(String(input),w.context.siteOrigin),{...init,headers:{...Object.fromEntries(new Headers(init?.headers)),origin:w.context.siteOrigin}});
+    return bff.controlledRouteAction(request,w.p.payment.id,{enabled:true,trustedOrigin:(r:Request)=>r.headers.get("origin")===w.context.siteOrigin,session:w.web.readSession,call:w.callWeb});
+  });
+  assert.equal(displayed.state,"Payment confirmed");
+  w.rebuild();
+  const confirmed=await Promise.all([w.callWeb("confirm",await w.body()),w.callWeb("confirm",await w.body())]);
+  assert(confirmed.every(r=>r.state==="CONFIRMED"));
+  w.rebuild();assert.equal((await w.callWeb("recover",await w.body())).state,"CONFIRMED");
+  assert.equal((await w.callWeb("confirm",await w.body())).state,"CONFIRMED","lost response retry recovers admission");
+  assert.equal(await count("economic_consent_evidence"),1);assert.equal(await count("economic_confirmation_admissions"),1);
+  assert.equal(await count("economic_attempts"),0);assert.equal(await count("economic_runtime_evidence"),0);
+  for(const role of readinessRoles)await verifyAuthorityLogin(db[role],role,{deployment:expected(role),syntheticFixtures:true});
+  const persisted=JSON.stringify((await admin.query("SELECT row_to_json(w) FROM economic_web_ceremonies w")).rows);
+  assert(!persisted.includes(body.session.accessToken));assert(!persisted.includes(body.session.idToken));
+  t.diagnostic("Actual candidate Site SDK hooks + signed private handoff + restricted PostgreSQL authorities: CONFIRMED, one consent, no execution");
+});
+test("web handoff: signature, context, body substitution and replay rejected across instances",async()=>{
+  const w=await controlledWebFixture(),body=await w.body(),packet=w.packet("prepare",body);
+  const altered=JSON.parse(packet.payload);altered.body.paymentId=randomUUID();
+  await assert.rejects(()=>w.service.handle("prepare",{...packet,payload:JSON.stringify(altered)}));
+  await assert.rejects(()=>w.service.handle("confirm",packet));
+  await w.service.handle("prepare",packet);w.rebuild();
+  await assert.rejects(()=>w.service.handle("prepare",packet),/replay/);
+  const foreign=w.contract.signWebRequest({...w.context,environment:"production"},"recover",body,w.siteKeys.privateKey);
+  await assert.rejects(()=>w.service.handle("recover",foreign));
+  assert.equal(await count("economic_consent_evidence"),0);
+});
+test("web handoff: logout before first preparation and during SDK ceremony cannot regain authority",async()=>{
+  const w=await controlledWebFixture(),body=await w.body();
+  await w.callWeb("revoke",{session:{...body.session,accessToken:"",idToken:""}});w.rebuild();
+  await assert.rejects(()=>w.callWeb("prepare",body),/revoked/);
+  const second=await controlledWebFixture();await second.callWeb("prepare",await second.body());await second.startWeb();
+  await second.callWeb("revoke",{session:{...(await second.body()).session,accessToken:"",idToken:""}});
+  await assert.rejects(()=>second.callbackWeb(),/revoked|invalid/);
+  assert.equal(await count("economic_consent_evidence"),0);
+});
+test("web handoff: another device cannot claim a prepared payment or rebind its opaque reference",async()=>{
+  const w=await controlledWebFixture(),body=await w.body();await w.callWeb("prepare",body);
+  await assert.rejects(()=>w.callWeb("prepare",{...body,session:{...body.session,reference:randomUUID()}}),/another session|conflict/);
+  await assert.rejects(()=>w.callWeb("recover",{...body,session:{...body.session,subject:"subject:bob"}}),/subject/);
+  assert.equal(await count("economic_web_sessions"),2,"distinct device receives distinct canonical session, no rebinding");
+  assert.equal(await count("economic_consent_evidence"),0);
+});
+test("web handoff: fabricated SDK callback without SDK token/state binding is rejected",async()=>{
+  const w=await controlledWebFixture(),body=await w.body(),prepared=await w.callWeb("prepare",body);await w.startWeb();
+  await assert.rejects(()=>w.callWeb("callback",{bindingId:prepared.bindingId,stateDigest:"ff".repeat(32),session:body.session}),/substitution/);
+  await assert.rejects(()=>w.callWeb("confirm",body),/validated callback/);
+  assert.equal(await count("economic_confirmation_sdk_callbacks"),0);assert.equal(await count("economic_consent_evidence"),0);
+});
+test("web handoff: registration time never backdates account mutation; missing renewed SDK cookie cannot confirm",async()=>{
+  const w=await controlledWebFixture(),oldBody=await w.body();
+  // Simulate canonical account hydration after the provider login event, as real Site onboarding does.
+  const a=await identities.findAccount(accountId);assert(a);
+  await identities.createAccountSession({accountId,sessionId:randomUUID(),expectedAccountVersion:a.version,expiresAt:new Date(Date.now()+3600000).toISOString()});
+  await w.callWeb("prepare",oldBody);await w.startWeb();await w.callbackWeb();
+  assert.equal((await w.callWeb("recover",oldBody)).state,"SESSION_CHANGED","committed callback without delivered session cookie grants no confirmation authority");
+  await assert.rejects(()=>w.callWeb("confirm",oldBody),/validated callback/);
+  assert.equal(await count("economic_consent_evidence"),0);
+  const s=(await admin.query("SELECT w.recorded_at,a.updated_at,s.created_at FROM economic_web_sessions w JOIN account_sessions s ON s.session_id=w.account_session_id JOIN accounts a USING(account_id)")).rows[0];
+  assert(s.updated_at>=s.created_at);assert(s.recorded_at>=s.created_at);
+});
+
+}
