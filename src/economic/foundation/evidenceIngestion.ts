@@ -35,7 +35,7 @@ function scopeAllowed(envelope: EconomicIntentEnvelopeV1, policy: EvidencePolicy
 }
 
 export async function loadEnvelope(client: PoolClient, digest: string): Promise<EconomicIntentEnvelopeV1> {
-  const row = (await client.query("SELECT envelope FROM economic_attempts WHERE envelope_digest=$1", [digest])).rows[0];
+  const row = (await client.query("SELECT envelope FROM economic_envelopes WHERE envelope_digest=$1", [digest])).rows[0];
   requireCondition(row, "Unknown economic envelope.");
   return createEconomicIntentEnvelopeV1(row.envelope, row.envelope.amount.asset);
 }

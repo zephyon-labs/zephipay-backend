@@ -97,7 +97,9 @@ beforeEach(async () => {
   repo=new PostgresFinalizationRepository(db.app,evidence); // No signer or observer injected; no transaction is signed in this suite.
   await registry.install(devnetUsdcConfiguration(fixture.qualifiedAsset.network.genesisHash,"2026-01-01T00:00:00.000Z"));
 });
+const webServers: import("node:http").Server[]=[];
 afterEach(async () => {
+  for(const server of webServers.splice(0)){server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
   for(const table of ["economic_runtime_evidence","economic_finalizations","economic_signer_contact_authority","economic_effect_evidence"])
     assert.equal(Number((await admin.query(`SELECT count(*) FROM ${table}`)).rows[0].count),0,`${table} must remain empty`);
 });
@@ -654,3 +656,272 @@ test("real SDK: exact canonical body survives neither session, envelope, challen
   assert.equal(await count("economic_consent_evidence"),0);
   assert.equal(JSON.parse((await sdkAdmit(proof)).body).state,"CONFIRMED");
 });
+
+// Metadata-only preparation reuses actual payment persistence and the accepted SDK/guarded issuer.
+async function paymentPreparationFixture() {
+  const { PostgresPaymentPersistence } = await import("../src/storage/postgres/postgresPaymentPersistence");
+  const { devnetPreparationPolicy } = await import("../src/devnet/devnetPreparationPolicy");
+  const { PaymentEnvelopePreparation } = await import("../src/economic/preparation/paymentEnvelopePreparation");
+  const { bindEconomicSession } = await import("../src/economic/foundation/sessionAuthority");
+  const devnet=fixture.devnetEnvelope, now=Date.now();
+  await admin.query("INSERT INTO beta_allowlist(actor_subject) VALUES($1) ON CONFLICT DO NOTHING",[principalId]);
+  const payments=new PostgresPaymentPersistence(admin);
+  const created=await payments.claimIdempotencyKey({id:randomUUID(),actorSubject:principalId,idempotencyKey:randomUUID(),requestHash:"ab".repeat(32),
+    network:"solana-devnet",rail:"solana",asset:"USDC",mintAddress:fixture.qualifiedAsset.mint,recipientAddress:devnet.recipient.wallet,
+    amountRaw:1000000n,purpose:"Controlled preparation",recipientType:"DIRECT_WALLET"});
+  await admin.query("INSERT INTO economic_payment_preparation_profiles(principal_id,profile) VALUES($1,$2) ON CONFLICT DO NOTHING",[principalId,{
+    mode:"controlled-non-value",attestation:"TEST",asset:fixture.qualifiedAsset,lifetimeSeconds:300,
+    devnetPolicy:devnetPreparationPolicy({mint:fixture.qualifiedAsset.mint,decimals:6,sourceTokenAccount:devnet.source.account,
+      signerKeyId:devnet.source.bindingId,signerKeyVersion:devnet.fee.keyVersion,signerPublicKey:devnet.source.signer,
+      submissionProviderId:"TEST:submission",reconciliationProviderId:"TEST:reconciliation"}),fee:devnet.fee,
+    runtime:{policyVersion:"policy-v1",evidenceDigest:devnet.runtime.evidenceDigest,scope:"devnet-test-only",
+      validFrom:new Date(now-60000).toISOString(),validUntil:new Date(now+600000).toISOString()}}]);
+  await transaction(db.identity,client=>bindEconomicSession(client,{issuer:authentication.issuer,providerSubject:authentication.subject,
+    providerSessionReference:"TEST:prepared-session",accountSessionId:sessionId}));
+  const make=()=>new PaymentEnvelopePreparation(new ProviderDeploymentReadiness(new DeploymentReadiness(
+    new AuthorityProcess("app",db.app,expected("app")),f.configuration,endpointKeys.publicKey),f.auth));
+  const run=(service=make(),reference="TEST:prepared-session")=>service.prepare(created.payment.id,authentication,reference,confirmationEndpoint(),"fixture-nonce");
+  return {payment:created.payment,make,run};
+}
+
+test("payment preparation: durable duplicate, concurrent and lost-response recovery use one envelope without a transaction",async()=>{
+  const p=await paymentPreparationFixture();
+  const rows=await Promise.all([p.run(),p.run(),p.run()]);
+  assert.deepEqual(rows[1],rows[0]);assert.deepEqual(rows[2],rows[0]);
+  assert.deepEqual(await p.run(p.make()),rows[0],"fresh service recovers committed response");
+  assert.equal(await count("economic_payment_preparations"),1);
+  assert.equal(await count("economic_envelopes"),1);
+  assert.equal(await count("economic_attempts"),0,"no message, blockhash or exposure record");
+  assert.equal(rows[0].envelope.amount.atomicUnits,"1000000");
+  assert.equal(rows[0].envelope.purpose.reference,p.payment.id);
+  assert.equal(rows[0].envelope.source.mode,"devnet-server");
+  assert.equal((await admin.query("SELECT status FROM payments WHERE id=$1",[p.payment.id])).rows[0].status,"AWAITING_CONFIRMATION");
+});
+for(const column of ["recipient_address","amount_raw","purpose","mint_address"] as const) {
+  test(`payment preparation: immutable ${column} and direct binding substitution rejected`,async()=>{
+    const p=await paymentPreparationFixture(), prepared=await p.run();
+    const replacement=column==="amount_raw"?"2":column==="recipient_address"?fixture.envelope.source.signer:"conflicting-value";
+    await assert.rejects(()=>admin.query(`UPDATE payments SET ${column}=$2 WHERE id=$1`,[p.payment.id,replacement]),/prepared payment/);
+    await assert.rejects(()=>db.app.query("UPDATE economic_envelopes SET envelope=envelope||'{}'::jsonb WHERE envelope_digest=$1",[prepared.envelopeDigest]));
+    assert.deepEqual(await p.run(),prepared);
+  });
+}
+test("payment preparation: another account, unknown session and stale payment are rejected",async()=>{
+  const p=await paymentPreparationFixture();
+  await assert.rejects(()=>p.run(p.make(),"TEST:unknown-session"),/session binding/);
+  const stranger=await f.auth.verifyAccess(await accessFixture({sub:"subject:stranger",scope:"confirm:economic"}),"confirm:economic");
+  await assert.rejects(()=>p.make().prepare(p.payment.id,stranger,"TEST:prepared-session",confirmationEndpoint(),"fixture-nonce"),/identity/);
+  await admin.query("UPDATE payments SET user_confirmed_at=clock_timestamp(),version=version+1 WHERE id=$1",[p.payment.id]);
+  await assert.rejects(()=>p.run(),/no longer eligible/);
+  assert.equal(await count("economic_payment_preparations"),0);
+});
+test("payment preparation: another canonical session cannot claim or confirm the existing binding",async()=>{
+  const p=await paymentPreparationFixture(), prepared=await p.run(), other=randomUUID();
+  await identities.createAccountSession({accountId,sessionId:other,expectedAccountVersion:version,
+    createdAt:new Date(Date.now()-10000).toISOString(),expiresAt:new Date(Date.now()+600000).toISOString()});
+  const {bindEconomicSession}=await import("../src/economic/foundation/sessionAuthority");
+  await transaction(db.identity,client=>bindEconomicSession(client,{issuer:authentication.issuer,providerSubject:authentication.subject,
+    providerSessionReference:"TEST:other-session",accountSessionId:other}));
+  await assert.rejects(()=>p.run(p.make(),"TEST:other-session"),/session conflict/);
+  await assert.rejects(()=>call("start",{accountSessionId:other,envelopeDigest:prepared.envelopeDigest,requestId:randomUUID()}),/session mismatch/);
+});
+test("payment preparation: exact prepared envelope reaches real SDK and guarded confirmation without transaction registration",async()=>{
+  const p=await paymentPreparationFixture(), prepared=await p.run();
+  const web=auth0SdkHostFixture(), adapter=sdkAdapter(web);await web.login();
+  await adapter.bindExistingSession(sessionId,web.readSession,confirmationEndpoint(),"fixture-nonce");
+  authentication=await f.auth.verifyAccess((await web.readSession())!.tokenSet.accessToken,"confirm:economic");
+  const c=await start(prepared.envelopeDigest), started=await adapter.start(c.challenge_id,web.readSession,confirmationEndpoint(),"fixture-nonce");
+  web.save(started.response);
+  const challenge=(await call("roundtrip",{envelopeDigest:prepared.envelopeDigest,challengeId:c.challenge_id,transactionId:c.transaction_id})).reauthentication;
+  await waitForPostgresPast(admin,new Date(challenge.requestedAt*1000).toISOString());
+  assert.equal((await adapter.callback(web.request(),confirmationEndpoint(),"fixture-nonce")).status,303);
+  assert.equal(await count("economic_consent_evidence"),0,"callback is not consent");
+  const proof=await adapter.prepareConfirmation(started.bindingId,web.readSession,confirmationEndpoint(),"fixture-nonce");
+  assert.equal(JSON.parse((await sdkAdmit(proof)).body).state,"CONFIRMED");
+  assert.equal((await call("recover",{envelopeDigest:prepared.envelopeDigest,challengeId:c.challenge_id,transactionId:c.transaction_id},undefined,proof.authentication)).state,"CONFIRMED");
+  assert.equal(await count("economic_attempts"),0);
+  assert.equal((await admin.query("SELECT envelope_digest FROM economic_consent_evidence")).rows[0].envelope_digest,prepared.envelopeDigest);
+  assert.deepEqual(await transaction(db.issuer,client=>import("../src/economic/foundation/evidenceIngestion").then(m=>m.loadEnvelope(client,prepared.envelopeDigest))),prepared.envelope,
+    "future Runtime consumer loads the identical Protocol object");
+});
+for(const field of ["amount","recipient","purpose"] as const) test(`payment preparation: future transaction registration cannot change confirmed ${field}`,async()=>{
+  const p=await paymentPreparationFixture(), prepared=await p.run();
+  const candidate=structuredClone(prepared.envelope) as any;
+  if(field==="amount") candidate.amount.atomicUnits="2000000";
+  if(field==="recipient") candidate.recipient.wallet=fixture.envelope.source.signer;
+  if(field==="purpose") candidate.purpose.reference="different-payment";
+  const {authorizationBindingDigestV1}=await import("zephyon-protocol");
+  const changed=createEconomicIntentEnvelopeV1(candidate,candidate.amount.asset);
+  // Deliberately rejected SQL input only. Never construct or persist an execution transaction.
+  await assert.rejects(()=>db.app.query(`INSERT INTO economic_attempts(intent_id,generation,attempt_id,fence_token,envelope_digest,envelope,
+    message_digest,recent_blockhash,requested_exposure_id) VALUES($1,1,$2,$3,$4,$5,$6,$7,$8)`,
+    [changed.attempt.intentId,changed.attempt.attemptId,changed.attempt.fenceToken,authorizationBindingDigestV1(changed,changed.amount.asset),changed,
+      "ee".repeat(32),fixture.recentBlockhash,randomUUID()]),/conflicts with prepared envelope/);
+  assert.equal(await count("economic_attempts"),0);
+  assert.deepEqual(await p.run(),prepared);
+});
+test("payment preparation: a second payment cannot reuse an existing envelope",async()=>{
+  const first=await paymentPreparationFixture(), prepared=await first.run(), second=await paymentPreparationFixture();
+  const snapshot=(await admin.query("SELECT economic_payment_snapshot(p) AS snapshot FROM payments p WHERE id=$1",[second.payment.id])).rows[0].snapshot;
+  await assert.rejects(()=>db.app.query(`INSERT INTO economic_payment_preparations(payment_id,account_session_id,envelope_digest,payment_snapshot)
+    VALUES($1,$2,$3,$4)`,[second.payment.id,sessionId,prepared.envelopeDigest,snapshot]),/binding mismatch/);
+  assert.equal(await count("economic_payment_preparations"),1);
+});
+test("payment preparation: no operational role gains configuration, terminal or canonical state authority",async()=>{
+  const p=await paymentPreparationFixture();await p.run();
+  for(const role of readinessRoles) {
+    await verifyAuthorityLogin(db[role],role,{deployment:expected(role),syntheticFixtures:true});
+    await assert.rejects(()=>db[role].query("UPDATE economic_payment_preparation_profiles SET profile=profile"));
+    await assert.rejects(()=>db[role].query("UPDATE economic_envelopes SET state='FINALIZATION_COMMITTED'"));
+    if(role!=="app") await assert.rejects(()=>db[role].query("INSERT INTO economic_payment_preparations DEFAULT VALUES"));
+  }
+  await assert.rejects(()=>db.app.query("INSERT INTO economic_confirmation_consumptions DEFAULT VALUES"));
+  await assert.rejects(()=>db.app.query("INSERT INTO economic_confirmation_admissions DEFAULT VALUES"));
+  await assert.rejects(()=>db.app.query("INSERT INTO economic_signer_contact_authority DEFAULT VALUES"));
+});
+
+// Cross-repository vertical slice deliberately imports the candidate Site implementation.
+// Set CONTROLLED_SITE_SOURCE to its checkout; no copied SDK validation or mocked callback success.
+async function controlledWebFixture(http=false) {
+  const source=process.env.CONTROLLED_SITE_SOURCE;
+  assert(source,"CONTROLLED_SITE_SOURCE must identify the reviewed Site checkout for the cross-repository non-value regression");
+  const site=await import(`${source}/src/lib/controlledConfirmation/sdkFlow.ts`);
+  const sessions=await import(`${source}/src/lib/controlledConfirmation/session.ts`);
+  const {NextRequest}=await import("next/server.js");
+  const {ControlledWebConfirmation}=await import("../src/economic/web/controlledWebConfirmation");
+  const contract=await import("../src/economic/web/handoffContract");
+  const {generateKeyPairSync}=await import("node:crypto");
+  const siteKeys=generateKeyPairSync("ed25519"),responseKeys=generateKeyPairSync("ed25519");
+  const p=await paymentPreparationFixture(),web=auth0SdkHostFixture(sessions.withWebSessionReference);await web.login();
+  const context={environment:f.configuration.profile.environment,configuration:f.configuration.fingerprint,siteOrigin:"http://localhost:3000",backendOrigin:"http://localhost:3001",clientId:policy.policy.clientId,issuer:policy.policy.issuer};
+  const make=()=>new ControlledWebConfirmation(new ProviderDeploymentReadiness(new DeploymentReadiness(
+    new AuthorityProcess("identity",db.identity,expected("identity")),f.configuration,endpointKeys.publicKey),f.auth),policy,context,siteKeys.publicKey,responseKeys.privateKey,
+    ()=>({artifact:confirmationEndpoint(),nonce:"fixture-nonce"}),{
+      prepare:(id,auth,reference)=>p.make().prepare(id,auth,reference,confirmationEndpoint(),"fixture-nonce"),
+      challenge:(prepared,auth,requestId)=>call("start",{accountSessionId:prepared.accountSessionId,envelopeDigest:prepared.envelopeDigest,requestId},undefined,auth),
+      admit:async proof=>{await sdkAdmit(proof);},
+    },"controlled-non-value");
+  let service=make();
+  if(http) {
+    const {createControlledWebApplication}=await import("../src/economic/web/application");
+    const app=createControlledWebApplication({handle:(action,request)=>service.handle(action,request)});
+    const server=app.listen(0,"localhost");webServers.push(server);
+    await new Promise<void>((resolve,reject)=>{server.once("listening",resolve);server.once("error",reject);});
+    context.backendOrigin=`http://localhost:${(server.address() as import("node:net").AddressInfo).port}`;
+    service=make();
+  }
+  const packet=(action:import("../src/economic/web/handoffContract").WebAction,body:import("../src/economic/web/handoffContract").HandoffBody)=>{
+    const generated=contract.signWebRequest(context,action,body,siteKeys.privateKey),m=JSON.parse(generated.payload);
+    // Backward clock evidence belongs to existing host; keep issue time one second behind DB without changing any guard.
+    return signedFixture({...m,issuedAt:m.issuedAt-1,expiresAt:m.expiresAt-1},siteKeys.privateKey);
+  };
+  const backendFetch=globalThis.fetch;
+  const callWeb=async(action:import("../src/economic/web/handoffContract").WebAction,body:import("../src/economic/web/handoffContract").HandoffBody)=>{
+    const request=packet(action,body);
+    let response: import("../src/economic/web/handoffContract").Handoff;
+    if(http) {
+      const result=await backendFetch(`${context.backendOrigin}/internal/controlled-confirmation/${action}`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(request)});
+      assert.equal(result.status,200);response=await result.json() as typeof response;
+    } else response=await service.handle(action,request);
+    return contract.verifyWebResponse(request,response,responseKeys.publicKey);
+  };
+  const body=async()=>({paymentId:p.payment.id,session:sessions.toWebSession(await web.readSession())});
+  async function startWeb() {
+    const request=new NextRequest("http://localhost:3000/api/payment-intents/test/controlled-confirmation/start",{method:"POST",headers:{cookie:web.cookie(),origin:context.siteOrigin}});
+    const sdk=web.makeSdk();
+    const middleware=sdk.middleware.bind(sdk);sdk.middleware=async req=>{const response=await middleware(req);web.observeAuthorization(response);return response;};
+    const response=await site.startControlledSdk(request,p.payment.id,await web.readSession(),sdk,callWeb);web.save(response);return response;
+  }
+  async function callbackWeb() {
+    const challenge=(await admin.query("SELECT c.reauthentication FROM economic_confirmation_challenges c JOIN economic_web_ceremonies w USING(challenge_id) WHERE w.payment_id=$1",[p.payment.id])).rows[0].reauthentication;
+    await waitForPostgresPast(admin,new Date(challenge.requestedAt*1000).toISOString());
+    const request=new NextRequest(web.request()),previous=await web.readSession();
+    const hook=site.controlledCallback(request,previous,callWeb),sdk=web.makeSdk(hook);
+    const response=await sdk.middleware(request);web.save(response);return {response,request};
+  }
+  return {p,web,body,callWeb,packet,contract,context,siteKeys,responseKeys,make,get service(){return service;},rebuild:()=>{service=make();},startWeb,callbackWeb,sessions,site,NextRequest};
+}
+
+// The separate cross-repository target requires CONTROLLED_SITE_SOURCE; ordinary standalone
+// Backend regression remains runnable without a sibling checkout. Validation for this package sets it.
+if(process.env.CONTROLLED_SITE_SOURCE) {
+test("web handoff: actual Site SDK to canonical session, preparation, callback and guarded consent; reconstruction and duplicates",async t=>{
+  const w=await controlledWebFixture(true),body=await w.body();
+  const starts=await Promise.all([w.callWeb("prepare",body),w.callWeb("prepare",body)]);
+  assert.deepEqual(starts[0],starts[1]);assert.equal(starts[0].state,"READY");
+  assert.equal(await count("economic_web_sessions"),1);assert.equal(await count("economic_web_ceremonies"),1);
+  const mapped=(await admin.query("SELECT account_session_id FROM economic_web_sessions")).rows[0].account_session_id;
+  assert.notEqual(mapped,sessionId,"a distinct web session is durably established");
+  assert.equal((await w.startWeb()).status,303);
+  const cb=await w.callbackWeb();assert.match(cb.response.headers.get("location")!,/controlled=1&intent=/);
+  assert.equal(await count("economic_consent_evidence"),0,"callback alone does not confirm");
+  assert.equal((await w.callWeb("recover",await w.body())).state,"CONFIRMABLE");
+  const sdk=w.web.makeSdk(w.site.controlledCallback(cb.request,await w.web.readSession(),w.callWeb));
+  await assert.rejects(()=>sdk.middleware(cb.request),/callback rejected|invalid|transaction/i);
+  const source=process.env.CONTROLLED_SITE_SOURCE!;
+  const product=await import(`${source}/tests/helpers/controlledWebProductFixture.tsx`);
+  const bff=await import(`${source}/src/lib/controlledConfirmation/routeAction.ts`);
+  const displayed=await product.exerciseControlledProduct(w.p.payment.id,async(input:RequestInfo|URL,init?:RequestInit)=>{
+    const request=new Request(new URL(String(input),w.context.siteOrigin),{...init,headers:{...Object.fromEntries(new Headers(init?.headers)),origin:w.context.siteOrigin}});
+    return bff.controlledRouteAction(request,w.p.payment.id,{enabled:true,trustedOrigin:(r:Request)=>r.headers.get("origin")===w.context.siteOrigin,session:w.web.readSession,call:w.callWeb});
+  });
+  assert.equal(displayed.state,"Payment confirmed");
+  w.rebuild();
+  const confirmed=await Promise.all([w.callWeb("confirm",await w.body()),w.callWeb("confirm",await w.body())]);
+  assert(confirmed.every(r=>r.state==="CONFIRMED"));
+  w.rebuild();assert.equal((await w.callWeb("recover",await w.body())).state,"CONFIRMED");
+  assert.equal((await w.callWeb("confirm",await w.body())).state,"CONFIRMED","lost response retry recovers admission");
+  assert.equal(await count("economic_consent_evidence"),1);assert.equal(await count("economic_confirmation_admissions"),1);
+  assert.equal(await count("economic_attempts"),0);assert.equal(await count("economic_runtime_evidence"),0);
+  for(const role of readinessRoles)await verifyAuthorityLogin(db[role],role,{deployment:expected(role),syntheticFixtures:true});
+  const persisted=JSON.stringify((await admin.query("SELECT row_to_json(w) FROM economic_web_ceremonies w")).rows);
+  assert(!persisted.includes(body.session.accessToken));assert(!persisted.includes(body.session.idToken));
+  t.diagnostic("Actual candidate Site SDK hooks + signed private handoff + restricted PostgreSQL authorities: CONFIRMED, one consent, no execution");
+});
+test("web handoff: signature, context, body substitution and replay rejected across instances",async()=>{
+  const w=await controlledWebFixture(),body=await w.body(),packet=w.packet("prepare",body);
+  const altered=JSON.parse(packet.payload);altered.body.paymentId=randomUUID();
+  await assert.rejects(()=>w.service.handle("prepare",{...packet,payload:JSON.stringify(altered)}));
+  await assert.rejects(()=>w.service.handle("confirm",packet));
+  await w.service.handle("prepare",packet);w.rebuild();
+  await assert.rejects(()=>w.service.handle("prepare",packet),/replay/);
+  const foreign=w.contract.signWebRequest({...w.context,environment:"production"},"recover",body,w.siteKeys.privateKey);
+  await assert.rejects(()=>w.service.handle("recover",foreign));
+  assert.equal(await count("economic_consent_evidence"),0);
+});
+test("web handoff: logout before first preparation and during SDK ceremony cannot regain authority",async()=>{
+  const w=await controlledWebFixture(),body=await w.body();
+  await w.callWeb("revoke",{session:{...body.session,accessToken:"",idToken:""}});w.rebuild();
+  await assert.rejects(()=>w.callWeb("prepare",body),/revoked/);
+  const second=await controlledWebFixture();await second.callWeb("prepare",await second.body());await second.startWeb();
+  await second.callWeb("revoke",{session:{...(await second.body()).session,accessToken:"",idToken:""}});
+  await assert.rejects(()=>second.callbackWeb(),/revoked|invalid/);
+  assert.equal(await count("economic_consent_evidence"),0);
+});
+test("web handoff: another device cannot claim a prepared payment or rebind its opaque reference",async()=>{
+  const w=await controlledWebFixture(),body=await w.body();await w.callWeb("prepare",body);
+  await assert.rejects(()=>w.callWeb("prepare",{...body,session:{...body.session,reference:randomUUID()}}),/another session|conflict/);
+  await assert.rejects(()=>w.callWeb("recover",{...body,session:{...body.session,subject:"subject:bob"}}),/subject/);
+  assert.equal(await count("economic_web_sessions"),2,"distinct device receives distinct canonical session, no rebinding");
+  assert.equal(await count("economic_consent_evidence"),0);
+});
+test("web handoff: fabricated SDK callback without SDK token/state binding is rejected",async()=>{
+  const w=await controlledWebFixture(),body=await w.body(),prepared=await w.callWeb("prepare",body);await w.startWeb();
+  await assert.rejects(()=>w.callWeb("callback",{bindingId:prepared.bindingId,stateDigest:"ff".repeat(32),session:body.session}),/substitution/);
+  await assert.rejects(()=>w.callWeb("confirm",body),/validated callback/);
+  assert.equal(await count("economic_confirmation_sdk_callbacks"),0);assert.equal(await count("economic_consent_evidence"),0);
+});
+test("web handoff: registration time never backdates account mutation; missing renewed SDK cookie cannot confirm",async()=>{
+  const w=await controlledWebFixture(),oldBody=await w.body();
+  // Simulate canonical account hydration after the provider login event, as real Site onboarding does.
+  const a=await identities.findAccount(accountId);assert(a);
+  await identities.createAccountSession({accountId,sessionId:randomUUID(),expectedAccountVersion:a.version,expiresAt:new Date(Date.now()+3600000).toISOString()});
+  await w.callWeb("prepare",oldBody);await w.startWeb();await w.callbackWeb();
+  assert.equal((await w.callWeb("recover",oldBody)).state,"SESSION_CHANGED","committed callback without delivered session cookie grants no confirmation authority");
+  await assert.rejects(()=>w.callWeb("confirm",oldBody),/validated callback/);
+  assert.equal(await count("economic_consent_evidence"),0);
+  const s=(await admin.query("SELECT w.recorded_at,a.updated_at,s.created_at FROM economic_web_sessions w JOIN account_sessions s ON s.session_id=w.account_session_id JOIN accounts a USING(account_id)")).rows[0];
+  assert(s.updated_at>=s.created_at);assert(s.recorded_at>=s.created_at);
+});
+
+}

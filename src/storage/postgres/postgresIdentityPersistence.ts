@@ -307,7 +307,7 @@ function isUniqueViolation(error: unknown): boolean {
 }
 
 /** Canonical lifecycle logic shared by the repository and authenticated readiness service. Caller owns BEGIN/COMMIT. */
-export async function createAccountSessionInTransaction(client: PoolClient, input: Parameters<IdentityPersistence["createAccountSession"]>[0]): ReturnType<IdentityPersistence["createAccountSession"]> {
+export async function createAccountSessionInTransaction(client: PoolClient, input: Parameters<IdentityPersistence["createAccountSession"]>[0], recordedAt?: string): ReturnType<IdentityPersistence["createAccountSession"]> {
   validateUuid(input.sessionId, "Session ID");
   validateTimestamp(input.expiresAt, "Session expiry time");
   if (input.createdAt) validateTimestamp(input.createdAt, "Session creation time");
@@ -323,8 +323,14 @@ export async function createAccountSessionInTransaction(client: PoolClient, inpu
     [input.sessionId, input.accountId, input.createdAt ?? null, input.expiresAt],
   );
   const session = mapAccountSession(result.rows[0]);
-  const account = await incrementAccount(client, current, session.createdAt);
-  await appendSecurityEvent(client, account, "SESSION_CREATED", session.createdAt, {
+  // Optional registration clock is for a trusted imported web authentication event. Session
+  // authority begins at createdAt, while account mutation/audit retain actual DB registration time.
+  if (recordedAt) {
+    validateTimestamp(recordedAt, "Session registration time");
+    if (Date.parse(recordedAt) < Date.parse(session.createdAt)) throw new Error("Session registration predates authentication.");
+  }
+  const account = await incrementAccount(client, current, recordedAt ?? session.createdAt);
+  await appendSecurityEvent(client, account, "SESSION_CREATED", recordedAt ?? session.createdAt, {
     sessionId: session.sessionId,
   });
   return { account, session };

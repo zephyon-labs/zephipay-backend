@@ -7,7 +7,7 @@ import type { SignedArtifact } from "../readiness/signedArtifact";
 import { assertConfirmationPolicy, type VerifiedConfirmationPolicy } from "./confirmationPolicy";
 import { ConfirmationProofAuthority } from "./confirmationProofAuthority";
 
-type SdkSession = { user: { sub: string }; tokenSet: { accessToken: string; idToken?: string } };
+export type SdkSession = { user: { sub: string }; tokenSet: { accessToken: string; idToken?: string } };
 type SdkCallback = (error: unknown, context: { returnTo?: string }, session?: SdkSession | null) => Promise<Response>;
 /** Server-only host of the existing SDK's public middleware/onCallback/getSession APIs.
  * The host is trusted composition, never an HTTP body or a provider-validation replacement.
@@ -72,10 +72,19 @@ export class Auth0SdkConfirmationAdapter {
    * Commit the binding before releasing the SDK authorization redirect and encrypted transaction cookie.
    */
   async start(challengeId: string, readSession: ReadAuth0SdkSession, endpoint: SignedArtifact, endpointNonce: string) {
-    const {authentication,providerSessionReference} = await this.authentication(readSession), bindingId = randomUUID(), returnTo = resultPrefix + bindingId;
+    const bindingId = randomUUID(), returnTo = resultPrefix + bindingId;
     const response = await this.host(async () => { throw new Error("Unexpected callback during SDK initiation."); }).start(returnTo);
     requireCondition([302,303,307].includes(response.status) && response.headers.has("set-cookie"), "SDK transaction cookie/redirect required.");
-    const redirect = new URL(response.headers.get("location") || ""), params = redirect.searchParams, p = this.policy.policy;
+    await this.bindSdkTransaction(challengeId,bindingId,response.headers.get("location") || "",readSession,endpoint,endpointNonce);
+    return {bindingId,response};
+  }
+  /** Private identity-service port. A remote caller must first pass the pinned Site handoff verifier.
+   * Values originate in the real Site SDK authorization response, never browser request parameters. */
+  async bindSdkTransaction(challengeId: string, bindingId: string, authorizationUrl: string,
+    readSession: ReadAuth0SdkSession, endpoint: SignedArtifact, endpointNonce: string) {
+    requireCondition(uuid.test(bindingId), "Invalid SDK binding reference.");
+    const {authentication,providerSessionReference} = await this.authentication(readSession), returnTo=resultPrefix+bindingId;
+    const redirect = new URL(authorizationUrl), params = redirect.searchParams, p = this.policy.policy;
     for (const key of ["client_id","response_type","redirect_uri","audience","scope","state","nonce","code_challenge","code_challenge_method","max_age"])
       requireCondition(params.getAll(key).length === 1, "Ambiguous or missing SDK authorization parameter.");
     requireCondition(redirect.href.split("?")[0] === `${p.issuer}authorize` && !redirect.hash && !redirect.username && !redirect.password &&
@@ -89,7 +98,6 @@ export class Auth0SdkConfirmationAdapter {
       returnTo,issuer:p.issuer,clientId:p.clientId,providerSessionReference};
     await this.readiness.run(endpoint,endpointNonce,authentication,client => client.query(
       "SELECT economic_bind_confirmation_sdk($1,$2,$3,$4)",[challengeId,bindingId,sdk,authentication]));
-    return {bindingId,response};
   }
   async callback(request: Request, endpoint: SignedArtifact, endpointNonce: string): Promise<Response> {
     const url = new URL(request.url);
@@ -100,26 +108,33 @@ export class Auth0SdkConfirmationAdapter {
     return this.host(async (error,context,session) => {
       requireCondition(!error && session?.tokenSet.idToken && context.returnTo?.startsWith(resultPrefix), "SDK callback validation failed.");
       const bindingId = context.returnTo!.slice(resultPrefix.length);
-      const {authentication,providerSessionReference} = await this.authentication(async () => session);
+      const binding = await this.recordSdkCallback(bindingId,sha256(state),async () => session,endpoint,endpointNonce);
+      // Callback success is not consent. Explicit confirmation and the independent issuer admission still follow.
+      return new Response(null,{status:303,headers:{location:new URL(binding.return_to,this.callbackUrl.origin).href}});
+    }).callback(request);
+  }
+  /** Authenticated Site onCallback handoff only. Provider JWT and every durable SDK/context guard
+   * are rechecked here; this method does not admit consent. */
+  async recordSdkCallback(bindingId: string, stateDigest: string, readSession: ReadAuth0SdkSession,
+    endpoint: SignedArtifact, endpointNonce: string) {
+      const {session,authentication,providerSessionReference} = await this.authentication(readSession);
       const binding = await this.bound(bindingId,authentication,endpoint,endpointNonce);
-      requireCondition(context.returnTo === binding.return_to && sha256(state) === binding.state_digest && binding.redirect_uri === this.callbackUrl.href,
+      requireCondition(stateDigest === binding.state_digest && binding.redirect_uri === this.callbackUrl.href,
         "SDK callback transaction substitution.");
       const challenge = binding.context.challenge.reauthentication;
-      const proof = await this.readiness.authentication.verifySdkReauthentication(session.tokenSet.idToken,challenge,binding.sdk_nonce,bindingId);
+      const proof = await this.readiness.authentication.verifySdkReauthentication(session!.tokenSet.idToken!,challenge,binding.sdk_nonce,bindingId);
       await this.readiness.run(endpoint,endpointNonce,authentication,async client => {
         const metadata = await this.readiness.authentication.assertReauthentication(proof,challenge,Date.parse(await databaseTime(client))/1000);
         await client.query("SELECT economic_read_confirmation_sdk($1,$2)",[bindingId,authentication]); // Canonical head -> account -> session lock order.
         await bindEconomicSession(client,{issuer:authentication.issuer,providerSubject:authentication.subject,providerSessionReference,
           accountSessionId:challenge.accountSessionId});
         await client.query("SELECT economic_record_confirmation_sdk_callback($1,$2,$3)",[bindingId,{
-          stateDigest:sha256(state),sdkNonce:binding.sdk_nonce,returnTo:context.returnTo,subject:proof.subject,issuer:authentication.issuer,
+          stateDigest,sdkNonce:binding.sdk_nonce,returnTo:binding.return_to,subject:proof.subject,issuer:authentication.issuer,
           clientId:authentication.clientId,providerRevision:proof.keyRevision,tokenDigest:metadata.tokenDigest,issuedAt:metadata.issuedAt,
           expiresAt:metadata.expiresAt,authTime:proof.authenticationTime,assurance:proof.acr},authentication]);
         await this.readiness.authentication.assertReauthentication(proof,challenge,Date.parse(await databaseTime(client))/1000);
       });
-      // Callback success is not consent. Explicit confirmation and the independent issuer admission still follow.
-      return new Response(null,{status:303,headers:{location:new URL(binding.return_to,this.callbackUrl.origin).href}});
-    }).callback(request);
+    return binding;
   }
   /** Called only by a trusted explicit-confirm action, never automatically by onCallback.
    * Reconstruct from durable binding + SDK-held signed ID token; a copied JS proof is not durable authority.

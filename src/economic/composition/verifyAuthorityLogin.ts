@@ -72,7 +72,7 @@ export async function verifyAuthorityLogin(pool: Pool, role: EconomicAuthorityRo
     for (const c of columns) {
       const qualified=relationKey(c.schema_name,c.relation_name);seen.add(qualified);
       if(options.deployment && tablePolicies.has(qualified)) {
-        const owner=c.schema_name==="public" && ["accounts","external_identities","account_sessions","account_security_events"].includes(c.relation_name)
+        const owner=c.schema_name==="public" && ["accounts","external_identities","account_sessions","account_security_events","payments"].includes(c.relation_name)
           ? options.deployment.identityOwner : "zephipay_economic_admin";
         if(c.schema_name!=="economic_synthetic" && c.owner_name!==owner) problems.push(`deployment table ownership mismatch: ${c.relname}`);
       }

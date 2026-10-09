@@ -63,7 +63,7 @@ export class Auth0ConfirmationBridge {
       await lockConfirmationPolicy(client, this.policy);
       const deployment = (await client.query("SELECT * FROM economic_deployment_identity WHERE singleton FOR SHARE")).rows[0];
       requireCondition(String(deployment?.provider_key_revision) === String(authentication.keyRevision), "Retired provider revision.");
-      const attempt = (await client.query("SELECT state FROM economic_attempts WHERE envelope_digest=$1", [input.envelopeDigest])).rows[0];
+      const attempt = (await client.query("SELECT state FROM economic_envelope_context WHERE envelope_digest=$1", [input.envelopeDigest])).rows[0];
       const now = Date.parse(await databaseTime(client))/1000;
       requireCondition(head.current_generation === envelope.attempt.generation && attempt?.state === "OPEN" &&
         Date.parse(envelope.createdAt)/1000 <= now && Date.parse(envelope.expiresAt)/1000 > now &&

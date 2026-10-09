@@ -8,7 +8,7 @@
     "build": "tsc",
     "lint": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "test:postgres": "tsx --test --test-concurrency=1 tests/postgresPaymentFoundation.integration.ts tests/postgresIdentityFoundation.integration.ts tests/postgresEconomicIdentity.integration.ts tests/postgresPaymentIdentity.integration.ts tests/postgresExecution.integration.ts tests/postgresDevnetExecutionState.integration.ts tests/postgresBrowserDevnetExecution.integration.ts tests/postgresPaymentRequests.integration.ts tests/postgresOpenBetaActivity.integration.ts tests/postgresActivity.integration.ts tests/r4Invariants.integration.ts tests/postgresE2eReliability.integration.ts tests/postgresEconomicFinalization.integration.ts tests/postgresOperationalAuthority.integration.ts tests/postgresAuthorityComposition.integration.ts tests/postgresProviderReadiness.integration.ts tests/postgresAuth0Confirmation.integration.ts tests/postgresConfirmationUpgrade.integration.ts",
+    "test:postgres": "node scripts/run-postgres-tests.cjs",
     "test:postgres:growth": "tsx --test --test-concurrency=1 tests/postgresGrowthEvents.integration.ts tests/postgresGrowthProjection.integration.ts tests/postgresZpState.integration.ts",
     "migrate": "tsx scripts/run-migrations.ts",
     "migrate:validate": "tsx scripts/validate-migrations.ts",
@@ -37,7 +37,8 @@
     "test:postgres:composition": "tsx --test --test-concurrency=1 tests/postgresAuthorityComposition.integration.ts",
     "test:postgres:confirmation-upgrade": "tsx --test tests/postgresConfirmationUpgrade.integration.ts",
     "test:postgres:confirmation": "tsx --test --test-concurrency=1 tests/postgresAuth0Confirmation.integration.ts",
-    "test:postgres:provider": "tsx --test --test-concurrency=1 tests/postgresProviderReadiness.integration.ts"
+    "test:postgres:provider": "tsx --test --test-concurrency=1 tests/postgresProviderReadiness.integration.ts",
+    "test:postgres:web": "node scripts/run-controlled-web-tests.cjs"
   },
   "keywords": [],
   "author": "",
