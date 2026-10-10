@@ -12,6 +12,8 @@ import { ProviderDeploymentReadiness } from "../readiness/providerDeploymentRead
 import { frozen, type SignedArtifact } from "../readiness/signedArtifact";
 import { loadRuntimeTestProfile, runtimeSources } from "./runtimeTestProfile";
 import { runtimeRequest, type RuntimeRequest } from "./runtimeRequest";
+import { exactObject } from "../foundation/strictJson";
+import { controlledRuntimeResult, type ControlledRuntimeAction, type ControlledRuntimeResult } from "./controlledRuntimeResult";
 
 export type NonValueRuntimeResult = Readonly<{
   mode:"non-value"; decision:RuntimePolicyDecisionV1; currentApproval:boolean; executionAuthorized:false;
@@ -28,6 +30,57 @@ const snapshotDigest=(value:unknown)=>sha256(JSON.stringify(value));
 export class RuntimePolicyAdapter {
   constructor(private readonly readiness: ProviderDeploymentReadiness) {
     requireCondition(readiness.deployment.process.role==="issuer","Runtime issuer authority required.");
+  }
+  /** Private controlled product seam. Identity loads challengeId from the immutable web ceremony;
+   * the browser supplies paymentId only. All remaining references and facts are issuer-owned.
+   * Recovery never calls the evaluator when the ledger has no decision.
+   */
+  async controlled(action:ControlledRuntimeAction, reference:{paymentId:string;challengeId:string}, authentication:Auth0Authentication,
+    providerSessionReference:string, endpoint:SignedArtifact, endpointNonce:string):Promise<ControlledRuntimeResult> {
+    exactObject(reference,["paymentId","challengeId"]);
+    const uuid=(v:unknown)=>typeof v==="string" && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(v);
+    requireCondition(["runtime-evaluate","runtime-recover"].includes(action) && uuid(reference.paymentId) && uuid(reference.challengeId) &&
+      Reflect.ownKeys(reference).length===2 && Object.values(Object.getOwnPropertyDescriptors(reference)).every(d=>"value" in d) &&
+      typeof providerSessionReference==="string" && providerSessionReference.length>0 && providerSessionReference.length<=512,"Invalid controlled Runtime reference.");
+    const load=()=>this.readiness.run(endpoint,endpointNonce,authentication,async client=>{
+      const p=(await client.query(`SELECT p.*,s.created_at AS session_created_at FROM economic_payment_preparations p
+        JOIN account_sessions s ON s.session_id=p.account_session_id
+        JOIN external_identities e ON e.account_id=s.account_id
+        JOIN economic_session_bindings b ON b.account_session_id=s.session_id AND b.issuer=e.issuer AND b.provider_subject=e.subject
+        WHERE p.payment_id=$1 AND e.issuer=$2 AND e.subject=$3 AND b.provider_session_reference=$4`,
+      [reference.paymentId,authentication.issuer,authentication.subject,providerSessionReference])).rows[0];
+      requireCondition(p,"Unknown controlled Runtime payment/session owner.");
+      const c=(await client.query(`SELECT c.*,r.consent_id,pol.payload AS policy_payload FROM economic_confirmation_challenges c
+        JOIN economic_confirmation_consumptions r USING(challenge_id)
+        JOIN economic_confirmation_policies pol ON pol.fingerprint=c.policy_fingerprint
+        WHERE c.challenge_id=$1 AND c.envelope_digest=$2 AND c.account_session_id=$3`,
+      [reference.challengeId,p.envelope_digest,p.account_session_id])).rows[0];
+      const configuration=this.readiness.deployment.configuration;
+      const now=await databaseTime(client);
+      requireCondition(c && c.issuer===authentication.issuer && c.provider_subject===authentication.subject &&
+        c.configuration===configuration.fingerprint && c.environment===configuration.profile.environment &&
+        authentication.scopes.includes(JSON.parse(c.policy_payload).requiredScope) &&
+        authentication.issuedAt*1000>=p.session_created_at.getTime() && authentication.issuedAt*1000<=Date.parse(now) && authentication.expiresAt*1000>Date.parse(now),
+        "Exact confirmed payment and current authentication required.");
+      const request=runtimeRequest({paymentId:p.payment_id,accountSessionId:p.account_session_id,envelopeDigest:p.envelope_digest,consentId:c.consent_id});
+      const old=(await client.query("SELECT * FROM economic_policy_decisions WHERE payment_id=$1",[p.payment_id])).rows[0];
+      requireCondition(!old || (old.envelope_digest===request.envelopeDigest && old.account_session_id===request.accountSessionId && old.consent_id===request.consentId),"Controlled Runtime history binding conflict.");
+      return {request,old,now};
+    });
+    const before=await load();
+    if(action==="runtime-recover" && !before.old)return controlledRuntimeResult(reference.paymentId,undefined,false,before.now);
+    // A rejected identity is terminal. Never look for another evaluator or manufacture a replacement.
+    if(before.old?.decision.status==="REJECTED")return controlledRuntimeResult(reference.paymentId,before.old.decision,false,before.now);
+    let result:NonValueRuntimeResult|undefined;
+    try {result=await this.evaluate(before.request,authentication,providerSessionReference,endpoint,endpointNonce);}
+    catch(error) {
+      if(!before.old)throw error;
+      // Existing history may be readable while current registry/configuration qualification fails.
+      // Report verification unavailable, never reinterpret this exception as a new policy decision.
+    }
+    const after=await load(); // Fresh authenticated ownership and database expiry observation, including on failure.
+    requireCondition(after.old && (!result || isDeepStrictEqual(after.old.decision,result.decision)),"Controlled Runtime decision missing or changed.");
+    return controlledRuntimeResult(reference.paymentId,after.old.decision,result?.currentApproval??false,after.now,!result);
   }
   evaluate(request:RuntimeRequest, authentication:Auth0Authentication, providerSessionReference:string,
     endpoint:SignedArtifact, endpointNonce:string):Promise<NonValueRuntimeResult> {

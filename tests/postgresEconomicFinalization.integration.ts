@@ -265,7 +265,8 @@ for(const dimension of ["base","priority","rent","outstanding"] as const) {
   test(`concurrent reservation enforces ${dimension} bound without double spending`,async()=>{
     await budget({[dimension]:dimension==="base"?"10000":dimension==="priority"?"2000":dimension==="rent"?"3000000":1});
     const p=await prepared(),q=await prepared();const results=await Promise.allSettled([repo.claim(p.claim),repo.claim(q.claim)]);
-    assert.equal(results.filter(r=>r.status==="fulfilled").length,1);assert.equal(await count("economic_finalizations"),1);
+    assert.equal(results.filter(r=>r.status==="fulfilled").length,1,JSON.stringify(results.map(r=>r.status==="fulfilled"?{status:r.status}:{status:r.status,message:r.reason instanceof Error?r.reason.message:String(r.reason)})));
+    assert.equal(await count("economic_finalizations"),1);
   });
 }
 

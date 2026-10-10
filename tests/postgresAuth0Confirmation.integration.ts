@@ -782,7 +782,7 @@ test("payment preparation: no operational role gains configuration, terminal or 
 
 // Cross-repository vertical slice deliberately imports the candidate Site implementation.
 // Set CONTROLLED_SITE_SOURCE to its checkout; no copied SDK validation or mocked callback success.
-async function controlledWebFixture(http=false) {
+async function controlledWebFixture(http=false,withRuntime=false) {
   const source=process.env.CONTROLLED_SITE_SOURCE;
   assert(source,"CONTROLLED_SITE_SOURCE must identify the reviewed Site checkout for the cross-repository non-value regression");
   const site=await import(`${source}/src/lib/controlledConfirmation/sdkFlow.ts`);
@@ -792,7 +792,15 @@ async function controlledWebFixture(http=false) {
   const contract=await import("../src/economic/web/handoffContract");
   const {generateKeyPairSync}=await import("node:crypto");
   const siteKeys=generateKeyPairSync("ed25519"),responseKeys=generateKeyPairSync("ed25519");
-  const p=await paymentPreparationFixture(),web=auth0SdkHostFixture(sessions.withWebSessionReference);await web.login();
+  let runtime:import("../src/economic/preparation/paymentEnvelopePreparation").PaymentPreparationProfile["runtime"]|undefined;
+  if(withRuntime) {
+    const {registerRuntimeTestProfile}=await import("../src/economic/runtime/runtimeTestProfile");
+    const now=(await admin.query("SELECT clock_timestamp() AS now")).rows[0].now.getTime(),effectiveFrom=new Date(now-60000).toISOString(),expiresAt=new Date(now+600000).toISOString();
+    const registered=await registerRuntimeTestProfile(admin,f.configuration,{qualifiedAsset:fixture.qualifiedAsset,policyVersion:"controlled-web-runtime-1",effectiveFrom,expiresAt,maxAtomicUnits:"2000000"});
+    runtime={policyVersion:registered.profile.policyVersion,evidenceDigest:registered.profileDigest,scope:"devnet-test-only",validFrom:effectiveFrom,validUntil:expiresAt};
+  }
+  const p=await paymentPreparationFixture(runtime),web=auth0SdkHostFixture(sessions.withWebSessionReference);await web.login();
+  const {RuntimePolicyAdapter}=await import("../src/economic/runtime/runtimePolicyAdapter");
   const context={environment:f.configuration.profile.environment,configuration:f.configuration.fingerprint,siteOrigin:"http://localhost:3000",backendOrigin:"http://localhost:3001",clientId:policy.policy.clientId,issuer:policy.policy.issuer};
   const make=()=>new ControlledWebConfirmation(new ProviderDeploymentReadiness(new DeploymentReadiness(
     new AuthorityProcess("identity",db.identity,expected("identity")),f.configuration,endpointKeys.publicKey),f.auth),policy,context,siteKeys.publicKey,responseKeys.privateKey,
@@ -800,6 +808,9 @@ async function controlledWebFixture(http=false) {
       prepare:(id,auth,reference)=>p.make().prepare(id,auth,reference,confirmationEndpoint(),"fixture-nonce"),
       challenge:(prepared,auth,requestId)=>call("start",{accountSessionId:prepared.accountSessionId,envelopeDigest:prepared.envelopeDigest,requestId},undefined,auth),
       admit:async proof=>{await sdkAdmit(proof);},
+      ...(withRuntime?{runtime:(action:import("../src/economic/runtime/controlledRuntimeResult").ControlledRuntimeAction,ref:{paymentId:string;challengeId:string},auth:Auth0Authentication,reference:string)=>
+        new RuntimePolicyAdapter(new ProviderDeploymentReadiness(new DeploymentReadiness(new AuthorityProcess("issuer",db.issuer,expected("issuer")),f.configuration,endpointKeys.publicKey),f.auth))
+          .controlled(action,ref,auth,reference,confirmationEndpoint(),"fixture-nonce")}:{})
     },"controlled-non-value");
   let service=make();
   if(http) {
@@ -810,7 +821,7 @@ async function controlledWebFixture(http=false) {
     context.backendOrigin=`http://localhost:${(server.address() as import("node:net").AddressInfo).port}`;
     service=make();
   }
-  const packet=(action:import("../src/economic/web/handoffContract").WebAction,body:import("../src/economic/web/handoffContract").HandoffBody)=>{
+  const packet=(action:import("../src/economic/web/handoffContract").ControlledAction,body:import("../src/economic/web/handoffContract").HandoffBody)=>{
     const generated=contract.signWebRequest(context,action,body,siteKeys.privateKey),m=JSON.parse(generated.payload);
     // Backward clock evidence belongs to existing host; keep issue time one second behind DB without changing any guard.
     return signedFixture({...m,issuedAt:m.issuedAt-1,expiresAt:m.expiresAt-1},siteKeys.privateKey);
@@ -826,6 +837,12 @@ async function controlledWebFixture(http=false) {
     return contract.verifyWebResponse(request,response,responseKeys.publicKey);
   };
   const body=async()=>({paymentId:p.payment.id,session:sessions.toWebSession(await web.readSession())});
+  const callRuntime=async(action:import("../src/economic/runtime/controlledRuntimeResult").ControlledRuntimeAction)=>{
+    const request=packet(action,await body());
+    const response=await backendFetch(`${context.backendOrigin}/internal/controlled-confirmation/${action}`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(request)});
+    assert.equal(response.status,200);
+    return contract.verifyRuntimeResponse(request,await response.json() as import("../src/economic/web/handoffContract").Handoff,responseKeys.publicKey);
+  };
   async function startWeb() {
     const request=new NextRequest("http://localhost:3000/api/payment-intents/test/controlled-confirmation/start",{method:"POST",headers:{cookie:web.cookie(),origin:context.siteOrigin}});
     const sdk=web.makeSdk();
@@ -839,12 +856,21 @@ async function controlledWebFixture(http=false) {
     const hook=site.controlledCallback(request,previous,callWeb),sdk=web.makeSdk(hook);
     const response=await sdk.middleware(request);web.save(response);return {response,request};
   }
-  return {p,web,body,callWeb,packet,contract,context,siteKeys,responseKeys,make,get service(){return service;},rebuild:()=>{service=make();},startWeb,callbackWeb,sessions,site,NextRequest};
+  return {p,web,body,callWeb,callRuntime,packet,contract,context,siteKeys,responseKeys,make,get service(){return service;},rebuild:()=>{service=make();},startWeb,callbackWeb,sessions,site,NextRequest};
 }
 
 // The separate cross-repository target requires CONTROLLED_SITE_SOURCE; ordinary standalone
 // Backend regression remains runnable without a sibling checkout. Validation for this package sets it.
 if(process.env.CONTROLLED_SITE_SOURCE) {
+test("controlled Runtime: actual unchanged Site SDK confirmation to private policy evaluation and reconstructed recovery",async()=>{
+  const w=await controlledWebFixture(true,true);await w.callWeb("prepare",await w.body());await w.startWeb();await w.callbackWeb();
+  await assert.rejects(()=>w.callRuntime("runtime-evaluate"),"callback alone cannot evaluate without explicit consent");
+  assert.equal(await count("economic_policy_decisions"),0);
+  assert.equal((await w.callWeb("confirm",await w.body())).state,"CONFIRMED");
+  assert.equal((await w.callRuntime("runtime-recover")).state,"NOT_EVALUATED");
+  const result=await w.callRuntime("runtime-evaluate");assert.equal(result.state,"APPROVED");assert.equal(result.executionAuthorized,false);
+  w.rebuild();assert.deepEqual(await w.callRuntime("runtime-recover"),result);assert.equal(await count("economic_policy_decisions"),1);
+});
 test("web handoff: actual Site SDK to canonical session, preparation, callback and guarded consent; reconstruction and duplicates",async t=>{
   const w=await controlledWebFixture(true),body=await w.body();
   const starts=await Promise.all([w.callWeb("prepare",body),w.callWeb("prepare",body)]);
@@ -928,9 +954,14 @@ test("web handoff: registration time never backdates account mutation; missing r
 
 // Real v0.5.0 integration: actual preparation, installed Auth0 SDK, guarded SQL consent,
 // restricted issuer LOGIN and authoritative database evidence. No legacy Runtime stub.
-async function runtimeFixture(options:{maxAtomicUnits?:string;consentSeconds?:number;substituteDestination?:boolean}={}) {
+async function runtimeFixture(options:{maxAtomicUnits?:string;consentSeconds?:number;substituteDestination?:boolean;webSession?:boolean;registerProfile?:boolean}={}) {
   const {registerRuntimeTestProfile}=await import("../src/economic/runtime/runtimeTestProfile");
   const {RuntimePolicyAdapter}=await import("../src/economic/runtime/runtimePolicyAdapter");
+  if(options.webSession) {
+    sessionId=randomUUID();
+    version=(await identities.createAccountSession({accountId,sessionId,expectedAccountVersion:version,
+      createdAt:new Date(Date.now()-30000).toISOString(),expiresAt:new Date(Math.floor(Date.now()/1000)*1000+3600000).toISOString()})).account.version;
+  }
   if(options.consentSeconds) {
     policy=confirmationPolicyFixture(f.configuration,{revision:2,consentSeconds:options.consentSeconds});
     await registerConfirmationPolicy(admin,policy);rebuild();
@@ -938,7 +969,10 @@ async function runtimeFixture(options:{maxAtomicUnits?:string;consentSeconds?:nu
   const now=(await admin.query("SELECT clock_timestamp() AS now")).rows[0].now.getTime();
   const input={qualifiedAsset:fixture.qualifiedAsset,policyVersion:"runtime-test-1",effectiveFrom:new Date(now-60000).toISOString(),
     expiresAt:new Date(now+600000).toISOString(),maxAtomicUnits:options.maxAtomicUnits??"2000000"};
-  const registered=await registerRuntimeTestProfile(admin,f.configuration,input);
+  const {runtimeTestProfile}=await import("../src/economic/runtime/runtimeTestProfile");
+  const {runtimePolicyProfileDigestV1}=await import("zephyon-protocol");
+  const profile=runtimeTestProfile(f.configuration,input);
+  const registered=options.registerProfile===false?{profile,profileDigest:runtimePolicyProfileDigestV1(profile)}:await registerRuntimeTestProfile(admin,f.configuration,input);
   const reference={policyVersion:input.policyVersion,evidenceDigest:registered.profileDigest,
     scope:"devnet-test-only" as const,validFrom:input.effectiveFrom,validUntil:input.expiresAt};
   let p=await paymentPreparationFixture(reference),prepared=await p.run();
@@ -964,7 +998,12 @@ async function runtimeFixture(options:{maxAtomicUnits?:string;consentSeconds?:nu
   const web=auth0SdkHostFixture(),adapter=sdkAdapter(web);await web.login();
   await adapter.bindExistingSession(sessionId,web.readSession,confirmationEndpoint(),"fixture-nonce");
   authentication=await f.auth.verifyAccess((await web.readSession())!.tokenSet.accessToken,"confirm:economic");
-  const c=await start(prepared.envelopeDigest),started=await adapter.start(c.challenge_id,web.readSession,confirmationEndpoint(),"fixture-nonce");web.save(started.response);
+  const c=await start(prepared.envelopeDigest);
+  const diagnosticBefore=await runtimeClockDiagnostic(prepared.envelopeDigest);
+  let started:Awaited<ReturnType<typeof adapter.start>>;
+  try {started=await adapter.start(c.challenge_id,web.readSession,confirmationEndpoint(),"fixture-nonce");}
+  catch(error) {console.error("Runtime fixture SDK-start clock/context",JSON.stringify({before:diagnosticBefore,after:await runtimeClockDiagnostic(prepared.envelopeDigest)}));throw error;}
+  web.save(started.response);
   const challenge=(await call("roundtrip",{envelopeDigest:prepared.envelopeDigest,challengeId:c.challenge_id,transactionId:c.transaction_id})).reauthentication;
   await waitForPostgresPast(admin,new Date(challenge.requestedAt*1000).toISOString());
   assert.equal((await adapter.callback(web.request(),confirmationEndpoint(),"fixture-nonce")).status,303);
@@ -975,7 +1014,22 @@ async function runtimeFixture(options:{maxAtomicUnits?:string;consentSeconds?:nu
   const make=()=>new RuntimePolicyAdapter(new ProviderDeploymentReadiness(new DeploymentReadiness(
     new AuthorityProcess("issuer",db.issuer,expected("issuer")),f.configuration,endpointKeys.publicKey),f.auth));
   const run=(service=make(),r=request)=>service.evaluate(r,proof.authentication,"TEST:prepared-session",confirmationEndpoint(),"fixture-nonce");
-  return {p,prepared,request,make,run,input,proof,registered};
+  return {p,prepared,request,make,run,input,proof,registered,web,challenge:c,bindingId:started.bindingId};
+}
+
+// RUNTIME-OBS-01 diagnostic only. No credentials/provider artifacts, waiting, retries or changed assertions.
+async function runtimeClockDiagnostic(envelopeDigest:string) {
+  const row=(await admin.query(`SELECT clock_timestamp()::text AS database_time,a.status AS account_status,s.revoked_at AS session_revoked_at,
+    s.created_at AS session_created_at,s.expires_at AS session_expires_at,e.state AS envelope_state,e.envelope->>'createdAt' AS envelope_created_at,
+    e.envelope->>'expiresAt' AS envelope_expires_at,pol.payload::jsonb->>'issuedAt' AS policy_issued_at,
+    d.decision->>'status' AS decision_status,d.decision->>'issuedAt' AS decision_issued_at,d.decision->>'expiresAt' AS decision_expires_at,
+    d.decision->'rejectionCodes' AS rejection_codes
+    FROM economic_payment_preparations p JOIN economic_envelopes e USING(envelope_digest)
+    JOIN account_sessions s ON s.session_id=p.account_session_id JOIN accounts a USING(account_id)
+    LEFT JOIN economic_confirmation_challenges c ON c.envelope_digest=p.envelope_digest
+    LEFT JOIN economic_confirmation_policies pol ON pol.fingerprint=c.policy_fingerprint
+    LEFT JOIN economic_policy_decisions d ON d.payment_id=p.payment_id WHERE p.envelope_digest=$1`,[envelopeDigest])).rows[0];
+  return row;
 }
 
 test("Runtime v1: exact consent to real SDK APPROVED; concurrency, reconstruction and immutable non-value decision",async()=>{
@@ -1064,4 +1118,181 @@ test("Runtime v1: independently derived destination rejects substituted token ac
   const r=await runtimeFixture({substituteDestination:true}),result=await r.run();
   assert.equal(result.decision.status,"REJECTED");assert(result.decision.rejectionCodes.includes("DESTINATION_NOT_QUALIFIED"));
   assert.equal(result.currentApproval,false);assert.equal(await count("economic_attempts"),0);
+});
+
+// Backend-only private product boundary: actual SDK-validated consent and guarded web mappings,
+// actual HTTP/signed handoff, issuer LOGIN and installed Protocol. No caller-supplied authority.
+async function runtimeHandoffFixture(options:Parameters<typeof runtimeFixture>[0]={}) {
+  const r=await runtimeFixture({...options,webSession:true});
+  const {ControlledWebConfirmation}=await import("../src/economic/web/controlledWebConfirmation");
+  const {createControlledWebApplication}=await import("../src/economic/web/application");
+  const contract=await import("../src/economic/web/handoffContract");
+  const {bindEconomicSession}=await import("../src/economic/foundation/sessionAuthority");
+  const {generateKeyPairSync}=await import("node:crypto");
+  const siteKeys=generateKeyPairSync("ed25519"),responseKeys=generateKeyPairSync("ed25519"),reference=randomUUID();
+  const expires=(await admin.query("SELECT expires_at FROM account_sessions WHERE session_id=$1",[sessionId])).rows[0].expires_at;
+  await transaction(db.identity,async client=>{
+    await bindEconomicSession(client,{issuer:authentication.issuer,providerSubject:authentication.subject,providerSessionReference:`zephipay:web:${reference}`,accountSessionId:sessionId});
+    await client.query("INSERT INTO economic_web_sessions(reference,issuer,subject,account_session_id,expires_at) VALUES($1,$2,$3,$4,$5)",
+      [reference,authentication.issuer,authentication.subject,sessionId,expires]);
+    await client.query("INSERT INTO economic_web_ceremonies(payment_id,reference,envelope_digest,challenge_id,transaction_id,binding_id) VALUES($1,$2,$3,$4,$5,$6)",
+      [r.p.payment.id,reference,r.prepared.envelopeDigest,r.challenge.challenge_id,r.challenge.transaction_id,r.bindingId]);
+  });
+  const context={environment:f.configuration.profile.environment,configuration:f.configuration.fingerprint,siteOrigin:"http://localhost:3000",backendOrigin:"http://localhost:3001",clientId:policy.policy.clientId,issuer:policy.policy.issuer};
+  const make=(enabled=true)=>new ControlledWebConfirmation(new ProviderDeploymentReadiness(new DeploymentReadiness(
+    new AuthorityProcess("identity",db.identity,expected("identity")),f.configuration,endpointKeys.publicKey),f.auth),policy,context,siteKeys.publicKey,responseKeys.privateKey,
+    ()=>({artifact:confirmationEndpoint(),nonce:"fixture-nonce"}),{
+      prepare:async()=>{throw new Error("Fixture ceremony already prepared.");},challenge:async()=>{throw new Error("Fixture challenge already issued.");},
+      admit:async()=>{throw new Error("Fixture consent already admitted.");},
+      ...(enabled?{runtime:(action:import("../src/economic/runtime/controlledRuntimeResult").ControlledRuntimeAction,ref:{paymentId:string;challengeId:string},auth:Auth0Authentication,providerReference:string)=>
+        r.make().controlled(action,ref,auth,providerReference,confirmationEndpoint(),"fixture-nonce")}:{})
+    },"controlled-non-value");
+  let service=make();
+  const app=createControlledWebApplication({handle:(action,packet)=>service.handle(action,packet)}),server=app.listen(0,"localhost");webServers.push(server);
+  await new Promise<void>((resolve,reject)=>{server.once("listening",resolve);server.once("error",reject);});
+  context.backendOrigin=`http://localhost:${(server.address() as import("node:net").AddressInfo).port}`;service=make();
+  const raw=r.web.providerTokens();
+  const body={paymentId:r.p.payment.id,session:{reference,expiresAt:expires.getTime()/1000,subject:authentication.subject,accessToken:raw.accessToken,idToken:raw.idToken}};
+  type Action=import("../src/economic/runtime/controlledRuntimeResult").ControlledRuntimeAction;
+  const packet=(action:Action,input:unknown=body)=>{
+    const generated=contract.signWebRequest(context,action,input as typeof body,siteKeys.privateKey),m=JSON.parse(generated.payload);
+    return signedFixture({...m,issuedAt:m.issuedAt-1,expiresAt:m.expiresAt-1},siteKeys.privateKey);
+  };
+  const post=(action:Action,p:unknown)=>fetch(`${context.backendOrigin}/internal/controlled-confirmation/${action}`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(p)});
+  const invoke=async(action:Action,input:unknown=body)=>{
+    const request=packet(action,input),response=await post(action,request);assert.equal(response.status,200);
+    return contract.verifyRuntimeResponse(request,await response.json() as import("../src/economic/web/handoffContract").Handoff,responseKeys.publicKey);
+  };
+  return {r,body,packet,post,invoke,context,siteKeys,responseKeys,contract,make,get service(){return service;},rebuild:(enabled=true)=>{service=make(enabled);}};
+}
+
+test("controlled Runtime: read-only empty recovery, concurrent evaluate, lost response and reconstructed private HTTP recovery",async t=>{
+  const w=await runtimeHandoffFixture();
+  const empty=await w.invoke("runtime-recover");assert.equal(empty.state,"NOT_EVALUATED");assert.equal(empty.historicalStatus,"NONE");
+  assert.equal(await count("economic_policy_decisions"),0,"status must never trigger first evaluation");
+  const results=await Promise.all([w.invoke("runtime-evaluate"),w.invoke("runtime-evaluate"),w.invoke("runtime-evaluate")]);
+  const first=results[0];for(const r of results)assert.deepEqual(r,first);
+  assert.equal(first.state,"APPROVED");assert.equal(first.historicalStatus,"APPROVED");assert.equal(first.currentApproval,true);
+  assert.equal(first.mode,"non-value");assert.equal(first.productionReady,false);assert.equal(first.executionAuthorized,false);
+  assert.equal(first.decisionId,w.r.prepared.envelope.runtime.decisionId);
+  // The historical decision is immutable; current approval is time-sensitive. Establish
+  // the original decision's issued-at boundary using PostgreSQL before asserting that
+  // immediate reconstructed reads are all currently approved. Keep every equality/expiry
+  // assertion: a backward DB correction must still make the product fail closed.
+  const issuedAt=(await admin.query("SELECT decision->>'issuedAt' AS issued_at FROM economic_policy_decisions WHERE payment_id=$1",[w.r.p.payment.id])).rows[0].issued_at;
+  t.diagnostic(JSON.stringify(await waitForPostgresPast(admin,issuedAt)));
+  const lost=await w.post("runtime-evaluate",w.packet("runtime-evaluate"));assert.equal(lost.status,200);await lost.body?.cancel();
+  w.rebuild();for(let i=0;i<3;i++)assert.deepEqual(await w.invoke("runtime-recover",structuredClone(w.body)),first);
+  assert.equal(await count("economic_policy_decisions"),1);assert.equal(await count("economic_attempts"),0);
+  assert.equal((await admin.query("SELECT status FROM payments WHERE id=$1",[w.r.p.payment.id])).rows[0].status,"AWAITING_CONFIRMATION");
+  assert.deepEqual(Object.keys(first).sort(),["paymentId","mode","productionReady","executionAuthorized","state","historicalStatus","currentApproval","decisionId","expiresAt"].sort());
+  for(const role of ["identity","app","signer","observer","reader"] as const)
+    await assert.rejects(()=>db[role].query("SELECT * FROM economic_policy_decisions"),/permission denied/);
+});
+
+test("controlled Runtime: exact signed references, access authentication, session ownership and durable replay boundary",async()=>{
+  const w=await runtimeHandoffFixture();
+  for(const field of ["envelopeDigest","asset","amount","recipient","destination","policy","evidence","status","limits","evaluatedAt","challengeId","accountSessionId"])
+    assert.equal((await w.post("runtime-evaluate",w.packet("runtime-evaluate",{...w.body,[field]:"caller-value"}))).status,409,field);
+  for(const input of [{...w.body,paymentId:randomUUID()}, {...w.body,session:{...w.body.session,reference:randomUUID()}},
+    {...w.body,session:{...w.body.session,subject:"subject:bob"}}, {...w.body,session:{...w.body.session,accessToken:"forged"}},
+    {...w.body,session:{...w.body.session,expiresAt:w.body.session.expiresAt+1}}])
+    assert.equal((await w.post("runtime-recover",w.packet("runtime-recover",input))).status,409);
+  const bob=await accessFixture({sub:"subject:bob",scope:"confirm:economic"});
+  assert.equal((await w.post("runtime-recover",w.packet("runtime-recover",{...w.body,session:{...w.body.session,subject:"subject:bob",accessToken:bob}}))).status,409,
+    "independently valid access token for another owner cannot inspect this payment");
+  assert.equal((await w.post("runtime-evaluate",w.body)).status,409,"browser-shaped body has no pinned Site signature");
+  const packet=w.packet("runtime-recover"),m=JSON.parse(packet.payload);
+  assert.equal((await w.post("runtime-evaluate",packet)).status,409,"action substitution");
+  for(const change of [{context:{...m.context,environment:"production"}},{context:{...m.context,clientId:"other"}},
+    {context:{...m.context,issuer:"https://other.invalid/"}},{context:{...m.context,backendOrigin:"https://other.invalid"}},
+    {expiresAt:m.issuedAt-1}])assert.equal((await w.post("runtime-recover",signedFixture({...m,...change},w.siteKeys.privateKey))).status,409);
+  assert.equal((await w.post("runtime-recover",{...packet,signature:"A".repeat(86)})).status,409);
+  const original=await w.post("runtime-recover",packet);assert.equal(original.status,200);
+  const response=await original.json() as import("../src/economic/web/handoffContract").Handoff;
+  assert.throws(()=>w.contract.verifyRuntimeResponse(w.packet("runtime-recover"),response,w.responseKeys.publicKey));
+  w.rebuild();assert.equal((await w.post("runtime-recover",packet)).status,409,"replay survives reconstruction");
+  assert.equal(await count("economic_policy_decisions"),0);
+  w.rebuild(false);assert.equal((await w.post("runtime-evaluate",w.packet("runtime-evaluate"))).status,409,"Runtime port must be explicitly composed");
+});
+
+test("controlled Runtime: first decision commits despite lost response and a fresh caller recovers only that decision",async()=>{
+  const w=await runtimeHandoffFixture(),request=w.packet("runtime-evaluate");
+  const response=await w.post("runtime-evaluate",request);assert.equal(response.status,200);await response.body?.cancel();
+  const stored=(await admin.query("SELECT decision FROM economic_policy_decisions")).rows[0].decision;
+  assert.equal(stored.status,"APPROVED");
+  w.rebuild();const recovered=await w.invoke("runtime-recover",structuredClone(w.body));
+  assert.equal(recovered.decisionId,stored.decisionId);assert.equal(recovered.state,"APPROVED");
+  assert.deepEqual(await w.invoke("runtime-evaluate"),recovered);assert.equal(await count("economic_policy_decisions"),1);
+});
+
+test("controlled Runtime: unconfirmed or different ceremony cannot select consent",async()=>{
+  const w=await runtimeHandoffFixture(),p=await paymentPreparationFixture(),prepared=await p.run(),c=await start(prepared.envelopeDigest);
+  await db.identity.query("INSERT INTO economic_web_ceremonies(payment_id,reference,envelope_digest,challenge_id,transaction_id,binding_id) VALUES($1,$2,$3,$4,$5,$6)",
+    [p.payment.id,w.body.session.reference,prepared.envelopeDigest,c.challenge_id,c.transaction_id,randomUUID()]);
+  assert.equal((await w.post("runtime-evaluate",w.packet("runtime-evaluate",{...w.body,paymentId:p.payment.id}))).status,409);
+  await assert.rejects(()=>w.r.make().controlled("runtime-evaluate",{paymentId:w.r.p.payment.id,challengeId:c.challenge_id},w.r.proof.authentication,
+    `zephipay:web:${w.body.session.reference}`,confirmationEndpoint(),"fixture-nonce"),/Exact confirmed/);
+  assert.equal(await count("economic_policy_decisions"),0);
+});
+
+test("controlled Runtime: explicit TEST inventory registration is required before evaluation",async()=>{
+  const w=await runtimeHandoffFixture({registerProfile:false});
+  assert.equal((await w.post("runtime-evaluate",w.packet("runtime-evaluate"))).status,409);
+  assert.equal(await count("economic_runtime_test_profiles"),0);assert.equal(await count("economic_policy_decisions"),0);
+  await assert.rejects(()=>w.r.run(),/Unregistered Runtime TEST profile/);
+});
+
+test("controlled Runtime: cap rejection is terminal across evaluation/recovery, policy replacement and registry loss",async()=>{
+  const w=await runtimeHandoffFixture({maxAtomicUnits:"999999"}),first=await w.invoke("runtime-evaluate");
+  assert.equal(first.state,"REJECTED");assert.equal(first.historicalStatus,"REJECTED");assert.equal(first.currentApproval,false);
+  const {registerRuntimeTestProfile}=await import("../src/economic/runtime/runtimeTestProfile");
+  await registerRuntimeTestProfile(admin,f.configuration,{...w.r.input,policyVersion:"runtime-replacement",maxAtomicUnits:"9000000"});
+  await registry.revoke("asset","devnet-usdc-v1");
+  assert.deepEqual(await w.invoke("runtime-evaluate"),first);w.rebuild();assert.deepEqual(await w.invoke("runtime-recover"),first);
+  assert.equal(await count("economic_policy_decisions"),1);assert.equal(await count("economic_attempts"),0);
+});
+
+for(const change of ["session","account","consent","policy","logout"] as const)
+test(`controlled Runtime: ${change} change preserves historical approval and denies current approval`,async()=>{
+  const w=await runtimeHandoffFixture(),first=await w.invoke("runtime-evaluate");assert.equal(first.currentApproval,true);
+  const historical=(await admin.query("SELECT decision FROM economic_policy_decisions")).rows[0].decision;
+  if(change==="session")await revoke();
+  else if(change==="account")await identities.createAccountSession({accountId,sessionId:randomUUID(),expectedAccountVersion:version,
+    expiresAt:new Date(Date.now()+60000).toISOString()});
+  else if(change==="consent")await db.issuer.query("UPDATE economic_consent_evidence SET revoked_at=clock_timestamp() WHERE consent_id=$1",[w.r.request.consentId]);
+  else if(change==="logout")await w.service.handle("revoke",w.contract.signWebRequest(w.context,"revoke",{session:{...w.body.session,accessToken:"",idToken:""}},w.siteKeys.privateKey));
+  else {
+    const {registerRuntimeTestProfile}=await import("../src/economic/runtime/runtimeTestProfile");
+    await registerRuntimeTestProfile(admin,f.configuration,{...w.r.input,policyVersion:"runtime-replacement"});
+  }
+  w.rebuild();const recovered=await w.invoke("runtime-recover");
+  assert.equal(recovered.state,"NO_LONGER_CURRENT");assert.equal(recovered.historicalStatus,"APPROVED");assert.equal(recovered.currentApproval,false);
+  assert.equal(recovered.decisionId,first.decisionId);assert.equal(recovered.executionAuthorized,false);
+  assert.deepEqual((await admin.query("SELECT decision FROM economic_policy_decisions")).rows[0].decision,historical);
+  assert.deepEqual(await w.invoke("runtime-evaluate"),recovered);assert.equal(await count("economic_policy_decisions"),1);
+});
+
+for(let repeat=1;repeat<=2;repeat++)test(`controlled Runtime: PostgreSQL-observed consent expiry remains historical only ${repeat}`,async t=>{
+  const w=await runtimeHandoffFixture({consentSeconds:8}),first=await w.invoke("runtime-evaluate");
+  assert.equal(first.currentApproval,true,JSON.stringify({result:first,clock:await runtimeClockDiagnostic(w.r.prepared.envelopeDigest)}));
+  t.diagnostic(JSON.stringify(await waitForPostgresPast(admin,first.expiresAt!)));
+  w.rebuild();const recovered=await w.invoke("runtime-recover");
+  assert.equal(recovered.state,"EXPIRED");assert.equal(recovered.historicalStatus,"APPROVED");assert.equal(recovered.currentApproval,false);
+  assert.equal(recovered.decisionId,first.decisionId);assert.equal(recovered.expiresAt,first.expiresAt);assert.equal(await count("economic_policy_decisions"),1);
+});
+
+test("controlled Runtime: qualification loss reports unavailable verification without fabricating rejection or changing history",async()=>{
+  const w=await runtimeHandoffFixture(),first=await w.invoke("runtime-evaluate");
+  await registry.revoke("asset","devnet-usdc-v1");
+  const recovered=await w.invoke("runtime-recover");
+  assert.equal(recovered.state,"UNAVAILABLE");assert.equal(recovered.historicalStatus,"APPROVED");assert.equal(recovered.currentApproval,false);
+  assert.equal(recovered.executionAuthorized,false);assert.equal(recovered.decisionId,first.decisionId);
+  assert.equal((await admin.query("SELECT decision->>'status' AS status FROM economic_policy_decisions")).rows[0].status,"APPROVED");
+});
+
+test("controlled Runtime: prepared destination substitution remains a real Protocol rejection",async()=>{
+  const w=await runtimeHandoffFixture({substituteDestination:true}),result=await w.invoke("runtime-evaluate");
+  assert.equal(result.state,"REJECTED");assert.equal(result.currentApproval,false);
+  assert((await admin.query("SELECT decision FROM economic_policy_decisions")).rows[0].decision.rejectionCodes.includes("DESTINATION_NOT_QUALIFIED"));
 });
