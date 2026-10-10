@@ -469,7 +469,7 @@ test("heavily escaped malformed signer reply still retains a bounded incident",a
 });
 
 
-for(const kind of ["session","runtime"] as const)test(`expired ${kind} rejects consent-to-claim composition without reserving exposure`,async()=>{
+for(const kind of ["session","runtime"] as const)test(`expired ${kind} rejects consent-to-claim composition without reserving exposure`,async t=>{
   await budget();let deadline:number;let p:Awaited<ReturnType<typeof prepared>>;
   if(kind==="runtime") {
     deadline=Date.now()+4000;p=await prepared(envelope(e=>{e.runtime.validUntil=new Date(deadline).toISOString();e.expiresAt=e.runtime.validUntil;}));
@@ -481,7 +481,7 @@ for(const kind of ["session","runtime"] as const)test(`expired ${kind} rejects c
     const bearer=await new SignJWT({scope:"confirm:economic",sid:"short-session"}).setProtectedHeader({alg:"RS256",typ:"JWT"}).setIssuer(issuer).setAudience(audience).setSubject("subject:alice").setIssuedAt(now-1).setExpirationTime(now+3600).sign(keys.privateKey);
     const response=await confirm(p.digest,bearer);assert.equal(response.status,201);p.claim.consentId=(await response.json() as any).consentId;
   }
-  await new Promise(resolve=>setTimeout(resolve,Math.max(0,deadline-Date.now()+20)));
+  t.diagnostic(JSON.stringify(await waitForPostgresPast(pool,new Date(deadline).toISOString())));
   await assert.rejects(()=>composition.claim(p.claim),/stale|expired|unauthenticated/i);assert.equal(await count("economic_finalizations"),0);assert.equal(await count("economic_signer_contact_authority"),0);
 });
 

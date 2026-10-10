@@ -9,7 +9,8 @@ import type { Auth0Authentication } from "../readiness/auth0Authentication";
 import type { ProviderDeploymentReadiness } from "../readiness/providerDeploymentReadiness";
 import type { SignedArtifact } from "../readiness/signedArtifact";
 import type { PreparedPayment } from "../preparation/paymentEnvelopePreparation";
-import { signWebResponse, verifyWebRequest, webUuid, type Handoff, type HandoffContext, type WebAction, type WebSession, type WebState } from "./handoffContract";
+import { signWebResponse, signRuntimeResponse, verifyWebRequest, webUuid, type Handoff, type HandoffContext, type ControlledAction, type WebSession, type WebState } from "./handoffContract";
+import type { RuntimePolicyAdapter } from "../runtime/runtimePolicyAdapter";
 
 type Proof = Awaited<ReturnType<Auth0SdkConfirmationAdapter["prepareConfirmation"]>>;
 /** App/issuer remain separate restricted authorities. These ports wrap their accepted services,
@@ -18,6 +19,9 @@ export type ControlledWebPorts = {
   prepare(paymentId: string, authentication: Auth0Authentication, reference: string): Promise<PreparedPayment>;
   challenge(prepared: PreparedPayment, authentication: Auth0Authentication, requestId: string): Promise<{challenge_id: string; transaction_id: string}>;
   admit(proof: Proof): Promise<void>;
+  /** Explicit optional issuer port. No caller policy/evidence, legacy evaluator or execution port. */
+  runtime?: (action:Parameters<RuntimePolicyAdapter["controlled"]>[0], reference:Parameters<RuntimePolicyAdapter["controlled"]>[1],
+    authentication:Auth0Authentication, providerSessionReference:string)=>ReturnType<RuntimePolicyAdapter["controlled"]>;
 };
 export class ControlledWebConfirmation {
   readonly productionReady = false;
@@ -39,7 +43,7 @@ export class ControlledWebConfirmation {
     }
     this.sdk=new Auth0SdkConfirmationAdapter(identity,policy,()=>{throw new Error("SDK is Site-hosted.");},`${context.siteOrigin}/auth/callback`);
   }
-  async handle(action: WebAction, packet: Handoff): Promise<Handoff> {
+  async handle(action: ControlledAction, packet: Handoff): Promise<Handoff> {
     const ep=this.endpoint();
     // Authenticate before reading any provider credential. Atomic replay claim commits separately;
     // failed or ambiguous calls need a fresh transport request, not re-use of its signature.
@@ -69,6 +73,26 @@ export class ControlledWebConfirmation {
     }
     const auth=await this.identity.authentication.verifyAccess(b.session.accessToken,this.policy.policy.requiredScope);
     requireCondition(auth.subject===b.session.subject,"Site/provider subject mismatch.");
+    if(action==="runtime-evaluate" || action==="runtime-recover") {
+      requireCondition(this.ports.runtime,"Controlled Runtime composition unavailable.");
+      // Read immutable ownership even after a session is revoked/expired. This is permission to
+      // read history, never current payment authority; the issuer requalifies every approval.
+      const ceremony=await this.identity.run(ep.artifact,ep.nonce,auth,async client=>{
+        const row=(await client.query(`SELECT c.challenge_id,s.expires_at,a.created_at FROM economic_web_ceremonies c
+          JOIN economic_web_sessions s USING(reference)
+          JOIN account_sessions a ON a.session_id=s.account_session_id
+          JOIN external_identities e ON e.account_id=a.account_id AND e.issuer=s.issuer AND e.subject=s.subject
+          WHERE c.payment_id=$1 AND s.reference=$2 AND s.issuer=$3 AND s.subject=$4`,
+        [b.paymentId,b.session.reference,auth.issuer,auth.subject])).rows[0];
+        const now=Date.parse(await databaseTime(client));
+        requireCondition(row && row.expires_at.getTime()/1000===b.session.expiresAt && auth.issuedAt*1000>=row.created_at.getTime() &&
+          auth.issuedAt*1000<=now && auth.expiresAt*1000>now,"Unknown Runtime ceremony/session owner.");
+        return row;
+      });
+      const result=await this.ports.runtime(action,{paymentId:b.paymentId!,challengeId:ceremony.challenge_id},auth,`zephipay:web:${b.session.reference}`);
+      requireCondition(result.paymentId===b.paymentId,"Runtime response payment mismatch.");
+      return signRuntimeResponse(packet,result,this.responseKey);
+    }
     const read: ReadAuth0SdkSession=async()=>({user:{sub:b.session.subject},tokenSet:{accessToken:b.session.accessToken,idToken:b.session.idToken}});
     const sessionId=await this.session(b.session,auth,action==="prepare");
     if(action==="callback") {
