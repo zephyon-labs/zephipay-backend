@@ -658,7 +658,7 @@ test("real SDK: exact canonical body survives neither session, envelope, challen
 });
 
 // Metadata-only preparation reuses actual payment persistence and the accepted SDK/guarded issuer.
-async function paymentPreparationFixture() {
+async function paymentPreparationFixture(runtime?: import("../src/economic/preparation/paymentEnvelopePreparation").PaymentPreparationProfile["runtime"]) {
   const { PostgresPaymentPersistence } = await import("../src/storage/postgres/postgresPaymentPersistence");
   const { devnetPreparationPolicy } = await import("../src/devnet/devnetPreparationPolicy");
   const { PaymentEnvelopePreparation } = await import("../src/economic/preparation/paymentEnvelopePreparation");
@@ -674,7 +674,7 @@ async function paymentPreparationFixture() {
     devnetPolicy:devnetPreparationPolicy({mint:fixture.qualifiedAsset.mint,decimals:6,sourceTokenAccount:devnet.source.account,
       signerKeyId:devnet.source.bindingId,signerKeyVersion:devnet.fee.keyVersion,signerPublicKey:devnet.source.signer,
       submissionProviderId:"TEST:submission",reconciliationProviderId:"TEST:reconciliation"}),fee:devnet.fee,
-    runtime:{policyVersion:"policy-v1",evidenceDigest:devnet.runtime.evidenceDigest,scope:"devnet-test-only",
+    runtime:runtime??{policyVersion:"policy-v1",evidenceDigest:devnet.runtime.evidenceDigest,scope:"devnet-test-only",
       validFrom:new Date(now-60000).toISOString(),validUntil:new Date(now+600000).toISOString()}}]);
   await transaction(db.identity,client=>bindEconomicSession(client,{issuer:authentication.issuer,providerSubject:authentication.subject,
     providerSessionReference:"TEST:prepared-session",accountSessionId:sessionId}));
@@ -925,3 +925,143 @@ test("web handoff: registration time never backdates account mutation; missing r
 });
 
 }
+
+// Real v0.5.0 integration: actual preparation, installed Auth0 SDK, guarded SQL consent,
+// restricted issuer LOGIN and authoritative database evidence. No legacy Runtime stub.
+async function runtimeFixture(options:{maxAtomicUnits?:string;consentSeconds?:number;substituteDestination?:boolean}={}) {
+  const {registerRuntimeTestProfile}=await import("../src/economic/runtime/runtimeTestProfile");
+  const {RuntimePolicyAdapter}=await import("../src/economic/runtime/runtimePolicyAdapter");
+  if(options.consentSeconds) {
+    policy=confirmationPolicyFixture(f.configuration,{revision:2,consentSeconds:options.consentSeconds});
+    await registerConfirmationPolicy(admin,policy);rebuild();
+  }
+  const now=(await admin.query("SELECT clock_timestamp() AS now")).rows[0].now.getTime();
+  const input={qualifiedAsset:fixture.qualifiedAsset,policyVersion:"runtime-test-1",effectiveFrom:new Date(now-60000).toISOString(),
+    expiresAt:new Date(now+600000).toISOString(),maxAtomicUnits:options.maxAtomicUnits??"2000000"};
+  const registered=await registerRuntimeTestProfile(admin,f.configuration,input);
+  const reference={policyVersion:input.policyVersion,evidenceDigest:registered.profileDigest,
+    scope:"devnet-test-only" as const,validFrom:input.effectiveFrom,validUntil:input.expiresAt};
+  let p=await paymentPreparationFixture(reference),prepared=await p.run();
+  if(options.substituteDestination) {
+    // Deliberately adversarial app-side envelope: guarded preparation binds the wallet, while
+    // the independent Runtime destination source must detect a substituted token account.
+    p=await paymentPreparationFixture(reference);
+    const e=structuredClone(prepared.envelope) as any;
+    e.attempt.intentId=`zephipay:payment:${p.payment.id}`;e.attempt.attemptId=randomUUID();e.attempt.fenceToken=randomUUID();
+    e.purpose.reference=p.payment.id;e.runtime.decisionId=randomUUID();e.recipient.account=e.source.account;
+    const {authorizationBindingDigestV1}=await import("zephyon-protocol");
+    const envelope=createEconomicIntentEnvelopeV1(e,e.amount.asset),digest=authorizationBindingDigestV1(envelope,e.amount.asset);
+    await transaction(db.app,async client=>{
+      await client.query("INSERT INTO economic_attempt_heads(intent_id,principal_id,current_generation) VALUES($1,$2,1)",[e.attempt.intentId,principalId]);
+      await client.query("INSERT INTO economic_envelopes(intent_id,generation,attempt_id,fence_token,envelope_digest,envelope) VALUES($1,1,$2,$3,$4,$5)",
+        [e.attempt.intentId,e.attempt.attemptId,e.attempt.fenceToken,digest,envelope]);
+      const snapshot=(await client.query("SELECT economic_payment_snapshot(p) AS s FROM payments p WHERE id=$1",[p.payment.id])).rows[0].s;
+      await client.query("INSERT INTO economic_payment_preparations(payment_id,account_session_id,envelope_digest,payment_snapshot) VALUES($1,$2,$3,$4)",
+        [p.payment.id,sessionId,digest,snapshot]);
+    });
+    prepared=await p.run();
+  }
+  const web=auth0SdkHostFixture(),adapter=sdkAdapter(web);await web.login();
+  await adapter.bindExistingSession(sessionId,web.readSession,confirmationEndpoint(),"fixture-nonce");
+  authentication=await f.auth.verifyAccess((await web.readSession())!.tokenSet.accessToken,"confirm:economic");
+  const c=await start(prepared.envelopeDigest),started=await adapter.start(c.challenge_id,web.readSession,confirmationEndpoint(),"fixture-nonce");web.save(started.response);
+  const challenge=(await call("roundtrip",{envelopeDigest:prepared.envelopeDigest,challengeId:c.challenge_id,transactionId:c.transaction_id})).reauthentication;
+  await waitForPostgresPast(admin,new Date(challenge.requestedAt*1000).toISOString());
+  assert.equal((await adapter.callback(web.request(),confirmationEndpoint(),"fixture-nonce")).status,303);
+  assert.equal(await count("economic_consent_evidence"),0,"callback alone supplies no consent");
+  const proof=await adapter.prepareConfirmation(started.bindingId,web.readSession,confirmationEndpoint(),"fixture-nonce");
+  const admitted=JSON.parse((await sdkAdmit(proof)).body);assert.equal(admitted.state,"CONFIRMED");
+  const request={paymentId:p.payment.id,accountSessionId:sessionId,envelopeDigest:prepared.envelopeDigest,consentId:admitted.consent_id};
+  const make=()=>new RuntimePolicyAdapter(new ProviderDeploymentReadiness(new DeploymentReadiness(
+    new AuthorityProcess("issuer",db.issuer,expected("issuer")),f.configuration,endpointKeys.publicKey),f.auth));
+  const run=(service=make(),r=request)=>service.evaluate(r,proof.authentication,"TEST:prepared-session",confirmationEndpoint(),"fixture-nonce");
+  return {p,prepared,request,make,run,input,proof,registered};
+}
+
+test("Runtime v1: exact consent to real SDK APPROVED; concurrency, reconstruction and immutable non-value decision",async()=>{
+  const r=await runtimeFixture(),results=await Promise.all([r.run(),r.run(),r.run()]);
+  assert.deepEqual(results[1],results[0]);assert.deepEqual(results[2],results[0]);
+  const result=results[0];assert.equal(result.decision.status,"APPROVED");assert.equal(result.currentApproval,true);assert.equal(result.executionAuthorized,false);
+  assert.equal(result.decision.envelopeDigest,r.prepared.envelopeDigest);assert.equal(result.decision.decisionId,r.prepared.envelope.runtime.decisionId);
+  assert.equal(result.decision.profileDigest,r.registered.profileDigest);assert.equal(result.decision.evidenceReferences.length,3);
+  assert.deepEqual(await r.run(r.make()),result);assert.equal(await count("economic_policy_decisions"),1);
+  const row=(await admin.query("SELECT * FROM economic_policy_decisions")).rows[0];
+  assert.equal(row.evaluation_context.evaluatedAt,result.decision.issuedAt);
+  assert.equal(row.evidence.find((v:any)=>v.evidenceClass==="economic-consent").fact.consent.consentId,r.request.consentId);
+  await assert.rejects(()=>admin.query("UPDATE economic_policy_decisions SET decision=decision||'{\"status\":\"REJECTED\"}'"),/append.only|immutable/i);
+  for(const role of ["identity","app","signer","observer","reader"] as const) {
+    await assert.rejects(()=>db[role].query("INSERT INTO economic_policy_decisions SELECT * FROM economic_policy_decisions"),/permission denied/);
+    await assert.rejects(()=>db[role].query("UPDATE economic_runtime_policy_heads SET profile_digest=profile_digest"),/permission denied/);
+  }
+  await assert.rejects(()=>db.issuer.query("UPDATE economic_runtime_policy_heads SET profile_digest=profile_digest"),/permission denied/);
+  assert.equal(await count("economic_attempts"),0);assert.equal((await admin.query("SELECT status FROM payments WHERE id=$1",[r.p.payment.id])).rows[0].status,"AWAITING_CONFIRMATION");
+});
+
+test("Runtime v1: real policy cap REJECTED stays identical across retry and cannot acquire execution authority",async()=>{
+  const r=await runtimeFixture({maxAtomicUnits:"999999"}),first=await r.run();
+  assert.equal(first.decision.status,"REJECTED");assert.deepEqual(first.decision.rejectionCodes,["AMOUNT_NOT_PERMITTED"]);
+  assert.equal(first.currentApproval,false);assert.equal(first.executionAuthorized,false);assert.deepEqual(await r.run(),first);
+  assert.equal(await count("economic_attempts"),0);
+});
+
+test("Runtime v1: missing consent, envelope, session and caller-shaped evidence fail closed",async()=>{
+  const r=await runtimeFixture();
+  for(const change of [{consentId:randomUUID()},{accountSessionId:randomUUID()},{paymentId:randomUUID()},{envelopeDigest:"ff".repeat(32)},
+    {evidence:[{status:"satisfied"}]},{decision:{status:"APPROVED"}},{evaluatedAt:"2026-01-01T00:00:00.000Z"}])
+    await assert.rejects(async()=>r.run(r.make(),{...r.request,...change}));
+  await assert.rejects(()=>r.make().evaluate(r.request,r.proof.authentication,"unbound-session",confirmationEndpoint(),"fixture-nonce"),/binding/);
+  assert.equal(await count("economic_policy_decisions"),0);
+});
+
+for(const source of ["consent","session"] as const) test(`Runtime v1: revoked ${source} before evaluation is SDK REJECTED`,async()=>{
+  const r=await runtimeFixture();
+  if(source==="consent") await db.issuer.query("UPDATE economic_consent_evidence SET revoked_at=clock_timestamp() WHERE consent_id=$1",[r.request.consentId]);
+  else await revoke();
+  const result=await r.run();assert.equal(result.decision.status,"REJECTED");assert(result.decision.rejectionCodes.includes("EVIDENCE_REVOKED"));
+  assert.equal(result.currentApproval,false);assert.equal(await count("economic_attempts"),0);
+});
+
+for(const source of ["consent","session","policy"] as const) test(`Runtime v1: ${source} change invalidates current approval without rewriting history`,async()=>{
+  const r=await runtimeFixture(),first=await r.run();assert.equal(first.currentApproval,true);
+  if(source==="consent") await db.issuer.query("UPDATE economic_consent_evidence SET revoked_at=clock_timestamp() WHERE consent_id=$1",[r.request.consentId]);
+  else if(source==="session") await revoke();
+  else {
+    const {registerRuntimeTestProfile}=await import("../src/economic/runtime/runtimeTestProfile");
+    await registerRuntimeTestProfile(admin,f.configuration,{...r.input,policyVersion:"runtime-test-2"});
+  }
+  const recovered=await r.run();assert.deepEqual(recovered.decision,first.decision);assert.equal(recovered.currentApproval,false);assert.equal(recovered.executionAuthorized,false);
+  assert.equal(await count("economic_policy_decisions"),1);
+});
+
+for(let repetition=1;repetition<=2;repetition++) test(`Runtime v1: database-observed expiry never widens to Runtime reference ${repetition}`,async t=>{
+  const r=await runtimeFixture({consentSeconds:5}),first=await r.run();assert.equal(first.currentApproval,true);
+  assert(first.decision.expiresAt<r.prepared.envelope.runtime.validUntil);
+  t.diagnostic(JSON.stringify(await waitForPostgresPast(admin,first.decision.expiresAt)));
+  const recovered=await r.run();assert.deepEqual(recovered.decision,first.decision);assert.equal(recovered.currentApproval,false);
+  assert.equal(await count("economic_policy_decisions"),1);
+});
+
+test("Runtime v1: expiry while waiting for authoritative lock is rejected by real SDK",async t=>{
+  const r=await runtimeFixture({consentSeconds:5}),lock=await admin.connect();
+  try {
+    await lock.query("BEGIN");await lock.query("SELECT * FROM economic_attempt_heads WHERE intent_id=$1 FOR UPDATE",[r.prepared.envelope.attempt.intentId]);
+    const pending=r.run();
+    const deadline=(await admin.query("SELECT expires_at FROM economic_consent_evidence WHERE consent_id=$1",[r.request.consentId])).rows[0].expires_at.toISOString();
+    t.diagnostic(JSON.stringify(await waitForPostgresPast(admin,deadline)));
+    await lock.query("COMMIT");const result=await pending;
+    assert.equal(result.decision.status,"REJECTED");assert(result.decision.rejectionCodes.includes("EVIDENCE_EXPIRED"));assert.equal(result.currentApproval,false);
+  } finally {await lock.query("ROLLBACK");lock.release();}
+});
+
+test("Runtime v1: registry revocation fails closed and cannot reinterpret prior decision",async()=>{
+  const r=await runtimeFixture(),first=await r.run();
+  await registry.revoke("asset","devnet-usdc-v1");await assert.rejects(()=>r.run(),/revoked|qualified|asset/i);
+  assert.deepEqual((await admin.query("SELECT decision FROM economic_policy_decisions")).rows[0].decision,first.decision);
+});
+
+
+test("Runtime v1: independently derived destination rejects substituted token account even with exact consent",async()=>{
+  const r=await runtimeFixture({substituteDestination:true}),result=await r.run();
+  assert.equal(result.decision.status,"REJECTED");assert(result.decision.rejectionCodes.includes("DESTINATION_NOT_QUALIFIED"));
+  assert.equal(result.currentApproval,false);assert.equal(await count("economic_attempts"),0);
+});

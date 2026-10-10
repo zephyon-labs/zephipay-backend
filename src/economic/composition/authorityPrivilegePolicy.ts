@@ -53,6 +53,10 @@ export const authorityPrivilegePolicy = {
   },
   issuer: {
     tables: {
+      economic_runtime_test_profiles: {SELECT:["*"]},
+      economic_runtime_policy_heads: {SELECT:["*"], UPDATE:["deployment_id"]},
+      economic_policy_decisions: {SELECT:["*"], INSERT:["decision_id","envelope_digest","payment_id","account_session_id","consent_id","profile_digest","decision","evidence","evaluation_context"]},
+      economic_payment_preparations: {SELECT:["*"]},
       economic_envelopes: {SELECT:["*"]},
       economic_envelope_context: {SELECT:["*"]},
       economic_confirmation_policies: {SELECT:["*"]},
