@@ -238,6 +238,7 @@ test("offline core has no production importers, test evidence issuers or infrast
         dependencies.every(
           (dep) =>
             dep === "node:crypto" ||
+            (dep === "node:util" && path.basename(file) === "records.ts") ||
             (dep.startsWith("./") &&
               path.resolve(path.dirname(file), dep).startsWith(root + path.sep)),
         ),

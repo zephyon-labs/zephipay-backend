@@ -6,23 +6,27 @@ production session authority, or readiness to mount an endpoint.
 
 Baseline: `a7f7270cc074359cbbdb32a06d665b2933b8a22c`.
 Local branch: `feat/native-session-core-offline-v1`.
+P2 correction parent: `d2b49fecb528960cd301a5e4992b561030f85806`.
 
 ## Scope and isolation
 
-| File                                    | Responsibility                                                                                      |
-| --------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `src/nativeSession/contracts.ts`        | Distinct identifiers, credential classes, persistence/authentication ports and result types         |
-| `src/nativeSession/values.ts`           | Descriptor snapshots, bounded values and domain-separated proof commitments                         |
-| `src/nativeSession/policy.ts`           | Server-owned client classification and isolated route admission                                     |
-| `src/nativeSession/core.ts`             | Completion, validation/recovery and capability-based cancellation/revocation                        |
-| `tests/helpers/nativeSessionHarness.ts` | Opaque synthetic authentication, existing-account fixtures and fault-injectable memory transactions |
-| `tests/nativeSessionCore.test.ts`       | State, transaction, identity, timing and canonical-effect regressions                               |
-| `tests/nativeSessionPolicy.test.ts`     | Admission attacks, descriptor tests and source-isolation checks                                     |
-| This document                           | Review evidence, assumptions and integration gates                                                  |
+| File                                     | Responsibility                                                                                      |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `src/nativeSession/contracts.ts`         | Distinct identifiers, credential classes, persistence/authentication ports and result types         |
+| `src/nativeSession/values.ts`            | Descriptor snapshots, bounded values and domain-separated proof commitments                         |
+| `src/nativeSession/policy.ts`            | Server-owned client classification and isolated route admission                                     |
+| `src/nativeSession/core.ts`              | Completion, validation/recovery and capability-based cancellation/revocation                        |
+| `src/nativeSession/records.ts`           | Validated, immutable persistence snapshots and state relationships                                  |
+| `tests/helpers/nativeSessionHarness.ts`  | Opaque synthetic authentication, existing-account fixtures and fault-injectable memory transactions |
+| `tests/nativeSessionCore.test.ts`        | State, transaction, identity, timing and canonical-effect regressions                               |
+| `tests/nativeSessionPolicy.test.ts`      | Admission attacks, descriptor tests and source-isolation checks                                     |
+| `tests/nativeSessionCorrections.test.ts` | Four original P2 reproductions, denial watermarks and hostile persistence regressions               |
+| This document                            | Review evidence, assumptions and integration gates                                                  |
 
-All files are additions. Existing server entry points, routes, authentication
+All package files are additions relative to canonical main. Existing server entry points, routes, authentication
 middleware, identity persistence, migrations, dependencies and configuration are
-unchanged. The core imports only its own modules and `node:crypto`. No existing
+unchanged. The core imports only its own modules, `node:crypto` and `node:util`
+(the latter restricted to persistence Proxy detection). No existing
 source module imports it. Synthetic evidence issuers and persistence adapters exist
 only under `tests/`; they are outside the production TypeScript compilation root.
 The compiled core is an unused module, with no composition or registered route.
@@ -121,6 +125,16 @@ the clock later moves backwards. Access evaluation during a detected rollback
 returns unavailable; acknowledgement of an already-terminal revocation can avoid
 a fresh clock sample.
 
+After authentication provenance, binding/proof, context and owner checks, a valid
+clock sample is written before any access decision returns. This includes token
+expiry, missing scope/bootstrap, unknown account, suspension, future issue time
+and pending-validation denials. The watermark and any ensuing terminal/canonical
+changes share one transaction. Save, commit or acknowledgement failure returns
+`AUTHORITY_UNAVAILABLE`, not an acknowledged denial or successful authorization.
+Wrong evidence, proof, context, owner or credential class cannot reach this clock
+write. Only the persistence clock supplies its value; token dates and request fields
+cannot select a watermark. The guarantee is per binding, not a global token clock.
+
 This is a decision-time check, not a guarantee that a token remains valid until
 the response reaches the client. It does not retract previously returned account
 data or cancel requests authorized earlier. Account-access results are snapshots,
@@ -140,6 +154,26 @@ logical recovery only. Real PostgreSQL wall-clock corrections cannot be eliminat
 by this model: a rollback above an old watermark may go undetected, and an expired
 deadline not yet latched may appear unexpired under wall-clock correction. Database
 clock monitoring and the accepted failure policy need independent integration tests.
+An expired credential already denied in a committed observation on this binding
+cannot regain access through a subsequent rollback below that observation.
+
+Persistence records are snapshotted immediately on receipt, including nested
+binding context/owner and created or locked canonical sessions. Proxies are rejected
+before reflection; own data descriptors are captured without executing getters.
+Validation and output projection use only frozen copies. Unknown fields/states,
+malformed values, inconsistent actor/ID pairs and invalid cross-field relationships
+yield unavailable authority. Exact resolved-account/locked-account equality is
+checked before completion, and existing-session access requires ACTIVE/COMPLETED
+binding state with matching canonical ownership and an ACTIVE account. Canonical
+revocation is represented by a valid timestamp or null, with expiry checked at the
+observed time; no caller-provided session-state label is accepted.
+
+Snapshot validation cannot prove a coherent but dishonest persistence adapter's
+claims. The adapter still owns exclusive serialization and atomic commit. Tests
+distinguish mutation of previously returned JavaScript objects from an actual store
+transition: immutable copies prevent projection substitution; queued revocation
+serializes after an in-flight operation and prevents subsequent authority. There is
+no new mobile-style lifecycle generation system or replacement database authority.
 
 Canonical compatibility evidence:
 
@@ -166,30 +200,33 @@ execution or an economic-session binding.
 
 ## Validation evidence
 
-Local checks on 2026-11-05, Node `v22.20.0` and TypeScript `5.9.3`:
+Corrective checks on 2026-11-06, Node `v22.20.0` and TypeScript `5.9.3`:
 
-| Check                                                                                            | Result                                                                    |
-| ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
-| `node_modules/.bin/tsx --test tests/nativeSessionCore.test.ts tests/nativeSessionPolicy.test.ts` | 78 passed; zero failures, cancellations, skips or TODOs                   |
-| `npm test`                                                                                       | 690 passed across 40 suites; zero failures, cancellations, skips or TODOs |
-| `npm run lint`                                                                                   | Passed (`tsc --noEmit`, repository's lint command)                        |
-| `npm run build`                                                                                  | Passed; generated output is ignored under `dist/`                         |
-| Dedicated strict TypeScript check for the two new test files                                     | Passed; ES2022 target permits test-only `Array.at`                        |
-| Prettier 3.9.10, explicit new-file inventory, print width 100                                    | Passed                                                                    |
-| Source-isolation and scanner negative controls                                                   | Passed within focused and full suites                                     |
-| `git diff --cached --check`                                                                      | Passed before commit                                                      |
+| Check                                                                     | Result                                                                    |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Focused command below                                                     | 146 passed; zero failures, cancellations, skips or TODOs                  |
+| `npm test`                                                                | 758 passed across 40 suites; zero failures, cancellations, skips or TODOs |
+| `npm run lint`                                                            | Passed (`tsc --noEmit`, repository's lint command)                        |
+| `npm run build`                                                           | Passed; generated output is ignored under `dist/`                         |
+| Dedicated strict TypeScript check for all three native-session test files | Passed; ES2022 target permits test-only `Array.at`                        |
+| Prettier 3.9.10, explicit corrective-file inventory, print width 100      | Passed                                                                    |
+| Source-isolation and scanner negative controls                            | Passed within focused and full suites                                     |
+| `git diff --cached --check`                                               | Passed before commit                                                      |
 
-Dedicated test typecheck:
+Focused tests and dedicated test typecheck:
 
 ```sh
+node_modules/.bin/tsx --test tests/nativeSessionCore.test.ts \
+  tests/nativeSessionPolicy.test.ts tests/nativeSessionCorrections.test.ts
 node_modules/.bin/tsc --noEmit --strict --target ES2022 --module CommonJS \
   --esModuleInterop --skipLibCheck \
-  tests/nativeSessionCore.test.ts tests/nativeSessionPolicy.test.ts
+  tests/nativeSessionCore.test.ts tests/nativeSessionPolicy.test.ts \
+  tests/nativeSessionCorrections.test.ts
 ```
 
 Backend has no formatter script/dependency. Formatting uses the already-installed
 Prettier CLI at `../zephipay-mobile/node_modules/prettier/bin/prettier.cjs`, targeting
-only the eight new Backend files. No package installation or Mobile modification
+only the seven files in this corrective patch. No package installation or Mobile modification
 is involved. Backend source retains its existing ES2020 target.
 
 Adversarial evidence includes 12-way duplicate completion/revocation, both ordered
@@ -198,6 +235,51 @@ rollback/lost-response recovery, immutable expiry under refresh, wrong/bootstrap
 proofs, wrong identity/client/class/audience/scope, accessor/Proxy snapshots,
 clock rollback/equality/invalidity, lock failures and order violations. The complete
 local regression command excludes the separately named PostgreSQL and chain suites.
+
+## P2 corrective evidence
+
+The four security assertions were run against the unchanged prior candidate before
+any core or harness edit: **four failures**, each demonstrating the reported access
+violation. The same four assertions pass after correction. The new correction test
+file contains 68 tests in total; the prior 78 native-session tests remain unchanged
+except for the narrow `node:util` isolation allowlist entry.
+
+| Original violation                           | Observed before correction                                                                                                 | Corrected result                                                                   |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| P2-01 expired credential then 1 ms rollback  | At `1800000300000`, denial did not retain the observation; at `1800000299999`, the same credential received account access | Committed watermark remains `1800000300000`; rollback yields unavailable authority |
+| P2-02 A: resolve Alice A, lock returns Bob B | Alice's identity received account `...0102` instead of resolved `...0101`                                                  | Exact account equality fails; no authority or writes                               |
+| P2-02 B: changing account properties         | Result combined account B's ID with account A's `zp:account:` actor                                                        | Persistence Proxy rejected before reflection; no authority or writes               |
+| P2-02 C: `UNSUPPORTED` binding state         | Plausible canonical linkage still received account access                                                                  | Recognized-state/cross-field validation rejects it before writes                   |
+
+Original reproduction command, run at the prior candidate with only the new four-test
+file present:
+
+```sh
+node_modules/.bin/tsx --test tests/nativeSessionCorrections.test.ts
+```
+
+Local TAP evidence is preserved at `/tmp/zephipay-native-session-p2-before.tap`,
+`/tmp/zephipay-native-session-p2-focused.tap` and
+`/tmp/zephipay-native-session-p2-regression.tap`. These temporary logs are not
+versioned; the permanent regression cases and this evidence record are.
+
+Additional coverage includes six committed denial paths; failed watermark writes,
+rollback and ambiguous commit; joint rollback of watermark/terminal state; invalid
+clocks; untrusted requests that cannot reach the clock; malformed accounts, bindings
+and sessions; accessors and reflection traps; record mutation by later callbacks;
+malformed creation rolling back canonical effects; and queued revocation. Normal
+completion, validation, cancellation, expiry, recovery and duplicate revocation
+remain covered by the original suite and new positive controls.
+
+The raw adversarial port deliberately performs no cloning or state sanitization;
+it isolates the core's record-boundary checks and is not a durability model.
+Separately, the memory harness now independently rejects unknown states, invalid
+state combinations, premature terminal states, ownership mismatches and invalid
+pending transitions. It does not reuse the core's record validators as its oracle.
+
+This correction changes no public HTTP contract, live admission rule, canonical
+account-version/security-event behavior, or economic capability. It awaits Matt/Nova
+review and Sol's focused independent re-audit; it is not integration approval.
 
 ## Required gates before integration
 

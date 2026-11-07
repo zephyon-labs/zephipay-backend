@@ -9,16 +9,8 @@ import type {
   TerminalState,
 } from "./contracts";
 import { NativeCredentialPolicy, type Principal } from "./policy";
-import {
-  accountId,
-  attemptId,
-  bindingReference,
-  data,
-  digest,
-  matchesProof,
-  sessionId,
-  time,
-} from "./values";
+import { accountSnapshot, bindingSnapshot, sessionSnapshot } from "./records";
+import { accountId, attemptId, bindingReference, data, digest, matchesProof, time } from "./values";
 
 const rejected = (code: Extract<Result, { kind: "rejected" }>["code"]): Result =>
   Object.freeze({ kind: "rejected", code });
@@ -59,10 +51,11 @@ export class NativeSessionCore {
     try {
       const principal = await this.policy.inspect(request.evidence);
       if (!principal) return rejected("AUTHENTICATION_REJECTED");
-      const reference = await this.persistence.bindingForAttempt(id);
-      if (!reference) return rejected("SESSION_NOT_BOUND");
+      const found = await this.persistence.bindingForAttempt(id);
+      if (found === null) return rejected("SESSION_NOT_BOUND");
+      const reference = bindingReference(found);
       return await this.persistence.transaction(reference, async (tx) => {
-        const b = await tx.binding();
+        const b = await this.readBinding(tx);
         if (!b || b.loginAttemptId !== id || b.nativeBindingReference !== reference)
           return rejected("SESSION_NOT_BOUND");
         return this.access(tx, b, principal, secret, true);
@@ -87,7 +80,7 @@ export class NativeSessionCore {
       const principal = await this.policy.inspect(request.evidence);
       if (!principal) return rejected("AUTHENTICATION_REJECTED");
       return await this.persistence.transaction(reference, async (tx) => {
-        const b = await tx.binding();
+        const b = await this.readBinding(tx);
         if (!b || b.nativeBindingReference !== reference) return rejected("SESSION_NOT_BOUND");
         return this.access(tx, b, principal, secret, false);
       });
@@ -108,7 +101,7 @@ export class NativeSessionCore {
     }
     try {
       return await this.persistence.transaction(reference, async (tx) => {
-        const b = await tx.binding();
+        const b = await this.readBinding(tx);
         // Unknown reference and wrong capability intentionally have the same result.
         if (!b || b.nativeBindingReference !== reference || !matchesProof("revocation", b, secret))
           return rejected("INVALID_PROOF");
@@ -143,7 +136,8 @@ export class NativeSessionCore {
       p.environment !== b.context.environment ||
       a.issuer !== b.context.issuer ||
       a.azp !== b.context.clientId ||
-      p.audience !== b.context.audience
+      p.audience !== b.context.audience ||
+      p.credentialClass !== "native-user"
     )
       return rejected("ACCESS_DENIED");
     if (b.owner && (b.owner.issuer !== a.issuer || b.owner.subject !== a.subject))
@@ -153,9 +147,16 @@ export class NativeSessionCore {
     // Resolve only an existing mapping, never invoke provisioning. Lock account before session.
     if (completing && b.state === "PENDING") {
       const existing = await tx.resolveExisting(a.issuer, a.subject);
-      if (existing) account = await tx.lockAccount(existing);
+      if (existing !== null) {
+        const resolvedId = accountId(existing);
+        account = accountSnapshot(await tx.lockAccount(resolvedId));
+        if (account.accountId !== resolvedId) throw new Error("Resolved account mismatch");
+      }
     }
     const now = await this.observe(tx, b, canonical, account);
+    // Retain trusted observations even when a later decision denies access. This
+    // write and any terminal/canonical changes share the same commit boundary.
+    await tx.saveBinding(Object.freeze({ ...b, lastObservedAt: now }));
     const denial = this.policy.authorize(
       principal,
       completing ? "native-bootstrap" : "native-account",
@@ -174,7 +175,6 @@ export class NativeSessionCore {
     )
       return rejected("BOOTSTRAP_REQUIRED");
     if (!account) return rejected(completing ? "ACCOUNT_NOT_PROVISIONED" : "SESSION_NOT_BOUND");
-    this.assertAccount(account);
     if (account.status !== "ACTIVE") return rejected("ACCESS_DENIED");
     if (!canonical) {
       if (
@@ -186,8 +186,7 @@ export class NativeSessionCore {
       )
         throw new Error("Invalid pending binding");
       const expiresAt = time(now + this.#sessionLifetimeMs);
-      const session = await tx.createSession(account, now, expiresAt);
-      sessionId(session.canonicalAccountSessionId);
+      const session = sessionSnapshot(await tx.createSession(account, now, expiresAt));
       if (
         session.accountId !== account.accountId ||
         session.createdAt !== now ||
@@ -210,7 +209,8 @@ export class NativeSessionCore {
       await tx.saveBinding(active);
       canonical = { account, session };
     } else {
-      await tx.saveBinding(Object.freeze({ ...b, lastObservedAt: now }));
+      if (b.state !== "ACTIVE" || b.attemptState !== "COMPLETED")
+        throw new Error("Account access requires an active binding");
     }
     return Object.freeze({
       kind: "account-access",
@@ -224,13 +224,9 @@ export class NativeSessionCore {
     });
   }
 
-  private assertAccount(account: Account): void {
-    if (
-      account.actorSubject !== `zp:account:${accountId(account.accountId)}` ||
-      typeof account.version !== "bigint" ||
-      account.version < 0n
-    )
-      throw new Error("Invalid canonical account");
+  private async readBinding(tx: SessionTransaction): Promise<Binding | null> {
+    const value = await tx.binding();
+    return value === null ? null : bindingSnapshot(value);
   }
   private async lockCanonical(
     tx: SessionTransaction,
@@ -253,16 +249,19 @@ export class NativeSessionCore {
       b.state === "CANCELLED"
     )
       throw new Error("Invalid canonical mapping");
-    const account = await tx.lockAccount(b.owner.accountId);
-    this.assertAccount(account);
-    const session = await tx.lockSession(b.canonicalAccountSessionId);
-    sessionId(session.canonicalAccountSessionId);
+    const account = accountSnapshot(await tx.lockAccount(b.owner.accountId));
+    if (account.accountId !== b.owner.accountId) throw new Error("Locked account mismatch");
+    const session = sessionSnapshot(await tx.lockSession(b.canonicalAccountSessionId));
     if (
-      account.accountId !== b.owner.accountId ||
       session.accountId !== account.accountId ||
       session.canonicalAccountSessionId !== b.canonicalAccountSessionId ||
-      time(session.expiresAt) <= time(session.createdAt) ||
-      (session.revokedAt !== null && time(session.revokedAt) < session.createdAt)
+      session.createdAt < b.createdAt ||
+      session.createdAt >= b.attemptExpiresAt ||
+      session.createdAt > b.lastObservedAt ||
+      account.updatedAt < session.createdAt ||
+      (b.state === "EXPIRED" && b.lastObservedAt < session.expiresAt) ||
+      (b.state === "REVOKED" &&
+        (session.revokedAt === null || session.revokedAt > b.lastObservedAt))
     )
       throw new Error("Session ownership mismatch");
     return { account, session };

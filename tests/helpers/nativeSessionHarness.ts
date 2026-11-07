@@ -88,6 +88,58 @@ type Fault =
   | "after-revoke"
   | "after-save";
 
+/** Independent store constraints; deliberately not delegated to the core's record parsers. */
+function requireBindingState(b: Binding, store: Store): void {
+  if (
+    !Number.isSafeInteger(b.lastObservedAt) ||
+    b.lastObservedAt < b.createdAt ||
+    b.attemptExpiresAt <= b.createdAt
+  )
+    throw new Error("Invalid stored clock");
+  if (
+    !["PENDING", "ACTIVE", "CANCELLED", "EXPIRED", "REVOKED"].includes(b.state) ||
+    !["PENDING", "COMPLETED", "CANCELLED", "EXPIRED"].includes(b.attemptState)
+  )
+    throw new Error("Unknown stored state");
+  if (b.attemptState !== "COMPLETED") {
+    if (
+      b.state !== b.attemptState ||
+      b.owner !== undefined ||
+      b.canonicalAccountSessionId !== undefined
+    )
+      throw new Error("Invalid uncompleted stored binding");
+    if (b.state === "EXPIRED" && b.lastObservedAt < b.attemptExpiresAt)
+      throw new Error("Unobserved stored expiry");
+    return;
+  }
+  if (
+    !["ACTIVE", "REVOKED", "EXPIRED"].includes(b.state) ||
+    !b.owner ||
+    !b.canonicalAccountSessionId
+  )
+    throw new Error("Invalid completed stored binding");
+  const account = store.accounts.get(b.owner.accountId),
+    session = store.sessions.get(b.canonicalAccountSessionId);
+  if (
+    !account ||
+    !session ||
+    session.accountId !== account.accountId ||
+    b.owner.issuer !== b.context.issuer ||
+    store.identities.get(JSON.stringify([b.owner.issuer, b.owner.subject])) !== account.accountId
+  )
+    throw new Error("Invalid stored ownership");
+  if (
+    session.createdAt < b.createdAt ||
+    session.createdAt >= b.attemptExpiresAt ||
+    session.createdAt > b.lastObservedAt
+  )
+    throw new Error("Invalid stored session chronology");
+  if (b.state === "REVOKED" && (session.revokedAt === null || session.revokedAt > b.lastObservedAt))
+    throw new Error("Uncommitted stored revocation");
+  if (b.state === "EXPIRED" && b.lastObservedAt < session.expiresAt)
+    throw new Error("Unobserved stored expiry");
+}
+
 export class MemorySessionHarness implements SessionPersistence {
   #store: Store = {
     bindings: new Map(),
@@ -149,6 +201,7 @@ export class MemorySessionHarness implements SessionPersistence {
       )
     )
       throw new Error("Duplicate seed");
+    requireBindingState(b, this.#store);
     this.#store.bindings.set(b.nativeBindingReference, structuredClone(b));
     return structuredClone(b);
   }
@@ -244,6 +297,11 @@ export class MemorySessionHarness implements SessionPersistence {
         if (["CANCELLED", "EXPIRED", "REVOKED"].includes(old.state) && b.state !== old.state)
           throw new Error("Terminal binding revived");
         if (
+          old.state === "PENDING" &&
+          !["PENDING", "ACTIVE", "CANCELLED", "EXPIRED"].includes(b.state)
+        )
+          throw new Error("Invalid pending transition");
+        if (
           old.state === "ACTIVE" &&
           b.state !== "ACTIVE" &&
           b.state !== "EXPIRED" &&
@@ -258,6 +316,7 @@ export class MemorySessionHarness implements SessionPersistence {
             old.canonicalAccountSessionId !== b.canonicalAccountSessionId)
         )
           throw new Error("Owner rebound");
+        requireBindingState(b, working);
         working.bindings.set(reference, structuredClone(b));
         trace.push(`save:${b.state}`);
         fail("after-save");

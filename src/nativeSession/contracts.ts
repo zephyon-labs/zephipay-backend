@@ -68,7 +68,12 @@ export type CanonicalSession = Readonly<{
   revokedAt: number | null;
 }>;
 
-/** Caller already holds the binding's exclusive serialization lock. No lock upgrades. */
+/**
+ * Caller already holds the binding's exclusive serialization lock. No lock upgrades.
+ * Returned records are validated/snapshotted by the core; TypeScript types alone
+ * do not establish identity or authority. Adapters must keep serialized state
+ * stable throughout the callback and commit all its writes atomically.
+ */
 export interface SessionTransaction {
   binding(): Promise<Binding | null>;
   resolveExisting(issuer: string, subject: string): Promise<string | null>;
