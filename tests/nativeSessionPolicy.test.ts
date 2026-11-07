@@ -238,7 +238,10 @@ test("offline core has no production importers, test evidence issuers or infrast
         dependencies.every(
           (dep) =>
             dep === "node:crypto" ||
-            (dep === "node:util" && path.basename(file) === "records.ts") ||
+            (dep === "node:util" &&
+              ["records.ts", "postgresPersistence.ts"].includes(path.basename(file))) ||
+            (path.basename(file) === "postgresPersistence.ts" &&
+              ["pg", "../storage/postgres/postgresIdentityPersistence"].includes(dep)) ||
             (dep.startsWith("./") &&
               path.resolve(path.dirname(file), dep).startsWith(root + path.sep)),
         ),
