@@ -15,12 +15,20 @@ The new adapter is not accepted for integration or production use.
 
 ## Environment and database safety
 
-Read-only tooling inspection found PostgreSQL 16 client utilities under
+Initial 2026-11-06 WSL-only tooling inspection found PostgreSQL 16 client utilities under
 `/usr/lib/postgresql/16/bin`, including `psql`, but no `postgres`, `initdb` or
 `pg_ctl` server binaries. No local PostgreSQL listener was identified. The Windows
 Docker wrapper reported Docker unavailable in this WSL distribution and requested
 Docker Desktop WSL integration. No package installation, Docker integration change,
 service start or persistent system configuration change was attempted.
+
+Subsequent Windows inventory confirmed that Docker Desktop and its Windows CLI
+are installed, but the engine and Docker WSL distribution are stopped. Existing
+Docker storage has a separately authorized, hash-verified cold backup. That
+historical infrastructure supported Backend database testing; no Mobile Docker use
+is established. Neither the inventory nor backup authorizes startup or designates
+any historical database disposable. This correction performs source validation only;
+WSL configuration, Docker state and all existing databases remain untouched.
 
 **No database has been designated or used.** The unique name in unit fixtures is a
 synthetic parser example, not an existing database. Existing environment variables
@@ -148,23 +156,89 @@ The fixture owner has administrative capabilities; this is not a production ACL
 design. Administrative TRUNCATE/drop/trigger bypass is outside the runtime threat
 boundary. Retention and any production schema promotion require separate review.
 
+## P2/P3 source corrections — 2026-11-07
+
+Corrective parent: `4b39902527eee09486b13cc7c6f57d37805fd7d0`.
+
+**P2: bootstrap creation target.** The fixture connection and ordinary adapter keep
+`pg_catalog,public,pg_temp`. That is unsuitable for migration 002's unqualified
+creation statements: `pg_catalog` becomes the creation target. Preparation now
+leases one client, requires an acknowledged BEGIN, and checks the disposable
+identity and empty namespace on that same client before schema changes. It records
+a transaction identifier, applies `SET LOCAL search_path=public,pg_temp`, and
+requires the same transaction identifier, `current_schema() = public`, the exact
+bootstrap path (allowing whitespace), public USAGE/CREATE, database CREATE and
+PL/pgSQL USAGE before any DDL. Missing, malformed or denied context aborts preparation.
+The database CREATE check covers the candidate schema; the other checks cover the
+identity foundation objects. Actual DDL permission errors also abort the transaction.
+
+PostgreSQL 16 documents that [SET LOCAL](https://www.postgresql.org/docs/16/sql-set.html)
+ends on either COMMIT or ROLLBACK, and does nothing outside a transaction except
+emit a warning. The transaction-ID and path read-backs therefore must not be
+replaced by assuming a successful SET command proves transaction scope.
+[Search-path semantics](https://www.postgresql.org/docs/16/runtime-config-client.html#GUC-SEARCH-PATH)
+make `public` the explicit creation target here while implicitly searching
+`pg_catalog` first for built-ins. Explicit `pg_temp` remains last. The transaction
+identifier comes from documented
+[`pg_current_xact_id()`](https://www.postgresql.org/docs/16/functions-info.html#FUNCTIONS-PG-SNAPSHOT),
+which assigns an ID if needed. This is for the one-shot writable fixture bootstrap,
+not an ordinary adapter operation.
+
+Migration 002 and candidate SQL are applied byte-for-byte and their existing
+checksum ledger behavior is retained. A COMMIT must return its COMMIT command tag
+before success is reported. Every preparation connection is discarded, including
+after rollback or acknowledgement failure; no bootstrap connection is returned for
+ordinary pool use. There is no automatic retry. A lost commit acknowledgement can
+leave a prepared database while the CLI reports failure; separate inspection of
+the designated disposable fixture is required, never automatic reset or retry.
+
+**P3: strict version metadata.** The safety gate captures the version once and
+requires a primitive, finite integer number in `[160000, 170000)`. It does not
+coerce strings or boxed values. Undefined, null, NaN, infinities, nonnumeric/numeric
+strings, fractional numbers and other major versions cannot authorize preparation.
+
+**Reproduction and limits.** The new test file executes the actual preparation CLI
+source in a VM with an isolated environment, the real safety helper and unchanged
+SQL files, and a fake `pg` module. It captures the real connection options and
+leased-client sequence; it never loads a real pool or opens a socket. Against the
+parent, migration 002 reaches the modeled catalog-creation failure, and direct
+safety checks incorrectly accept undefined, NaN, nonnumeric/numeric strings,
+fractions and boxed numbers. The corrected tests cover valid major-version bounds,
+pre-DDL denial, lost transaction scope, missing privileges, statement/rollback/
+commit failures, checksum retention and connection disposal. These are transcript
+models supported by PostgreSQL 16 documentation, **not live SQL evidence**.
+
+Correction evidence logs: `/tmp/zephipay-native-pg-p2p3-before.tap` (expected failing
+new regressions against the parent) and `/tmp/zephipay-native-pg-p2p3-focused.tap`
+(52 passed, zero failures/skips after correction). The accepted core, adapter,
+candidate SQL, canonical migrations, dependencies and runtime configuration remain
+unchanged. Only the preparation script, test safety helper, new preparation tests
+and this document change.
+
 ## Validation evidence and explicit limits
 
 Source validation uses Node `v22.20.0`, TypeScript `5.9.3` and existing Prettier
 `3.9.10`. No packages were installed.
 
-| Check                                                                  | Result and meaning                                                                           |
-| ---------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| Focused native-session unit tests                                      | 173 passed: 146 accepted-core tests plus 27 new transcript/safety tests; zero failures/skips |
-| Full `npm test`                                                        | 785 passed, zero failures/skips; `.integration.ts` suites are excluded                       |
-| `npm run lint`, `npm run build`                                        | Passed; lint is the repository's TypeScript check                                            |
-| Dedicated strict typecheck of new tests, worker and preparation script | Passed; verifies types, not PostgreSQL behavior                                              |
-| `npm run migrate:validate`                                             | Passed for 33 unchanged ordered migration files; static source checks only                   |
-| Prettier / diff checks                                                 | Passed for changed TypeScript/Markdown; SQL whitespace checked, not parsed by PostgreSQL     |
-| Actual PostgreSQL tests / schema application                           | **NOT RUN — environment gate BLOCKED**                                                       |
+| Check                                                                  | Result and meaning                                                                                               |
+| ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Focused native-session unit tests                                      | 225 passed: 146 accepted-core tests, 27 adapter/safety tests and 52 preparation corrections; zero failures/skips |
+| Full unit suite (`tests/*.test.ts`, the same selection as `npm test`)  | 837 passed, zero failures/skips; `.integration.ts` suites are excluded                                           |
+| `npm run lint`, `npm run build`                                        | Passed; lint is the repository's TypeScript check                                                                |
+| Dedicated strict typecheck of new tests, worker and preparation script | Passed; verifies types, not PostgreSQL behavior                                                                  |
+| `npm run migrate:validate`                                             | Passed for 33 unchanged ordered migration files; static source checks only                                       |
+| Prettier / diff checks                                                 | Passed for changed TypeScript/Markdown; SQL whitespace checked, not parsed by PostgreSQL                         |
+| Actual PostgreSQL tests / schema application                           | **NOT RUN — environment gate BLOCKED**                                                                           |
 
-Temporary local logs: `/tmp/zephipay-native-pg-focused.tap` and
-`/tmp/zephipay-native-pg-regression.tap`. Transcript tests inspect query order and
+The correction runs used the installed Node/tsx loader directly:
+`node --import tsx --test tests/*.test.ts`; no packages were installed. The focused
+selection was the five `tests/nativeSession*.test.ts` files. Dedicated strict
+typechecking also included the prepared PostgreSQL integration suite and recovery
+worker without executing either. Migration validation ran the existing static
+`scripts/validate-migrations.ts` through the same loader; it opens no database.
+
+Temporary correction logs: `/tmp/zephipay-native-pg-p2p3-native.tap` and
+`/tmp/zephipay-native-pg-p2p3-regression.tap`. Transcript tests inspect query order and
 failure handling using doubles. They do not prove SQL execution, canonical database
 atomicity, concurrent row locking, deadlock freedom or durable storage.
 
@@ -209,6 +283,13 @@ same gate. No command above was run in this milestone. Do not pass an existing
 application URL to these tests. Do not apply the candidate to Railway or a shared
 database. Canonical identity regressions and full-schema/Web compatibility need
 separate disposable fixture runs before database acceptance.
+
+The first actual PostgreSQL 16 run must additionally confirm bootstrap object
+placement in `public`, real required-role privileges, unchanged migration checksums,
+and the catalog-first connection path after both committed and rolled-back
+bootstrap transactions. It must exercise rejection of missing public USAGE/CREATE
+and database CREATE, and prove no partial schema survives an injected DDL failure.
+Source transcript tests do not close these database execution gates.
 
 After actual database execution, resolve failures without weakening the accepted
 core, record real lock/fault/clock evidence, and obtain Sol's independent database

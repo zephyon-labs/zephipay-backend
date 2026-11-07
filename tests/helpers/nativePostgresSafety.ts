@@ -1,8 +1,15 @@
 import type { Pool, PoolConfig } from "pg";
 
-export type DisposableTarget = { database: string; port: number; marker: string; pool: PoolConfig };
+export type DisposableTarget = {
+  database: string;
+  port: number;
+  marker: string;
+  pool: PoolConfig;
+};
 /** No DATABASE_URL/TEST_DATABASE_URL/PG* fallback. No provider credentials. */
-export function nativeDisposableTarget(env: Record<string, string | undefined>): DisposableTarget {
+export function nativeDisposableTarget(
+  env: Record<string, string | undefined>,
+): DisposableTarget {
   const database = env.NATIVE_SESSION_TEST_DATABASE;
   const rawPort = env.NATIVE_SESSION_TEST_PORT;
   if (
@@ -12,7 +19,9 @@ export function nativeDisposableTarget(env: Record<string, string | undefined>):
     !rawPort ||
     !/^[0-9]{4,5}$/.test(rawPort)
   )
-    throw new Error("Explicit unique disposable native-session database designation required");
+    throw new Error(
+      "Explicit unique disposable native-session database designation required",
+    );
   const port = Number(rawPort);
   if (port < 1024 || port > 65535) throw new Error("Invalid disposable port");
   return {
@@ -47,6 +56,7 @@ export async function verifyNativeDisposable(
     inet_server_addr()::text AS address, inet_server_port() AS port, current_setting('server_version_num')::integer AS version,
     pg_is_in_recovery() AS recovery, shobj_description(oid,'pg_database') AS marker FROM pg_database WHERE datname=current_database()`);
   const r = rows[0];
+  const version: unknown = r?.version;
   if (
     rows.length !== 1 ||
     r.database !== target.database ||
@@ -55,8 +65,11 @@ export async function verifyNativeDisposable(
     r.port !== target.port ||
     r.marker !== target.marker ||
     r.recovery !== false ||
-    r.version < 160000 ||
-    r.version >= 170000
+    typeof version !== "number" ||
+    !Number.isFinite(version) ||
+    !Number.isInteger(version) ||
+    version < 160000 ||
+    version >= 170000
   )
     throw new Error("Disposable database identity verification failed");
   if (empty) {
