@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { Script } from "node:vm";
 import type { Pool, PoolConfig } from "pg";
 import ts from "typescript";
+import * as diagnostics from "./helpers/nativePostgresDiagnostics";
 import {
   nativeDisposableTarget,
   verifyNativeDisposable,
@@ -39,6 +40,10 @@ type Controls = {
   initialTransactionId?: unknown;
   failAt?: string;
   failRollback?: boolean;
+  failRelease?: boolean;
+  failEnd?: boolean;
+  failConnect?: boolean;
+  thrown?: unknown;
   count?: string;
 };
 
@@ -83,7 +88,7 @@ async function preparation(controls: Controls = {}) {
         (controls.failAt && sql.includes(controls.failAt)) ||
         (controls.failRollback && sql === "ROLLBACK")
       )
-        throw new Error("Injected statement failure");
+        throw controls.thrown ?? new Error("Injected statement failure");
       if (sql === "BEGIN") {
         if (!controls.ignoreBegin) {
           inTransaction = true;
@@ -155,7 +160,7 @@ async function preparation(controls: Controls = {}) {
         return { rows: [] };
       throw new Error(`Unexpected preparation statement: ${sql}`);
     } catch (error) {
-      failures.push((error as Error).message);
+      failures.push("query failed");
       throw error;
     }
   };
@@ -166,14 +171,21 @@ async function preparation(controls: Controls = {}) {
     query = (sql: string, values?: unknown[]) => query(sql, values, false);
     async connect() {
       connects++;
+      if (controls.failConnect)
+        throw controls.thrown ?? new Error("connect failed");
       return {
         query: (sql: string, values?: unknown[]) => query(sql, values, true),
-        release: (destroy = false) => releases.push(destroy),
+        release: (destroy = false) => {
+          releases.push(destroy);
+          if (controls.failRelease)
+            throw controls.thrown ?? new Error("release failed");
+        },
       };
     }
     async end() {
       ended = true;
       finish();
+      if (controls.failEnd) throw controls.thrown ?? new Error("end failed");
     }
   }
   const processDouble = {
@@ -200,6 +212,7 @@ async function preparation(controls: Controls = {}) {
       nativeDisposableTarget,
       verifyNativeDisposable,
     },
+    "../tests/helpers/nativePostgresDiagnostics": diagnostics,
   };
   const compiled = ts.transpileModule(source, {
     compilerOptions: {
@@ -250,7 +263,7 @@ async function preparation(controls: Controls = {}) {
 test("actual preparation CLI targets public for unchanged migration 002 with the real fixture options", async () => {
   const r = await preparation();
   assert.equal(r.process.exitCode, 0, r.failures.join("; "));
-  assert.match(r.process.stdout.text, /Prepared ONLY/);
+  assert.equal(r.process.stdout.text, diagnostics.PREPARATION_OK);
   assert.equal(r.options?.options, `-c search_path=${runtimePath}`);
   assert.equal(r.options?.host, "127.0.0.1");
   assert.equal(r.options?.database, target.database);
@@ -414,5 +427,46 @@ test("COMMIT returning ROLLBACK is never acknowledged as successful preparation"
   const r = await preparation({ commitCommand: "ROLLBACK" });
   assert.equal(r.process.exitCode, 1);
   assert.equal(r.process.stdout.text, "");
+  assert.equal(r.committed, 0);
+});
+
+const hostile = new Error(
+  "SECRET_SENTINEL\n::error::forged\r\nNATIVE_PG_FAILURE CONTEXT_REJECTED",
+);
+for (const [controls, code] of [
+  [{ failConnect: true }, "PREPARE_CONNECT_FAILED"],
+  [{ failAt: "BEGIN" }, "PREPARE_BEGIN_FAILED"],
+  [{ version: null }, "PREPARE_IDENTITY_FAILED"],
+  [{ failAt: "pg_current_xact_id()" }, "PREPARE_TRANSACTION_FAILED"],
+  [{ context: { schema_create: false } }, "PREPARE_SCHEMA_FAILED"],
+  [{ failAt: "CREATE TYPE account_status" }, "PREPARE_DDL_FAILED"],
+  [{ failAt: "COMMIT" }, "PREPARE_COMMIT_FAILED"],
+  [{ failRelease: true }, "PREPARE_RELEASE_FAILED"],
+  [{ failEnd: true }, "PREPARE_POOL_CLOSE_FAILED"],
+] as [Controls, string][])
+  test(`preparation reports only ${code} for injected failure`, async () => {
+    const r = await preparation({ ...controls, thrown: hostile });
+    assert.equal(r.process.exitCode, 1);
+    assert.equal(r.process.stdout.text, "");
+    assert.equal(r.process.stderr.text, `NATIVE_PG_FAILURE ${code}\n`);
+    assert.equal(r.ended, true);
+  });
+test("preparation preserves DDL failure across rollback, release and pool cleanup failures", async () => {
+  const r = await preparation({
+    failAt: "CREATE TYPE account_status",
+    failRollback: true,
+    failRelease: true,
+    failEnd: true,
+    thrown: hostile,
+  });
+  assert.equal(r.process.exitCode, 1);
+  assert.equal(r.process.stdout.text, "");
+  assert.equal(
+    r.process.stderr.text,
+    "NATIVE_PG_FAILURE PREPARE_DDL_FAILED\nNATIVE_PG_CLEANUP PREPARE_ROLLBACK_FAILED\nNATIVE_PG_CLEANUP PREPARE_RELEASE_FAILED\nNATIVE_PG_CLEANUP PREPARE_POOL_CLOSE_FAILED\n",
+  );
+  assert.deepEqual(r.releases, [true]);
+  assert.equal(r.queries.filter((q) => q.sql === "ROLLBACK").length, 1);
+  assert.equal(r.queries.at(-1)?.sql, "ROLLBACK");
   assert.equal(r.committed, 0);
 });

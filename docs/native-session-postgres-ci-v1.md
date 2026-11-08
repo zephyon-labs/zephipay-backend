@@ -49,7 +49,7 @@ These checks establish a conservative environment contract inside a reviewed hos
 
 The accepted preparation transcript tests still exercise the actual preparation source and exact connection options. Local-profile bridge rejection remains covered. Integration and recovery assertions are unchanged; only their safety-selector imports change. The old PostgreSQL suite and its database isolation are preserved. `npm test`, TypeScript/lint, build, static migration validation, formatting and diff/isolation review are the local gates. None substitutes for live PostgreSQL evidence.
 
-Local validation result: **338/338** native-session source tests and **950/950** complete Backend unit tests passed, with zero failures, skips, cancellations or TODOs. This includes **113 new CI tests**. Lint, build, explicit strict type checking of the affected scripts/tests and static validation of all **33** ordered migrations passed. Local Node was **22.20.0**; the unchanged workflow pins **22.23.2**, which still requires hosted verification. No dependency was installed or changed. The existing workflow was compared byte-for-byte after removing only the new service/step; protected source, SQL and local safety files were compared against the accepted parent.
+Initial CI implementation validation at `f705c0b`: **338/338** native-session source tests and **950/950** complete Backend unit tests passed, with zero failures, skips, cancellations or TODOs. This includes **113 new CI tests**. Lint, build, explicit strict type checking of the affected scripts/tests and static validation of all **33** ordered migrations passed. Local Node was **22.20.0**; the unchanged workflow pins **22.23.2**. No dependency was installed or changed. The existing workflow was compared byte-for-byte after removing only the new service/step; protected source, SQL and local safety files were compared against the accepted parent.
 
 ## Runtime/resource assumptions and first hosted gate
 
@@ -61,3 +61,35 @@ Local validation result: **338/338** native-session source tests and **950/950**
 - If the complete job approaches/exceeds 15 minutes, report measurements and seek a separately reviewed timeout/workflow adjustment. Do not skip old tests, split away the required result or silently widen this package.
 
 Next gate: founder source review, Sol independent source/security audit, then separate authorization for the first push/PR/hosted PostgreSQL run. No hosted pass, production readiness or new native/economic authority is claimed.
+
+## PR #15 diagnostics-only correction — November 8, 2026
+
+The first hosted attempt on `f705c0b` passed 950 unit tests and 535 existing PostgreSQL tests, then failed in the native driver with its generic message. No native preparation or 16-case completion was established. Root cause remains **unresolved**; exception suppression was confirmed. This correction adds diagnostic visibility only and does not claim to fix the hosted failure. No hosted retry or remote operation is part of this correction.
+
+The finite code vocabulary is defined in `tests/helpers/nativePostgresDiagnostics.ts`. Codes identify the executing boundary, not an inferred PostgreSQL/product root cause:
+
+| Coverage category                      | Representative static codes                                                                                                                     |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| Runner context / target designation    | `CONTEXT_REJECTED`, `TARGET_REJECTED`                                                                                                           |
+| Docker collection / command / parsing  | `DOCKER_CONTAINER_READ_FAILED`, `DOCKER_CONTAINER_PARSE_FAILED`, corresponding image/network codes, `CHECKOUT_READ_FAILED`                      |
+| Service identity and safety validation | `METADATA_REJECTED`, `SERVICE_RECHECK_FAILED`                                                                                                   |
+| Bootstrap / SQL preparation            | `BOOTSTRAP_IDENTITY_FAILED`, `BOOTSTRAP_DATABASE_CREATE_FAILED`, `PREPARE_SCHEMA_FAILED`, `PREPARE_COMMIT_FAILED`                               |
+| Child execution / timeout / report     | `PREPARATION_CHILD_FAILED`, `INTEGRATION_CHILD_FAILED`, phase-specific `REPORT_MISSING` / `REPORT_INVALID`, integration test/skip/summary codes |
+| Cleanup                                | `BOOTSTRAP_CLEANUP_FAILED`, `PREPARE_ROLLBACK_FAILED`, `PREPARE_RELEASE_FAILED`, `PREPARE_POOL_CLOSE_FAILED`                                    |
+
+Error properties, messages, stacks, causes and exception-supplied codes are never used to render these diagnostics. Internally created reports are tracked by object identity. Unknown exceptions use a static fallback. Cleanup executes once in the original order; a cleanup error is reported separately and cannot replace the original code. A cleanup-only failure still fails the command and prevents further preparation/integration. Preparation acknowledges success only after COMMIT acknowledgement, client disposal and pool cleanup have succeeded; a cleanup failure does not imply that an earlier commit was rolled back.
+
+Example output for a primary failure followed by failed cleanup:
+
+```text
+NATIVE_PG_FAILURE BOOTSTRAP_DATABASE_CREATE_FAILED
+NATIVE_PG_CLEANUP BOOTSTRAP_CLEANUP_FAILED
+```
+
+The parent captures and discards child stdout/stderr rather than forwarding or interpreting them. A dedicated fd 3 carries only allowlisted reports; the parent supplies the test-only `NATIVE_SESSION_CI_DIAGNOSTIC_FD=3` flag to those children. That flag grants no database authority and changes no persistent environment or workflow configuration. A forged diagnostic line embedded in exception text or ordinary output cannot influence the chosen code. The report parser accepts only finite codes and bounded records (4 KiB, at most one primary plus three cleanup lines). Nonzero exit, signal, spawn error or timeout always fails even if the child previously wrote a success report. Exit zero without the exact phase-specific success report also fails. Child capture is bounded at 1 MiB; overflow fails closed. This is an internal reporting channel for reviewed child code, not authentication of arbitrary malicious child programs.
+
+Preparation success is `NATIVE_PG_STATUS PREPARATION_OK`. The reporter emits `NATIVE_PG_STATUS INTEGRATION_OK_16` only after consuming the complete unchanged 16-test manifest. The public driver emits its fixed final success message only after both children succeed. CLI outcomes remain exit 0 for success and exit 1 for failure. Metadata timeout (5 seconds), child timeout (180 seconds), job timeout (15 minutes), SQL/identity assertions, transaction checks and no-retry behavior are unchanged. Diagnostics cover entered orchestration paths; Node/loader failures before the program starts are outside this reporting channel.
+
+Regression coverage independently exercises the six categories clarified by Matt/Nova, hostile exception strings/proxies, primary plus multiple cleanup failures, early rejection before I/O, missing/forged reports, child errors/signals/timeouts, and actual local Node reporter processes with 16, 15, skipped, TODO and failed synthetic cases. These are **not claimed to reproduce Sol's six original probes**, whose exact inputs were unavailable; Sol's replay remains part of focused re-audit. No real Docker command or PostgreSQL connection is used. The data-directory/WAL P3 and all native production-integration gates remain open.
+
+Correction validation: **198/198** CI/preparation tests, **371/371** complete native-session source tests and **983/983** Backend unit tests passed, with zero failures/skips/cancellations/TODOs (**33 additional regression cases**). Lint, build, explicit strict script/test type checking and static validation of all 33 canonical migrations passed. AST comparisons verified unchanged context, metadata and SQL identity check functions, and unchanged SQL calls/predicates in bootstrap/preparation. Workflow configuration, local safety helper, integration/recovery assertions, dependencies, core, candidate SQL and canonical migrations remain unchanged. Hosted execution, full native database acceptance and replay of Sol's original probes remain separate authorization/audit gates.

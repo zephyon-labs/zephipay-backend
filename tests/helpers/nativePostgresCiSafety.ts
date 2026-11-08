@@ -1,6 +1,7 @@
 /** Test infrastructure only. No ambient URL, remote Docker context or CI=true fallback. */
 import { execFileSync } from "node:child_process";
 import { isIP } from "node:net";
+import { atStage, type DiagnosticCode } from "./nativePostgresDiagnostics";
 import type { Pool } from "pg";
 import {
   nativeDisposableTarget,
@@ -133,39 +134,44 @@ export function inspectCiMetadata(
 ): CiEvidence {
   const docker = (args: string[]) =>
     run("/usr/bin/docker", ["--host", "unix:///var/run/docker.sock", ...args]);
+  const readJson = (
+    read: DiagnosticCode,
+    parse: DiagnosticCode,
+    args: string[],
+  ) => {
+    const text = atStage(read, () => docker(args));
+    return atStage(parse, () => JSON.parse(text));
+  };
   const format = containerFormat
     .replace("HOST_FIELDS", hostFormat)
     .replace("STATE_FIELDS", stateFormat);
-  const container = JSON.parse(
-    docker([
-      "inspect",
-      "--type",
-      "container",
-      "--format",
-      format,
-      context.service,
-    ]),
+  const container = readJson(
+    "DOCKER_CONTAINER_READ_FAILED",
+    "DOCKER_CONTAINER_PARSE_FAILED",
+    ["inspect", "--type", "container", "--format", format, context.service],
   );
   return {
-    head: run("/usr/bin/git", ["rev-parse", "HEAD"]),
-    container,
-    image: JSON.parse(
-      docker([
-        "image",
-        "inspect",
-        "--format",
-        '{"id":{{json .Id}},"digests":{{json .RepoDigests}},"os":{{json .Os}},"arch":{{json .Architecture}}}',
-        CI_IMAGE,
-      ]),
+    head: atStage("CHECKOUT_READ_FAILED", () =>
+      run("/usr/bin/git", ["rev-parse", "HEAD"]),
     ),
-    network: JSON.parse(
-      docker([
+    container,
+    image: readJson("DOCKER_IMAGE_READ_FAILED", "DOCKER_IMAGE_PARSE_FAILED", [
+      "image",
+      "inspect",
+      "--format",
+      '{"id":{{json .Id}},"digests":{{json .RepoDigests}},"os":{{json .Os}},"arch":{{json .Architecture}}}',
+      CI_IMAGE,
+    ]),
+    network: readJson(
+      "DOCKER_NETWORK_READ_FAILED",
+      "DOCKER_NETWORK_PARSE_FAILED",
+      [
         "network",
         "inspect",
         "--format",
         '{"id":{{json .Id}},"name":{{json .Name}},"driver":{{json .Driver}},"scope":{{json .Scope}},"internal":{{json .Internal}},"ipam":{{json .IPAM.Config}},"containers":{{json .Containers}}}',
         context.network,
-      ]),
+      ],
     ),
   };
 }
@@ -318,15 +324,21 @@ export function ciDisposableTarget(
   env: Env,
   inspect: Inspect = collectCiEvidence,
 ): DisposableTarget {
-  const context = ciContext(env),
-    identity = verifyCiEvidence(context, inspect(context));
-  check(
-    env.NATIVE_SESSION_TEST_CONFIRM === "DISPOSABLE_GITHUB_NATIVE_SESSION_V1" &&
-      env.NATIVE_SESSION_TEST_PORT === "55432",
+  const context = atStage("CONTEXT_REJECTED", () => ciContext(env));
+  const evidence = atStage("DOCKER_METADATA_FAILED", () => inspect(context));
+  const identity = atStage("METADATA_REJECTED", () =>
+    verifyCiEvidence(context, evidence),
   );
-  const target = nativeDisposableTarget({
-    ...env,
-    NATIVE_SESSION_TEST_CONFIRM: "DISPOSABLE_LOCAL_NATIVE_SESSION_V1",
+  const target = atStage("TARGET_REJECTED", () => {
+    check(
+      env.NATIVE_SESSION_TEST_CONFIRM ===
+        "DISPOSABLE_GITHUB_NATIVE_SESSION_V1" &&
+        env.NATIVE_SESSION_TEST_PORT === "55432",
+    );
+    return nativeDisposableTarget({
+      ...env,
+      NATIVE_SESSION_TEST_CONFIRM: "DISPOSABLE_LOCAL_NATIVE_SESSION_V1",
+    });
   });
   Object.freeze(target.pool);
   Object.freeze(target);
@@ -337,14 +349,18 @@ export function isCiTarget(target: DisposableTarget) {
   return registrations.has(target);
 }
 function identityFor(target: DisposableTarget) {
-  const registration = registrations.get(target);
-  check(registration);
-  const { context, identity, inspect } = registration;
-  check(
-    JSON.stringify(verifyCiEvidence(context, inspect(context))) ===
-      JSON.stringify(identity),
-  );
-  return identity;
+  return atStage("SERVICE_RECHECK_FAILED", () => {
+    const registration = registrations.get(target);
+    check(registration);
+    const { context, identity, inspect } = registration;
+    const evidence = atStage("DOCKER_METADATA_FAILED", () => inspect(context));
+    check(
+      JSON.stringify(
+        atStage("METADATA_REJECTED", () => verifyCiEvidence(context, evidence)),
+      ) === JSON.stringify(identity),
+    );
+    return identity;
+  });
 }
 
 export async function verifyCiDatabase(
