@@ -34,6 +34,9 @@ import {
   readFailureReport,
   PREPARATION_OK,
   INTEGRATION_OK,
+  atInspection,
+  withCleanup,
+  type InspectionOrigin,
 } from "./helpers/nativePostgresDiagnostics";
 
 const env = {
@@ -713,7 +716,12 @@ test("all native subprocess entrypoints select the same safety contract and prod
   ]) {
     const source = readFileSync(file, "utf8");
     assert.match(source, /from ["'][^"']*nativePostgresTarget["']/);
-    assert.match(source, /nativeDisposableTarget\(process.env\)/);
+    assert.match(
+      source,
+      file.startsWith("scripts/")
+        ? /nativeDisposableTarget\(process.env, "PRE_DDL"\)/
+        : /nativeDisposableTarget\(process.env\)/,
+    );
     assert.match(source, /verifyNativeDisposable\(/);
   }
   assert.match(
@@ -835,10 +843,14 @@ test("ordinary orchestration success retains both children and final acknowledge
   assert.equal(h.children.length, 2);
 });
 for (const [index, read, parse] of [
-  [0, "DOCKER_CONTAINER_READ_FAILED", "DOCKER_CONTAINER_PARSE_FAILED"],
+  [
+    0,
+    "DOCKER_CONTAINER_UNKNOWN_EXECUTION_ERROR",
+    "DOCKER_CONTAINER_PARSE_FAILED",
+  ],
   [1, "CHECKOUT_READ_FAILED", undefined],
-  [2, "DOCKER_IMAGE_READ_FAILED", "DOCKER_IMAGE_PARSE_FAILED"],
-  [3, "DOCKER_NETWORK_READ_FAILED", "DOCKER_NETWORK_PARSE_FAILED"],
+  [2, "DOCKER_IMAGE_UNKNOWN_EXECUTION_ERROR", "DOCKER_IMAGE_PARSE_FAILED"],
+  [3, "DOCKER_NETWORK_UNKNOWN_EXECUTION_ERROR", "DOCKER_NETWORK_PARSE_FAILED"],
 ] as const)
   test(`metadata collection identifies ${read} without rendering command/error content`, () => {
     for (const mode of parse ? ["throw", "parse"] : ["throw"]) {
@@ -862,7 +874,7 @@ for (const [index, read, parse] of [
         (error) => {
           assert.equal(
             renderFailure(error),
-            `NATIVE_PG_FAILURE ${mode === "throw" ? read : parse}\n`,
+            `NATIVE_PG_FAILURE ${mode === "throw" ? read : parse}\nNATIVE_PG_INSPECTION INITIAL\n`,
           );
           return true;
         },
@@ -1055,4 +1067,485 @@ test("actual child reporter channel keeps 16 mandatory and conceals hostile test
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// A deliberately small model of the reviewed Go JSON-map template operations, NOT
+// execution of Go or Docker. It evaluates the actual production projection string.
+// Strict dot lookup models missingkey=error; index of an absent map key models nil.
+function projected(template: string, raw: Record<string, unknown>): string {
+  const field = (keys: string[]) => {
+    let value: unknown = raw;
+    for (const key of keys) {
+      assert.ok(
+        value !== null && typeof value === "object" && !Array.isArray(value),
+      );
+      assert.ok(Object.hasOwn(value, key), "modeled missingkey=error");
+      value = (value as Record<string, unknown>)[key];
+    }
+    return value;
+  };
+  const result = template.replace(
+    /{{json (.*?)}}/g,
+    (_match, expression: string) => {
+      if (expression === '(index .HostConfig "Mounts")') {
+        const host = field(["HostConfig"]);
+        assert.ok(
+          host !== null && typeof host === "object" && !Array.isArray(host),
+        );
+        return JSON.stringify(
+          Object.hasOwn(host, "Mounts")
+            ? (host as Record<string, unknown>).Mounts
+            : null,
+        );
+      }
+      assert.match(expression, /^\.[A-Za-z]+(?:\.[A-Za-z]+)*$/);
+      return JSON.stringify(field(expression.slice(1).split(".")));
+    },
+  );
+  assert.ok(!result.includes("{{"));
+  return result;
+}
+function rawContainer() {
+  const c = evidence().container;
+  return {
+    Id: c.id,
+    Image: c.imageId,
+    Config: {
+      Image: c.imageRef,
+      Labels: c.labels,
+      Entrypoint: c.entrypoint,
+      Cmd: c.cmd,
+      Env: [hostileText],
+    },
+    State: c.state,
+    RestartCount: c.restarts,
+    Mounts: c.mounts,
+    NetworkSettings: { Ports: c.ports, Networks: c.networks },
+    HostConfig: {
+      NetworkMode: c.host.networkMode,
+      PortBindings: c.host.bindings,
+      Tmpfs: c.host.tmpfs,
+      Binds: c.host.binds,
+      VolumesFrom: c.host.volumesFrom,
+      Mounts: c.host.mounts as unknown,
+      Privileged: c.host.privileged,
+      Devices: c.host.devices,
+      CapAdd: c.host.capAdd,
+      RestartPolicy: c.host.restart,
+    },
+  };
+}
+function fromRaw(raw: Record<string, unknown>, old = false) {
+  return inspectCiMetadata(context, (file, args) => {
+    const data = evidence();
+    if (file === "/usr/bin/git") return context.sha;
+    if (args[2] === "image") return JSON.stringify(data.image);
+    if (args[2] === "network") return JSON.stringify(data.network);
+    let template = args[args.indexOf("--format") + 1];
+    if (old)
+      template = template.replace(
+        '(index .HostConfig "Mounts")',
+        ".HostConfig.Mounts",
+      );
+    return projected(template, raw);
+  });
+}
+test("offline strict-map model reproduces old missing Mounts failure and corrected omission passes", () => {
+  const raw = rawContainer();
+  delete (raw.HostConfig as Record<string, unknown>).Mounts;
+  assert.throws(() => fromRaw(raw, true));
+  const data = fromRaw(raw);
+  assert.doesNotThrow(() => verifyCiEvidence(context, data));
+  assert.equal(
+    (data.container as ReturnType<typeof evidence>["container"]).host.mounts,
+    null,
+  );
+  assert.ok(!JSON.stringify(data).includes("SECRET_SENTINEL"));
+});
+for (const value of [
+  null,
+  [],
+  [{}],
+  [{ Type: "volume" }],
+  [{ Type: "tmpfs" }],
+  {},
+  false,
+  0,
+  "",
+  "[]",
+  [null],
+])
+  test(`optional mount specifications preserve and validate ${JSON.stringify(value)}`, () => {
+    const raw = rawContainer();
+    raw.HostConfig.Mounts = value;
+    const data = fromRaw(raw);
+    if (value === null || (Array.isArray(value) && value.length === 0))
+      assert.doesNotThrow(() => verifyCiEvidence(context, data));
+    else assert.throws(() => verifyCiEvidence(context, data));
+  });
+for (const keys of [
+  ["Id"],
+  ["Config", "Image"],
+  ["Config", "Labels"],
+  ["State", "Health"],
+  ["HostConfig"],
+  ["HostConfig", "Tmpfs"],
+  ["HostConfig", "PortBindings"],
+  ["HostConfig", "Binds"],
+  ["HostConfig", "Privileged"],
+  ["Mounts"],
+  ["NetworkSettings", "Ports"],
+  ["NetworkSettings", "Networks"],
+])
+  test(`optional compatibility does not default required ${keys.join(".")}`, () => {
+    const raw = rawContainer() as Record<string, unknown>;
+    let owner = raw;
+    for (const key of keys.slice(0, -1))
+      owner = owner[key] as Record<string, unknown>;
+    delete owner[keys.at(-1)!];
+    assert.throws(() => fromRaw(raw));
+  });
+test("wrong identity and unexpected effective storage remain rejected after optional omission", () => {
+  for (const mutate of [
+    (raw: ReturnType<typeof rawContainer>) => {
+      raw.Id = context.originalService;
+    },
+    (raw: ReturnType<typeof rawContainer>) => {
+      (raw.Mounts as unknown[]) = [
+        { Type: "volume", Destination: CI_TMPFS, RW: true },
+      ];
+    },
+    (raw: ReturnType<typeof rawContainer>) => {
+      (raw.HostConfig.Tmpfs as unknown) = {};
+    },
+  ]) {
+    const raw = rawContainer();
+    delete (raw.HostConfig as Record<string, unknown>).Mounts;
+    mutate(raw);
+    assert.throws(() => verifyCiEvidence(context, fromRaw(raw)));
+  }
+  const data = evidence();
+  delete (data.container.host as Record<string, unknown>).mounts;
+  assert.throws(
+    () => verifyCiEvidence(context, data),
+    "missing projected field is not normalized by the validator",
+  );
+});
+const executionFaults = [
+  [{ code: "ENOENT" }, "EXECUTABLE_UNAVAILABLE"],
+  [{ code: "EACCES" }, "ACCESS_DENIED"],
+  [{ code: "EPERM" }, "ACCESS_DENIED"],
+  [{ status: 7, signal: null }, "NONZERO_EXIT"],
+  [{ code: "ETIMEDOUT", signal: "SIGTERM" }, "TIMEOUT"],
+  [{ code: "ENOBUFS", signal: "SIGTERM" }, "OUTPUT_LIMIT"],
+  [{ status: null, signal: "SIGTERM" }, "SIGNAL"],
+  [{ code: hostileText }, "UNKNOWN_EXECUTION_ERROR"],
+  [{ status: 1.5 }, "UNKNOWN_EXECUTION_ERROR"],
+  [{ status: 0 }, "UNKNOWN_EXECUTION_ERROR"],
+  [{ status: Infinity }, "UNKNOWN_EXECUTION_ERROR"],
+  [hostileError(), "UNKNOWN_EXECUTION_ERROR"],
+] as const;
+for (const origin of [
+  "INITIAL",
+  "BOOTSTRAP_RECHECK",
+  "PRE_DDL",
+  "RECHECK",
+] as const)
+  for (const [operation, index] of [
+    ["CONTAINER", 0],
+    ["IMAGE", 2],
+    ["NETWORK", 3],
+  ] as const)
+    test(`${origin} ${operation} execution failures emit finite categories only`, () => {
+      for (const [thrown, reason] of executionFaults) {
+        let calls = 0;
+        const data = evidence();
+        assert.throws(
+          () =>
+            inspectCiMetadata(
+              context,
+              () => {
+                const at = calls++;
+                if (at === index) throw thrown;
+                return [
+                  JSON.stringify(data.container),
+                  context.sha,
+                  JSON.stringify(data.image),
+                  JSON.stringify(data.network),
+                ][at];
+              },
+              origin,
+            ),
+          (error) => {
+            const text = renderFailure(error);
+            assert.equal(
+              text,
+              `NATIVE_PG_FAILURE DOCKER_${operation}_${reason}\nNATIVE_PG_INSPECTION ${origin}\n`,
+            );
+            assert.equal(renderFailure(readFailureReport(text)), text);
+            return true;
+          },
+        );
+        assert.equal(calls, index + 1);
+      }
+    });
+test("classification never invokes getters, proxy traps, coercion or arbitrary exception fields", () => {
+  let accesses = 0;
+  const hostile = () => {
+    accesses++;
+    throw new Error(hostileText);
+  };
+  const revoked = Proxy.revocable({}, {});
+  revoked.revoke();
+  const errors: unknown[] = [
+    new Proxy({}, { get: hostile, getOwnPropertyDescriptor: hostile }),
+    revoked.proxy,
+    Object.create({ code: "ENOENT" }),
+    undefined,
+    null,
+    hostileText,
+    { status: { valueOf: hostile }, signal: { toString: hostile } },
+  ];
+  for (const key of ["code", "status", "signal"])
+    errors.push(Object.defineProperty({}, key, { get: hostile }));
+  for (const error of errors)
+    assert.throws(
+      () =>
+        inspectCiMetadata(context, () => {
+          throw error;
+        }),
+      (caught) => {
+        assert.equal(
+          renderFailure(caught),
+          "NATIVE_PG_FAILURE DOCKER_CONTAINER_UNKNOWN_EXECUTION_ERROR\nNATIVE_PG_INSPECTION INITIAL\n",
+        );
+        return true;
+      },
+    );
+  assert.equal(accesses, 0);
+  const known = Object.defineProperties(
+    {},
+    {
+      code: { value: "ENOENT" },
+      message: { get: hostile },
+      stderr: { get: hostile },
+      stdout: { get: hostile },
+      cause: { get: hostile },
+    },
+  );
+  assert.throws(
+    () =>
+      inspectCiMetadata(context, () => {
+        throw known;
+      }),
+    (caught) => {
+      assert.match(
+        renderFailure(caught),
+        /^NATIVE_PG_FAILURE DOCKER_CONTAINER_EXECUTABLE_UNAVAILABLE\n/,
+      );
+      return true;
+    },
+  );
+  assert.equal(accesses, 0);
+  for (const text of [
+    "NATIVE_PG_FAILURE DOCKER_CONTAINER_TIMEOUT\nNATIVE_PG_INSPECTION UNKNOWN\n",
+    "NATIVE_PG_FAILURE DOCKER_CONTAINER_TIMEOUT\nNATIVE_PG_INSPECTION PRE_DDL\nNATIVE_PG_INSPECTION INITIAL\n",
+    `NATIVE_PG_FAILURE DOCKER_CONTAINER_TIMEOUT\nNATIVE_PG_INSPECTION ${hostileText}\n`,
+    "NATIVE_PG_FAILURE CONTEXT_REJECTED\nNATIVE_PG_INSPECTION INITIAL\n",
+  ])
+    assert.equal(readFailureReport(text), undefined);
+});
+test("actual local subprocess errors classify without Docker, network, database or raw output", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "native-inspect-errors-"));
+  const denied = path.join(dir, "not-executable");
+  writeFileSync(denied, "synthetic", { mode: 0o600 });
+  const cases: [string, string[], Record<string, unknown>, string][] = [
+    [path.join(dir, "missing"), [], {}, "EXECUTABLE_UNAVAILABLE"],
+    [denied, [], {}, "ACCESS_DENIED"],
+    [process.execPath, ["-e", "process.exit(7)"], {}, "NONZERO_EXIT"],
+    [
+      process.execPath,
+      ["-e", "setInterval(()=>{},1000)"],
+      { timeout: 100 },
+      "TIMEOUT",
+    ],
+    [
+      process.execPath,
+      ["-e", "process.stdout.write('x'.repeat(100000))"],
+      { maxBuffer: 64 },
+      "OUTPUT_LIMIT",
+    ],
+    [
+      process.execPath,
+      ["-e", "process.kill(process.pid,'SIGTERM')"],
+      {},
+      "SIGNAL",
+    ],
+  ];
+  try {
+    for (const [file, args, options, reason] of cases)
+      assert.throws(
+        () =>
+          inspectCiMetadata(context, () =>
+            execFileSync(file, args, {
+              encoding: "utf8",
+              stdio: "pipe",
+              timeout: 2000,
+              ...options,
+            }),
+          ),
+        (error) => {
+          assert.equal(
+            renderFailure(error),
+            `NATIVE_PG_FAILURE DOCKER_CONTAINER_${reason}\nNATIVE_PG_INSPECTION INITIAL\n`,
+          );
+          return true;
+        },
+      );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+for (const origin of ["INITIAL", "BOOTSTRAP_RECHECK"] as const)
+  test(`${origin} failure prevents database creation and retains cleanup ownership`, async () => {
+    const h = harness(
+      "",
+      new Error(hostileText),
+      origin === "BOOTSTRAP_RECHECK",
+    );
+    h.driver.inspect = (_context, actualOrigin) => {
+      h.calls.push(actualOrigin);
+      if (origin === actualOrigin)
+        return inspectCiMetadata(
+          context,
+          () => {
+            throw { status: 1, stderr: hostileText };
+          },
+          actualOrigin,
+        );
+      return evidence();
+    };
+    const result = await exitFor(h);
+    assert.equal(result.code, 1);
+    assert.equal(result.out, "");
+    assert.equal(
+      result.error,
+      `NATIVE_PG_FAILURE DOCKER_CONTAINER_NONZERO_EXIT\nNATIVE_PG_INSPECTION ${origin}\n` +
+        (origin === "BOOTSTRAP_RECHECK"
+          ? "NATIVE_PG_CLEANUP BOOTSTRAP_CLEANUP_FAILED\n"
+          : ""),
+    );
+    assert.ok(!h.calls.some((s) => s.startsWith("CREATE")));
+    assert.equal(h.children.length, 0);
+    if (origin === "INITIAL") assert.ok(!h.calls.includes("connect"));
+  });
+test("post-bootstrap pre-DDL collection failure prevents schema preparation and integration", async () => {
+  const h = harness();
+  let children = 0;
+  h.driver.child = (_args, childEnv, phase) => {
+    children++;
+    assert.equal(phase, "prepare");
+    // The actual preparation entrypoint supplies PRE_DDL; this exercises its target path.
+    ciDisposableTarget(
+      childEnv,
+      (_context, origin) =>
+        inspectCiMetadata(
+          context,
+          () => {
+            throw { status: 1 };
+          },
+          origin,
+        ),
+      "PRE_DDL",
+    );
+    assert.fail("must not reach native schema DDL");
+  };
+  const result = await exitFor(h);
+  assert.equal(
+    result.error,
+    "NATIVE_PG_FAILURE DOCKER_CONTAINER_NONZERO_EXIT\nNATIVE_PG_INSPECTION PRE_DDL\n",
+  );
+  assert.equal(result.code, 1);
+  assert.equal(children, 1);
+  assert.equal(h.calls.filter((s) => /^(CREATE|COMMENT)/.test(s)).length, 3);
+});
+test("pre-DDL origin survives child reporting, outer stage and cleanup without reassignment", async () => {
+  const text =
+    "NATIVE_PG_FAILURE DOCKER_CONTAINER_TIMEOUT\nNATIVE_PG_INSPECTION PRE_DDL\nNATIVE_PG_CLEANUP PREPARE_POOL_CLOSE_FAILED\n";
+  await assert.rejects(
+    withCleanup(
+      async () => {
+        return atInspection("INITIAL", () => {
+          throw readFailureReport(text);
+        });
+      },
+      "BOOTSTRAP_CLEANUP_FAILED",
+      () => {
+        throw hostileError();
+      },
+    ),
+    (error) => {
+      assert.equal(
+        renderFailure(error),
+        text + "NATIVE_PG_CLEANUP BOOTSTRAP_CLEANUP_FAILED\n",
+      );
+      return true;
+    },
+  );
+  const spawn = (() => ({
+    status: 1,
+    output: [null, hostileText, hostileText, text],
+  })) as unknown as typeof spawnSync;
+  assert.throws(
+    () => executeCiChild([], {}, "prepare", spawn),
+    (error) => {
+      assert.equal(renderFailure(error), text);
+      return true;
+    },
+  );
+});
+
+test("registration origin persists for pre-DDL rechecks without changing identity rejection", async () => {
+  for (const origin of ["INITIAL", "PRE_DDL"] as const) {
+    const observed: InspectionOrigin[] = [];
+    const data = evidence();
+    const target = ciDisposableTarget(
+      designation,
+      (_context, actual) => {
+        observed.push(actual);
+        return data;
+      },
+      origin,
+    );
+    const fake = fakePool([identity]);
+    await verifyCiDisposable(fake.pool, target, true);
+    assert.deepEqual(observed, [
+      origin,
+      origin === "PRE_DDL" ? "PRE_DDL" : "RECHECK",
+    ]);
+    data.container.id = context.originalService;
+    fake.queries.length = 0;
+    await assert.rejects(verifyCiDisposable(fake.pool, target, true));
+    assert.deepEqual(fake.queries, []);
+  }
+});
+test("subprocess classification never replaces an already owned primary failure", () => {
+  for (const text of [
+    "NATIVE_PG_FAILURE DOCKER_CONTAINER_TIMEOUT\nNATIVE_PG_INSPECTION PRE_DDL\nNATIVE_PG_CLEANUP PREPARE_POOL_CLOSE_FAILED\n",
+    "NATIVE_PG_FAILURE CONTEXT_REJECTED\n",
+  ])
+    assert.throws(
+      () =>
+        inspectCiMetadata(
+          context,
+          () => {
+            throw readFailureReport(text);
+          },
+          "INITIAL",
+        ),
+      (error) => {
+        assert.equal(renderFailure(error), text);
+        return true;
+      },
+    );
 });

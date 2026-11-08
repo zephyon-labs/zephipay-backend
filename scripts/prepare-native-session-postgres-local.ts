@@ -19,7 +19,7 @@ import {
 
 async function main() {
   const target = atStage("PREPARE_TARGET_FAILED", () =>
-    nativeDisposableTarget(process.env),
+    nativeDisposableTarget(process.env, "PRE_DDL"),
   );
   const pool = atStage("PREPARE_CONNECT_FAILED", () => new Pool(target.pool));
   await withCleanup(

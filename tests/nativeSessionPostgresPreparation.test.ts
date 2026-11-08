@@ -32,6 +32,7 @@ const migrationFile = "migrations/002_identity_foundation.sql";
 const candidateFile = "sql/candidates/native-session-postgres-v1.sql";
 type Controls = {
   version?: unknown;
+  inspectionFailure?: "target" | "verification";
   ignoreBegin?: boolean;
   ignoreLocal?: boolean;
   beginCommand?: string;
@@ -201,6 +202,7 @@ async function preparation(controls: Controls = {}) {
       text: "",
       write(text: string) {
         this.text += text;
+        finish();
       },
     },
   };
@@ -209,8 +211,30 @@ async function preparation(controls: Controls = {}) {
     "node:crypto": { createHash },
     "node:fs/promises": fs,
     "../tests/helpers/nativePostgresTarget": {
-      nativeDisposableTarget,
-      verifyNativeDisposable,
+      nativeDisposableTarget: (
+        env: Record<string, string | undefined>,
+        origin: diagnostics.InspectionOrigin,
+      ) => {
+        assert.equal(
+          origin,
+          "PRE_DDL",
+          "actual preparation source marks its inspection origin",
+        );
+        if (controls.inspectionFailure === "target")
+          throw diagnostics.readFailureReport(
+            "NATIVE_PG_FAILURE DOCKER_CONTAINER_NONZERO_EXIT\nNATIVE_PG_INSPECTION PRE_DDL\n",
+          );
+        return nativeDisposableTarget(env, origin);
+      },
+      verifyNativeDisposable: (
+        ...args: Parameters<typeof verifyNativeDisposable>
+      ) => {
+        if (controls.inspectionFailure === "verification")
+          throw diagnostics.readFailureReport(
+            "NATIVE_PG_FAILURE DOCKER_CONTAINER_NONZERO_EXIT\nNATIVE_PG_INSPECTION PRE_DDL\n",
+          );
+        return verifyNativeDisposable(...args);
+      },
     },
     "../tests/helpers/nativePostgresDiagnostics": diagnostics,
   };
@@ -470,3 +494,29 @@ test("preparation preserves DDL failure across rollback, release and pool cleanu
   assert.equal(r.queries.at(-1)?.sql, "ROLLBACK");
   assert.equal(r.committed, 0);
 });
+
+for (const inspectionFailure of ["target", "verification"] as const)
+  test(`actual preparation ${inspectionFailure} failure exits before schema DDL with PRE_DDL origin`, async () => {
+    const r = await preparation({ inspectionFailure });
+    assert.equal(r.process.exitCode, 1);
+    assert.equal(r.process.stdout.text, "");
+    assert.equal(
+      r.process.stderr.text,
+      "NATIVE_PG_FAILURE DOCKER_CONTAINER_NONZERO_EXIT\nNATIVE_PG_INSPECTION PRE_DDL\n",
+    );
+    assert.ok(
+      !r.queries.some(({ sql }) => /^(CREATE|INSERT|SET LOCAL)/.test(sql)),
+    );
+    assert.equal(r.committed, 0);
+    if (inspectionFailure === "target") {
+      assert.equal(r.connects, 0);
+      assert.deepEqual(r.queries, []);
+    } else {
+      assert.deepEqual(
+        r.queries.map(({ sql }) => sql),
+        ["BEGIN", "ROLLBACK"],
+      );
+      assert.deepEqual(r.releases, [true]);
+      assert.equal(r.ended, true);
+    }
+  });

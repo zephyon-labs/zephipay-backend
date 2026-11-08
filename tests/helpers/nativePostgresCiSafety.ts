@@ -1,7 +1,13 @@
 /** Test infrastructure only. No ambient URL, remote Docker context or CI=true fallback. */
 import { execFileSync } from "node:child_process";
 import { isIP } from "node:net";
-import { atStage, type DiagnosticCode } from "./nativePostgresDiagnostics";
+import {
+  atStage,
+  atInspection,
+  dockerCommandFailure,
+  type DiagnosticCode,
+  type InspectionOrigin,
+} from "./nativePostgresDiagnostics";
 import type { Pool } from "pg";
 import {
   nativeDisposableTarget,
@@ -39,7 +45,10 @@ export type CiIdentity = Readonly<{
   server: string;
   gateway: string;
 }>;
-export type Inspect = (context: CiContext) => CiEvidence;
+export type Inspect = (
+  context: CiContext,
+  origin: InspectionOrigin,
+) => CiEvidence;
 function check(value: unknown): asserts value {
   if (!value)
     throw new Error("Native PostgreSQL CI safety verification failed");
@@ -126,63 +135,79 @@ const containerFormat =
 const stateFormat =
   '{"Running":{{json .State.Running}},"Paused":{{json .State.Paused}},"Restarting":{{json .State.Restarting}},"Dead":{{json .State.Dead}},"OOMKilled":{{json .State.OOMKilled}},"Status":{{json .State.Status}},"Health":{"Status":{{json .State.Health.Status}}}}';
 // Project only reviewed metadata; never inspect Config.Env or health-check logs.
+// Only optional HostConfig.Mounts uses index: omitted map keys become null.
+// Keep required fields as strict field lookups; never normalize nonempty/malformed mounts.
 const hostFormat =
-  '{"networkMode":{{json .HostConfig.NetworkMode}},"bindings":{{json .HostConfig.PortBindings}},"tmpfs":{{json .HostConfig.Tmpfs}},"binds":{{json .HostConfig.Binds}},"volumesFrom":{{json .HostConfig.VolumesFrom}},"mounts":{{json .HostConfig.Mounts}},"privileged":{{json .HostConfig.Privileged}},"devices":{{json .HostConfig.Devices}},"capAdd":{{json .HostConfig.CapAdd}},"restart":{{json .HostConfig.RestartPolicy}}}';
+  '{"networkMode":{{json .HostConfig.NetworkMode}},"bindings":{{json .HostConfig.PortBindings}},"tmpfs":{{json .HostConfig.Tmpfs}},"binds":{{json .HostConfig.Binds}},"volumesFrom":{{json .HostConfig.VolumesFrom}},"mounts":{{json (index .HostConfig "Mounts")}},"privileged":{{json .HostConfig.Privileged}},"devices":{{json .HostConfig.Devices}},"capAdd":{{json .HostConfig.CapAdd}},"restart":{{json .HostConfig.RestartPolicy}}}';
 export function inspectCiMetadata(
   context: CiContext,
   run: (file: string, args: string[]) => string,
+  origin: InspectionOrigin = "INITIAL",
 ): CiEvidence {
-  const docker = (args: string[]) =>
-    run("/usr/bin/docker", ["--host", "unix:///var/run/docker.sock", ...args]);
-  const readJson = (
-    read: DiagnosticCode,
-    parse: DiagnosticCode,
-    args: string[],
-  ) => {
-    const text = atStage(read, () => docker(args));
-    return atStage(parse, () => JSON.parse(text));
-  };
-  const format = containerFormat
-    .replace("HOST_FIELDS", hostFormat)
-    .replace("STATE_FIELDS", stateFormat);
-  const container = readJson(
-    "DOCKER_CONTAINER_READ_FAILED",
-    "DOCKER_CONTAINER_PARSE_FAILED",
-    ["inspect", "--type", "container", "--format", format, context.service],
-  );
-  return {
-    head: atStage("CHECKOUT_READ_FAILED", () =>
-      run("/usr/bin/git", ["rev-parse", "HEAD"]),
-    ),
-    container,
-    image: readJson("DOCKER_IMAGE_READ_FAILED", "DOCKER_IMAGE_PARSE_FAILED", [
-      "image",
+  return atInspection(origin, () => {
+    const docker = (args: string[]) =>
+      run("/usr/bin/docker", [
+        "--host",
+        "unix:///var/run/docker.sock",
+        ...args,
+      ]);
+    const readJson = (
+      operation: "CONTAINER" | "IMAGE" | "NETWORK",
+      parse: DiagnosticCode,
+      args: string[],
+    ) => {
+      let text: string;
+      try {
+        text = docker(args);
+      } catch (error) {
+        throw dockerCommandFailure(operation, error);
+      }
+      return atStage(parse, () => JSON.parse(text));
+    };
+    const format = containerFormat
+      .replace("HOST_FIELDS", hostFormat)
+      .replace("STATE_FIELDS", stateFormat);
+    const container = readJson("CONTAINER", "DOCKER_CONTAINER_PARSE_FAILED", [
       "inspect",
+      "--type",
+      "container",
       "--format",
-      '{"id":{{json .Id}},"digests":{{json .RepoDigests}},"os":{{json .Os}},"arch":{{json .Architecture}}}',
-      CI_IMAGE,
-    ]),
-    network: readJson(
-      "DOCKER_NETWORK_READ_FAILED",
-      "DOCKER_NETWORK_PARSE_FAILED",
-      [
+      format,
+      context.service,
+    ]);
+    return {
+      head: atStage("CHECKOUT_READ_FAILED", () =>
+        run("/usr/bin/git", ["rev-parse", "HEAD"]),
+      ),
+      container,
+      image: readJson("IMAGE", "DOCKER_IMAGE_PARSE_FAILED", [
+        "image",
+        "inspect",
+        "--format",
+        '{"id":{{json .Id}},"digests":{{json .RepoDigests}},"os":{{json .Os}},"arch":{{json .Architecture}}}',
+        CI_IMAGE,
+      ]),
+      network: readJson("NETWORK", "DOCKER_NETWORK_PARSE_FAILED", [
         "network",
         "inspect",
         "--format",
         '{"id":{{json .Id}},"name":{{json .Name}},"driver":{{json .Driver}},"scope":{{json .Scope}},"internal":{{json .Internal}},"ipam":{{json .IPAM.Config}},"containers":{{json .Containers}}}',
         context.network,
-      ],
-    ),
-  };
+      ]),
+    };
+  });
 }
-export const collectCiEvidence: Inspect = (context) =>
-  inspectCiMetadata(context, (file, args) =>
-    execFileSync(file, args, {
-      encoding: "utf8",
-      timeout: 5000,
-      maxBuffer: 256 * 1024,
-      stdio: ["ignore", "pipe", "pipe"],
-    }).trim(),
+export const collectCiEvidence: Inspect = (context, origin) =>
+  inspectCiMetadata(
+    context,
+    (file, args) =>
+      execFileSync(file, args, {
+        encoding: "utf8",
+        timeout: 5000,
+        maxBuffer: 256 * 1024,
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim(),
+    origin,
   );
 
 export function verifyCiEvidence(
@@ -318,14 +343,22 @@ export function verifyCiEvidence(
 
 const registrations = new WeakMap<
   DisposableTarget,
-  { context: CiContext; identity: CiIdentity; inspect: Inspect }
+  {
+    context: CiContext;
+    identity: CiIdentity;
+    inspect: Inspect;
+    origin: InspectionOrigin;
+  }
 >();
 export function ciDisposableTarget(
   env: Env,
   inspect: Inspect = collectCiEvidence,
+  origin: InspectionOrigin = "INITIAL",
 ): DisposableTarget {
   const context = atStage("CONTEXT_REJECTED", () => ciContext(env));
-  const evidence = atStage("DOCKER_METADATA_FAILED", () => inspect(context));
+  const evidence = atStage("DOCKER_METADATA_FAILED", () =>
+    inspect(context, origin),
+  );
   const identity = atStage("METADATA_REJECTED", () =>
     verifyCiEvidence(context, evidence),
   );
@@ -342,18 +375,25 @@ export function ciDisposableTarget(
   });
   Object.freeze(target.pool);
   Object.freeze(target);
-  registrations.set(target, { context, identity, inspect });
+  registrations.set(target, { context, identity, inspect, origin });
   return target;
 }
 export function isCiTarget(target: DisposableTarget) {
   return registrations.has(target);
 }
-function identityFor(target: DisposableTarget) {
+function identityFor(target: DisposableTarget, bootstrap: boolean) {
   return atStage("SERVICE_RECHECK_FAILED", () => {
     const registration = registrations.get(target);
     check(registration);
     const { context, identity, inspect } = registration;
-    const evidence = atStage("DOCKER_METADATA_FAILED", () => inspect(context));
+    const origin = bootstrap
+      ? "BOOTSTRAP_RECHECK"
+      : registration.origin === "PRE_DDL"
+        ? "PRE_DDL"
+        : "RECHECK";
+    const evidence = atStage("DOCKER_METADATA_FAILED", () =>
+      inspect(context, origin),
+    );
     check(
       JSON.stringify(
         atStage("METADATA_REJECTED", () => verifyCiEvidence(context, evidence)),
@@ -368,7 +408,7 @@ export async function verifyCiDatabase(
   target: DisposableTarget,
   bootstrap = false,
 ): Promise<void> {
-  const identity = identityFor(target);
+  const identity = identityFor(target, bootstrap);
   const { rows } =
     await pool.query(`SELECT current_database() AS database, current_user AS username,
     inet_server_addr()::text AS address, inet_server_port() AS port,
