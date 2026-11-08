@@ -5,7 +5,7 @@ import { Pool } from "pg";
 import {
   nativeDisposableTarget,
   verifyNativeDisposable,
-} from "../tests/helpers/nativePostgresSafety";
+} from "../tests/helpers/nativePostgresTarget";
 
 async function main() {
   const target = nativeDisposableTarget(process.env);

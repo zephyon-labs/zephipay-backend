@@ -17,7 +17,7 @@ import {
   REVOCATION,
   SyntheticAuthentication,
 } from "./helpers/nativeSessionHarness";
-import { nativeDisposableTarget, verifyNativeDisposable } from "./helpers/nativePostgresSafety";
+import { nativeDisposableTarget, verifyNativeDisposable } from "./helpers/nativePostgresTarget";
 import { waitForPostgresPast } from "./helpers/postgresClock";
 
 const target = nativeDisposableTarget(process.env);

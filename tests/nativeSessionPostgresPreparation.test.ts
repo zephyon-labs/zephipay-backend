@@ -9,7 +9,7 @@ import ts from "typescript";
 import {
   nativeDisposableTarget,
   verifyNativeDisposable,
-} from "./helpers/nativePostgresSafety";
+} from "./helpers/nativePostgresTarget";
 
 const designation = {
   NATIVE_SESSION_TEST_DATABASE: "zephipay_native_session_test_0123456789abcdef",
@@ -196,7 +196,7 @@ async function preparation(controls: Controls = {}) {
     pg: { Pool: FakePool },
     "node:crypto": { createHash },
     "node:fs/promises": fs,
-    "../tests/helpers/nativePostgresSafety": {
+    "../tests/helpers/nativePostgresTarget": {
       nativeDisposableTarget,
       verifyNativeDisposable,
     },

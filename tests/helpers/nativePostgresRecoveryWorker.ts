@@ -4,7 +4,7 @@ import { NativeSessionCore } from "../../src/nativeSession/core";
 import { NativeCredentialPolicy } from "../../src/nativeSession/policy";
 import { PostgresNativeSessionPersistence } from "../../src/nativeSession/postgresPersistence";
 import { ACCESS, CLIENT, SyntheticAuthentication } from "./nativeSessionHarness";
-import { nativeDisposableTarget, verifyNativeDisposable } from "./nativePostgresSafety";
+import { nativeDisposableTarget, verifyNativeDisposable } from "./nativePostgresTarget";
 
 async function main() {
   const target = nativeDisposableTarget(process.env),
