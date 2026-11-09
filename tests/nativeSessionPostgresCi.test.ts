@@ -15,6 +15,7 @@ import {
   ciDisposableTarget,
   verifyCiEvidence,
   verifyCiDisposable,
+  verifyCiDatabase,
   inspectCiMetadata,
 } from "./helpers/nativePostgresCiSafety";
 import {
@@ -463,6 +464,7 @@ function harness(
   fault = "",
   thrown: unknown = new Error("injected"),
   failCleanup = false,
+  controls: { identityResult?: unknown } = {},
 ) {
   const calls: string[] = [],
     children: { args: string[]; env: Record<string, string | undefined> }[] =
@@ -487,18 +489,22 @@ function harness(
         },
         query: (async (sql: string) => {
           calls.push(sql);
-          if (sql.includes("current_database()"))
+          if (sql.includes("current_database()")) {
+            if (fault === "identity-query") throw thrown;
+            if (Object.hasOwn(controls, "identityResult"))
+              return controls.identityResult;
             return {
               rows: [
                 {
                   ...identity,
                   database: "postgres",
                   username: CI_ADMIN,
-                  marker: null,
+                  marker: administrativeComment,
                   version: fault === "version" ? NaN : 160015,
                 },
               ],
             };
+          }
           if (sql.includes("FROM pg_class"))
             return { rows: [{ count: fault === "occupied" ? "1" : "0" }] };
           if (sql.includes("SELECT datname"))
@@ -798,7 +804,7 @@ for (const [fault, code] of [
   ["inspect", "DOCKER_METADATA_FAILED"],
   ["metadata", "METADATA_REJECTED"],
   ["connect", "BOOTSTRAP_CONNECT_FAILED"],
-  ["version", "BOOTSTRAP_IDENTITY_FAILED"],
+  ["version", "BOOTSTRAP_IDENTITY_RESULT_REJECTED"],
   ["occupied", "BOOTSTRAP_EMPTY_REJECTED"],
   ["database", "BOOTSTRAP_INVENTORY_FAILED"],
   ["CREATE ROLE", "BOOTSTRAP_ROLE_CREATE_FAILED"],
@@ -1548,4 +1554,225 @@ test("subprocess classification never replaces an already owned primary failure"
         return true;
       },
     );
+});
+
+const administrativeComment = "default administrative connection database";
+function bootstrapIdentity(marker: unknown = administrativeComment) {
+  return { ...identity, database: "postgres", username: CI_ADMIN, marker };
+}
+test("bootstrap identity accepts the PostgreSQL 16.15 administrative comment", async () => {
+  const target = ciDisposableTarget(designation, evidence);
+  const fake = fakePool([bootstrapIdentity()]);
+  await assert.doesNotReject(verifyCiDatabase(fake.pool, target, true));
+  assert.equal(fake.queries.length, 1);
+});
+
+const rejectedComments: [string, unknown][] = [
+  ["undefined", undefined],
+  ["null", null],
+  ["empty", ""],
+  ["arbitrary", "unreviewed comment"],
+  ["trailing whitespace", administrativeComment + " "],
+  ["different case", administrativeComment.toUpperCase()],
+  ["fixture marker", identity.marker],
+  ["array", [administrativeComment]],
+  ["boxed string", new String(administrativeComment)],
+];
+for (const [name, marker] of rejectedComments)
+  test(`bootstrap rejects ${name} comment before fixture DDL or child execution`, async () => {
+    // Explicit undefined must not be replaced by a convenience default.
+    const row = { ...bootstrapIdentity(), marker };
+    const h = harness("", hostileError(), false, {
+      identityResult: { rows: [row] },
+    });
+    assert.deepEqual(await exitFor(h), {
+      code: 1,
+      out: "",
+      error: "NATIVE_PG_FAILURE BOOTSTRAP_IDENTITY_RESULT_REJECTED\n",
+    });
+    assert.equal(h.children.length, 0);
+    assert.equal(h.calls.filter((s) => s === "end").length, 1);
+    assert.equal(h.calls.filter((s) => s.startsWith("SELECT")).length, 1);
+    assert.ok(
+      !h.calls.some((s) => /^(CREATE|COMMENT|DROP|INSERT|UPDATE)/.test(s)),
+    );
+  });
+test("bootstrap rejects an absent comment field without fixture DDL", async () => {
+  const row: Record<string, unknown> = bootstrapIdentity();
+  delete row.marker;
+  const h = harness("", hostileError(), false, {
+    identityResult: { rows: [row] },
+  });
+  assert.equal(
+    (await exitFor(h)).error,
+    "NATIVE_PG_FAILURE BOOTSTRAP_IDENTITY_RESULT_REJECTED\n",
+  );
+  assert.equal(h.children.length, 0);
+  assert.ok(!h.calls.some((s) => /^(CREATE|COMMENT)/.test(s)));
+});
+test("normal driver accepts exact administrative comment and retains exact random fixture marker", async () => {
+  const h = harness();
+  const result = await exitFor(h);
+  assert.equal(result.code, 0);
+  assert.equal(result.error, "");
+  const comment = h.calls.find((sql) => sql.startsWith("COMMENT ON DATABASE"));
+  assert.equal(
+    comment,
+    `COMMENT ON DATABASE "${designation.NATIVE_SESSION_TEST_DATABASE}" IS '${identity.marker}'`,
+  );
+  assert.equal(h.children.length, 2);
+});
+test("fixture identity accepts only its exact generated marker after creation", async () => {
+  const target = ciDisposableTarget(designation, evidence);
+  await assert.doesNotReject(
+    verifyCiDatabase(fakePool([identity]).pool, target),
+  );
+  for (const marker of [
+    undefined,
+    null,
+    "",
+    administrativeComment,
+    identity.marker + " ",
+    identity.marker.replace("0123456789abcdef", "fedcba9876543210"),
+  ]) {
+    await assert.rejects(
+      verifyCiDatabase(fakePool([{ ...identity, marker }]).pool, target),
+      (error) => {
+        assert.equal(
+          renderFailure(error),
+          "NATIVE_PG_FAILURE FIXTURE_IDENTITY_RESULT_REJECTED\n",
+        );
+        return true;
+      },
+    );
+  }
+  const missing: Record<string, unknown> = { ...identity };
+  delete missing.marker;
+  await assert.rejects(verifyCiDatabase(fakePool([missing]).pool, target));
+});
+for (const bootstrap of [true, false]) {
+  const prefix = bootstrap ? "BOOTSTRAP" : "FIXTURE";
+  test(`${prefix} query rejection is distinct from identity result rejection and emits no exception data`, async () => {
+    const target = ciDisposableTarget(designation, evidence);
+    for (const mode of ["synchronous", "rejection", "thenable"]) {
+      const pool = {
+        query: () => {
+          if (mode === "synchronous") throw hostileError();
+          if (mode === "thenable") return Promise.resolve(hostileError());
+          return Promise.reject(new Error(hostileText));
+        },
+      } as unknown as Pick<Pool, "query">;
+      await assert.rejects(
+        verifyCiDatabase(pool, target, bootstrap),
+        (error) => {
+          const text = `NATIVE_PG_FAILURE ${prefix}_IDENTITY_QUERY_FAILED\n`;
+          assert.equal(renderFailure(error), text);
+          assert.equal(renderFailure(readFailureReport(text)), text);
+          return true;
+        },
+      );
+    }
+    const throwingResult = Object.defineProperty({}, "rows", {
+      get() {
+        throw hostileError();
+      },
+    });
+    const badRow = Object.defineProperty(
+      bootstrap ? bootstrapIdentity() : { ...identity },
+      "marker",
+      {
+        get() {
+          throw new Error(hostileText);
+        },
+      },
+    );
+    for (const result of [
+      undefined,
+      null,
+      {},
+      { rows: [] },
+      { rows: [null] },
+      { rows: [badRow, badRow] },
+      throwingResult,
+      { rows: [badRow] },
+      new Proxy(
+        {},
+        {
+          get(_target, key) {
+            // Promise resolution must succeed to test the returned-result boundary.
+            if (key === "then") return undefined;
+            throw hostileError();
+          },
+        },
+      ),
+    ]) {
+      const pool = { query: async () => result } as unknown as Pick<
+        Pool,
+        "query"
+      >;
+      await assert.rejects(
+        verifyCiDatabase(pool, target, bootstrap),
+        (error) => {
+          const text = `NATIVE_PG_FAILURE ${prefix}_IDENTITY_RESULT_REJECTED\n`;
+          assert.equal(renderFailure(error), text);
+          assert.equal(renderFailure(readFailureReport(text)), text);
+          return true;
+        },
+      );
+    }
+  });
+}
+for (const queryFailure of [true, false])
+  for (const cleanupFailure of [false, true])
+    test(`bootstrap ${queryFailure ? "query" : "result"} failure halts before DDL and preserves primary with cleanup=${cleanupFailure}`, async () => {
+      const h = harness(
+        queryFailure ? "identity-query" : "",
+        hostileError(),
+        cleanupFailure,
+        queryFailure
+          ? {}
+          : {
+              identityResult: {
+                rows: [{ ...bootstrapIdentity(), marker: null }],
+              },
+            },
+      );
+      const result = await exitFor(h);
+      const primary = queryFailure
+        ? "BOOTSTRAP_IDENTITY_QUERY_FAILED"
+        : "BOOTSTRAP_IDENTITY_RESULT_REJECTED";
+      assert.deepEqual(result, {
+        code: 1,
+        out: "",
+        error:
+          `NATIVE_PG_FAILURE ${primary}\n` +
+          (cleanupFailure
+            ? "NATIVE_PG_CLEANUP BOOTSTRAP_CLEANUP_FAILED\n"
+            : ""),
+      });
+      assert.equal(
+        renderFailure(readFailureReport(result.error)),
+        result.error,
+      );
+      assert.equal(h.children.length, 0);
+      assert.equal(h.calls.filter((s) => s === "end").length, 1);
+      assert.equal(h.calls.filter((s) => s.startsWith("SELECT")).length, 1);
+      assert.ok(
+        !h.calls.some((s) => /^(CREATE|COMMENT|DROP|INSERT|UPDATE)/.test(s)),
+      );
+    });
+test("Docker recheck rejection remains owned and prevents even the identity query", async () => {
+  const h = harness();
+  let inspections = 0;
+  h.driver.inspect = () => {
+    inspections++;
+    if (inspections === 2) throw failure("DOCKER_CONTAINER_TIMEOUT");
+    return evidence();
+  };
+  assert.equal(
+    (await exitFor(h)).error,
+    "NATIVE_PG_FAILURE DOCKER_CONTAINER_TIMEOUT\n",
+  );
+  assert.equal(h.children.length, 0);
+  assert.ok(!h.calls.some((s) => s.startsWith("SELECT")));
 });

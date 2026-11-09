@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { isIP } from "node:net";
 import {
   atStage,
+  atAsyncStage,
   atInspection,
   dockerCommandFailure,
   type DiagnosticCode,
@@ -409,30 +410,46 @@ export async function verifyCiDatabase(
   bootstrap = false,
 ): Promise<void> {
   const identity = identityFor(target, bootstrap);
-  const { rows } =
-    await pool.query(`SELECT current_database() AS database, current_user AS username,
+  const result = await atAsyncStage(
+    bootstrap
+      ? "BOOTSTRAP_IDENTITY_QUERY_FAILED"
+      : "FIXTURE_IDENTITY_QUERY_FAILED",
+    () =>
+      pool.query(`SELECT current_database() AS database, current_user AS username,
     inet_server_addr()::text AS address, inet_server_port() AS port,
     inet_client_addr()::text AS client_address, inet_client_port() AS client_port,
     current_setting('server_version_num')::integer AS version, pg_is_in_recovery() AS recovery,
-    shobj_description(oid,'pg_database') AS marker FROM pg_database WHERE datname=current_database()`);
-  check(rows.length === 1);
-  const r = object(rows[0]);
-  check(
-    r.database === (bootstrap ? "postgres" : target.database) &&
-      r.username === (bootstrap ? CI_ADMIN : "native_session_fixture") &&
-      r.address === identity.server &&
-      r.port === 5432 &&
-      r.client_address === identity.gateway &&
-      typeof r.client_port === "number" &&
-      Number.isInteger(r.client_port) &&
-      r.client_port > 0 &&
-      r.client_port <= 65535 &&
-      typeof r.version === "number" &&
-      Number.isFinite(r.version) &&
-      Number.isInteger(r.version) &&
-      r.version === 160015 &&
-      r.recovery === false &&
-      r.marker === (bootstrap ? null : target.marker),
+    shobj_description(oid,'pg_database') AS marker FROM pg_database WHERE datname=current_database()`),
+  );
+  atStage(
+    bootstrap
+      ? "BOOTSTRAP_IDENTITY_RESULT_REJECTED"
+      : "FIXTURE_IDENTITY_RESULT_REJECTED",
+    () => {
+      const { rows } = result;
+      check(rows.length === 1);
+      const r = object(rows[0]);
+      check(
+        r.database === (bootstrap ? "postgres" : target.database) &&
+          r.username === (bootstrap ? CI_ADMIN : "native_session_fixture") &&
+          r.address === identity.server &&
+          r.port === 5432 &&
+          r.client_address === identity.gateway &&
+          typeof r.client_port === "number" &&
+          Number.isInteger(r.client_port) &&
+          r.client_port > 0 &&
+          r.client_port <= 65535 &&
+          typeof r.version === "number" &&
+          Number.isFinite(r.version) &&
+          Number.isInteger(r.version) &&
+          r.version === 160015 &&
+          r.recovery === false &&
+          r.marker ===
+            (bootstrap
+              ? "default administrative connection database"
+              : target.marker),
+      );
+    },
   );
 }
 export async function verifyCiEmpty(pool: Pick<Pool, "query">): Promise<void> {
