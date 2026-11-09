@@ -1,3 +1,4 @@
+import { postgresAddressProjectionFixture } from "./helpers/postgresAddressProjectionFixture";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -161,7 +162,9 @@ function fakePool(rows: Record<string, unknown>[], count: unknown = "0") {
       query: async (sql: string) => {
         queries.push(sql);
         return {
-          rows: sql.includes("current_database()") ? rows : [{ count }],
+          rows: sql.includes("current_database()")
+            ? rows.map((row) => postgresAddressProjectionFixture(sql, row))
+            : [{ count }],
         };
       },
     } as unknown as Pick<Pool, "query">,
@@ -436,7 +439,9 @@ for (const count of [undefined, null, 0, "1", "NaN"])
     // Pass undefined explicitly without fakePool's convenience default.
     const fake = {
       query: async (sql: string) => ({
-        rows: sql.includes("current_database()") ? [identity] : [{ count }],
+        rows: sql.includes("current_database()")
+          ? [postgresAddressProjectionFixture(sql, identity)]
+          : [{ count }],
       }),
     } as unknown as Pick<Pool, "query">;
     await assert.rejects(
@@ -495,13 +500,13 @@ function harness(
               return controls.identityResult;
             return {
               rows: [
-                {
+                postgresAddressProjectionFixture(sql, {
                   ...identity,
                   database: "postgres",
                   username: CI_ADMIN,
                   marker: administrativeComment,
                   version: fault === "version" ? NaN : 160015,
-                },
+                }),
               ],
             };
           }
@@ -804,7 +809,7 @@ for (const [fault, code] of [
   ["inspect", "DOCKER_METADATA_FAILED"],
   ["metadata", "METADATA_REJECTED"],
   ["connect", "BOOTSTRAP_CONNECT_FAILED"],
-  ["version", "BOOTSTRAP_IDENTITY_RESULT_REJECTED"],
+  ["version", "BOOTSTRAP_IDENTITY_VERSION_REJECTED"],
   ["occupied", "BOOTSTRAP_EMPTY_REJECTED"],
   ["database", "BOOTSTRAP_INVENTORY_FAILED"],
   ["CREATE ROLE", "BOOTSTRAP_ROLE_CREATE_FAILED"],
@@ -1588,7 +1593,7 @@ for (const [name, marker] of rejectedComments)
     assert.deepEqual(await exitFor(h), {
       code: 1,
       out: "",
-      error: "NATIVE_PG_FAILURE BOOTSTRAP_IDENTITY_RESULT_REJECTED\n",
+      error: "NATIVE_PG_FAILURE BOOTSTRAP_IDENTITY_MARKER_REJECTED\n",
     });
     assert.equal(h.children.length, 0);
     assert.equal(h.calls.filter((s) => s === "end").length, 1);
@@ -1605,7 +1610,7 @@ test("bootstrap rejects an absent comment field without fixture DDL", async () =
   });
   assert.equal(
     (await exitFor(h)).error,
-    "NATIVE_PG_FAILURE BOOTSTRAP_IDENTITY_RESULT_REJECTED\n",
+    "NATIVE_PG_FAILURE BOOTSTRAP_IDENTITY_MARKER_REJECTED\n",
   );
   assert.equal(h.children.length, 0);
   assert.ok(!h.calls.some((s) => /^(CREATE|COMMENT)/.test(s)));
@@ -1686,6 +1691,7 @@ for (const bootstrap of [true, false]) {
         },
       },
     );
+    const badRowResult = { rows: [badRow] };
     for (const result of [
       undefined,
       null,
@@ -1694,7 +1700,7 @@ for (const bootstrap of [true, false]) {
       { rows: [null] },
       { rows: [badRow, badRow] },
       throwingResult,
-      { rows: [badRow] },
+      badRowResult,
       new Proxy(
         {},
         {
@@ -1713,7 +1719,10 @@ for (const bootstrap of [true, false]) {
       await assert.rejects(
         verifyCiDatabase(pool, target, bootstrap),
         (error) => {
-          const text = `NATIVE_PG_FAILURE ${prefix}_IDENTITY_RESULT_REJECTED\n`;
+          const text =
+            bootstrap && result === badRowResult
+              ? "NATIVE_PG_FAILURE BOOTSTRAP_IDENTITY_MARKER_REJECTED\n"
+              : `NATIVE_PG_FAILURE ${prefix}_IDENTITY_RESULT_REJECTED\n`;
           assert.equal(renderFailure(error), text);
           assert.equal(renderFailure(readFailureReport(text)), text);
           return true;
@@ -1740,7 +1749,7 @@ for (const queryFailure of [true, false])
       const result = await exitFor(h);
       const primary = queryFailure
         ? "BOOTSTRAP_IDENTITY_QUERY_FAILED"
-        : "BOOTSTRAP_IDENTITY_RESULT_REJECTED";
+        : "BOOTSTRAP_IDENTITY_MARKER_REJECTED";
       assert.deepEqual(result, {
         code: 1,
         out: "",
@@ -1775,4 +1784,195 @@ test("Docker recheck rejection remains owned and prevents even the identity quer
   );
   assert.equal(h.children.length, 0);
   assert.ok(!h.calls.some((s) => s.startsWith("SELECT")));
+});
+
+for (const bootstrap of [true, false])
+  test(`PostgreSQL 16 address projections permit exact CI ${bootstrap ? "bootstrap" : "fixture"} identity`, async () => {
+    const fake = fakePool([bootstrap ? bootstrapIdentity() : identity]);
+    await assert.doesNotReject(
+      verifyCiDatabase(
+        fake.pool,
+        ciDisposableTarget(designation, evidence),
+        bootstrap,
+      ),
+    );
+    assert.match(fake.queries[0], /host\(inet_server_addr\(\)\) AS address/);
+    assert.match(
+      fake.queries[0],
+      /host\(inet_client_addr\(\)\) AS client_address/,
+    );
+  });
+
+for (const [functionName, field, code] of [
+  ["inet_server_addr", "address", "BOOTSTRAP_IDENTITY_SERVER_ADDRESS_REJECTED"],
+  [
+    "inet_client_addr",
+    "client_address",
+    "BOOTSTRAP_IDENTITY_CLIENT_ADDRESS_REJECTED",
+  ],
+] as const) {
+  test(`legacy ${functionName} text projection models the documented netmask and is rejected`, async () => {
+    let projected: Record<string, unknown> | undefined;
+    const pool = {
+      query: async (sql: string) => {
+        projected = postgresAddressProjectionFixture(
+          sql.replace(`host(${functionName}())`, `${functionName}()::text`),
+          bootstrapIdentity(),
+        );
+        return { rows: [projected] };
+      },
+    } as unknown as Pick<Pool, "query">;
+    await assert.rejects(
+      verifyCiDatabase(pool, ciDisposableTarget(designation, evidence), true),
+      (error) => {
+        assert.equal(renderFailure(error), `NATIVE_PG_FAILURE ${code}\n`);
+        return true;
+      },
+    );
+    assert.equal(projected?.[field], `${identity[field]}/32`);
+  });
+
+  test(`${field} rejects missing, malformed, masked and unexpected endpoints before DDL or children`, async () => {
+    const absent = Symbol("absent");
+    for (const value of [
+      absent,
+      undefined,
+      null,
+      "",
+      "not-an-address",
+      0,
+      [],
+      {},
+      "127.0.0.1",
+      "172.20.0.2",
+      "172.20.0.99",
+      "172.21.0.3",
+      field === "address" ? identity.client_address : identity.address,
+      `${identity[field]}/32`,
+      `${identity[field]}/16`,
+      `${identity[field]} `,
+      "::1",
+      "::ffff:172.20.0.3",
+      new String(identity[field]),
+      hostileText,
+    ]) {
+      const row: Record<string, unknown> = {
+        ...bootstrapIdentity(),
+        [field]: value,
+      };
+      if (value === absent) delete row[field];
+      const h = harness("", hostileError(), false, {
+        identityResult: { rows: [row] },
+      });
+      assert.deepEqual(await exitFor(h), {
+        code: 1,
+        out: "",
+        error: `NATIVE_PG_FAILURE ${code}\n`,
+      });
+      assert.equal(h.children.length, 0);
+      assert.equal(h.calls.filter((s) => s.startsWith("SELECT")).length, 1);
+      assert.ok(
+        !h.calls.some((s) =>
+          /^(CREATE|COMMENT|SET|INSERT|UPDATE|DROP)/.test(s),
+        ),
+      );
+
+      const fake = fakePool([
+        {
+          ...row,
+          database: identity.database,
+          username: identity.username,
+          marker: identity.marker,
+        },
+      ]);
+      await assert.rejects(
+        verifyCiDisposable(
+          fake.pool,
+          ciDisposableTarget(designation, evidence),
+          true,
+        ),
+      );
+      assert.equal(
+        fake.queries.length,
+        1,
+        "fixture address rejection precedes empty-target query and schema DDL",
+      );
+    }
+  });
+
+  test(`${field} diagnostics suppress hostile accessors and preserve primary through failed cleanup`, async () => {
+    const row = Object.defineProperty(bootstrapIdentity(), field, {
+      get() {
+        throw hostileError();
+      },
+    });
+    const h = harness("", hostileError(), true, {
+      identityResult: { rows: [row] },
+    });
+    const result = await exitFor(h);
+    assert.deepEqual(result, {
+      code: 1,
+      out: "",
+      error: `NATIVE_PG_FAILURE ${code}\nNATIVE_PG_CLEANUP BOOTSTRAP_CLEANUP_FAILED\n`,
+    });
+    assert.equal(renderFailure(readFailureReport(result.error)), result.error);
+    assert.equal(h.children.length, 0);
+    assert.ok(!h.calls.some((s) => /^(CREATE|COMMENT)/.test(s)));
+  });
+}
+
+const orderedIdentityFailures = [
+  ["database", "wrong", "BOOTSTRAP_IDENTITY_DATABASE_REJECTED"],
+  ["username", "wrong", "BOOTSTRAP_IDENTITY_USER_REJECTED"],
+  ["address", "172.20.0.99", "BOOTSTRAP_IDENTITY_SERVER_ADDRESS_REJECTED"],
+  ["port", 55432, "BOOTSTRAP_IDENTITY_SERVER_PORT_REJECTED"],
+  [
+    "client_address",
+    "172.20.0.99",
+    "BOOTSTRAP_IDENTITY_CLIENT_ADDRESS_REJECTED",
+  ],
+  ["client_port", 0, "BOOTSTRAP_IDENTITY_CLIENT_PORT_REJECTED"],
+  ["version", 160014, "BOOTSTRAP_IDENTITY_VERSION_REJECTED"],
+  ["recovery", true, "BOOTSTRAP_IDENTITY_RECOVERY_REJECTED"],
+  ["marker", null, "BOOTSTRAP_IDENTITY_MARKER_REJECTED"],
+] as const;
+for (const [index, [field, value, code]] of orderedIdentityFailures.entries())
+  test(`ordered bootstrap predicate reports ${field} before any later field is accessed`, async () => {
+    const row: Record<string, unknown> = {
+      ...bootstrapIdentity(),
+      [field]: value,
+    };
+    for (const [laterField] of orderedIdentityFailures.slice(index + 1))
+      Object.defineProperty(row, laterField, {
+        get() {
+          assert.fail("later predicate accessed");
+        },
+      });
+    const h = harness("", hostileError(), false, {
+      identityResult: { rows: [row] },
+    });
+    assert.deepEqual(await exitFor(h), {
+      code: 1,
+      out: "",
+      error: `NATIVE_PG_FAILURE ${code}\n`,
+    });
+    assert.equal(h.children.length, 0);
+    assert.ok(!h.calls.some((s) => /^(CREATE|COMMENT)/.test(s)));
+  });
+
+test("predicate diagnostics preserve an already owned failure without trusting exception codes", async () => {
+  const owned = failure("BOOTSTRAP_IDENTITY_QUERY_FAILED");
+  const row = Object.defineProperty(bootstrapIdentity(), "address", {
+    get() {
+      throw owned;
+    },
+  });
+  const h = harness("", hostileError(), true, {
+    identityResult: { rows: [row] },
+  });
+  assert.equal(
+    (await exitFor(h)).error,
+    "NATIVE_PG_FAILURE BOOTSTRAP_IDENTITY_QUERY_FAILED\nNATIVE_PG_CLEANUP BOOTSTRAP_CLEANUP_FAILED\n",
+  );
+  assert.equal(h.children.length, 0);
 });

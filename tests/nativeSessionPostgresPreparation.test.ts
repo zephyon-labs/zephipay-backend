@@ -1,3 +1,4 @@
+import { postgresAddressProjectionFixture } from "./helpers/postgresAddressProjectionFixture";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
@@ -31,6 +32,7 @@ const identity = {
 const migrationFile = "migrations/002_identity_foundation.sql";
 const candidateFile = "sql/candidates/native-session-postgres-v1.sql";
 type Controls = {
+  identityRow?: Record<string, unknown>;
   version?: unknown;
   inspectionFailure?: "target" | "verification";
   ignoreBegin?: boolean;
@@ -107,7 +109,14 @@ async function preparation(controls: Controls = {}) {
         return { command, rows: [] };
       }
       if (sql.includes("pg_is_in_recovery()"))
-        return { rows: [{ ...identity, version }] };
+        return {
+          rows: [
+            postgresAddressProjectionFixture(
+              sql,
+              controls.identityRow ?? { ...identity, version },
+            ),
+          ],
+        };
       if (sql.includes("FROM pg_class"))
         return { rows: [{ count: controls.count ?? "0" }] };
       if (sql.startsWith("SET LOCAL search_path")) {
@@ -360,9 +369,13 @@ for (const [name, version] of invalidVersions) {
   test(`disposable safety rejects ${name} version before even checking emptiness`, async () => {
     let calls = 0;
     const pool = {
-      query: async () => {
+      query: async (sql: string) => {
         calls++;
-        return { rows: [{ ...identity, version }] };
+        return {
+          rows: [
+            postgresAddressProjectionFixture(sql, { ...identity, version }),
+          ],
+        };
       },
     } as unknown as Pick<Pool, "query">;
     await assert.rejects(
@@ -520,3 +533,66 @@ for (const inspectionFailure of ["target", "verification"] as const)
       assert.equal(r.ended, true);
     }
   });
+
+test("PostgreSQL 16 address projections permit exact local identity", async () => {
+  const queries: string[] = [];
+  const pool = {
+    query: async (sql: string) => {
+      queries.push(sql);
+      return { rows: [postgresAddressProjectionFixture(sql, identity)] };
+    },
+  } as unknown as Pick<Pool, "query">;
+  await assert.doesNotReject(verifyNativeDisposable(pool, target, false));
+  assert.match(queries[0], /host\(inet_server_addr\(\)\) AS address/);
+});
+
+test("local legacy inet text projection returns a netmask and remains rejected", async () => {
+  let address: unknown;
+  const pool = {
+    query: async (sql: string) => {
+      const row = postgresAddressProjectionFixture(
+        sql.replace("host(inet_server_addr())", "inet_server_addr()::text"),
+        identity,
+      );
+      address = row.address;
+      return { rows: [row] };
+    },
+  } as unknown as Pick<Pool, "query">;
+  await assert.rejects(verifyNativeDisposable(pool, target, false));
+  assert.equal(address, "127.0.0.1/32");
+});
+
+test("actual preparation rejects missing, malformed and non-loopback addresses before schema DDL", async () => {
+  const absent = Symbol("absent");
+  for (const address of [
+    absent,
+    undefined,
+    null,
+    "",
+    "malformed",
+    0,
+    [],
+    {},
+    "127.0.0.1/32",
+    "127.0.0.1 ",
+    "127.0.0.2",
+    "172.20.0.3",
+    "::1",
+    "::ffff:127.0.0.1",
+  ]) {
+    const row: Record<string, unknown> = { ...identity, address };
+    if (address === absent) delete row.address;
+    const r = await preparation({ identityRow: row });
+    assert.equal(r.process.exitCode, 1);
+    assert.equal(r.process.stdout.text, "");
+    assert.equal(
+      r.process.stderr.text,
+      "NATIVE_PG_FAILURE PREPARE_IDENTITY_FAILED\n",
+    );
+    assert.ok(!r.queries.some((q) => /^(CREATE|INSERT|SET LOCAL)/.test(q.sql)));
+    assert.equal(r.committed, 0);
+    assert.equal(r.queries.at(-1)?.sql, "ROLLBACK");
+    assert.deepEqual(r.releases, [true]);
+    assert.equal(r.ended, true);
+  }
+});

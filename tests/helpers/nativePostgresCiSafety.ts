@@ -6,6 +6,7 @@ import {
   atAsyncStage,
   atInspection,
   dockerCommandFailure,
+  failure,
   type DiagnosticCode,
   type InspectionOrigin,
 } from "./nativePostgresDiagnostics";
@@ -416,41 +417,57 @@ export async function verifyCiDatabase(
       : "FIXTURE_IDENTITY_QUERY_FAILED",
     () =>
       pool.query(`SELECT current_database() AS database, current_user AS username,
-    inet_server_addr()::text AS address, inet_server_port() AS port,
-    inet_client_addr()::text AS client_address, inet_client_port() AS client_port,
+    host(inet_server_addr()) AS address, inet_server_port() AS port,
+    host(inet_client_addr()) AS client_address, inet_client_port() AS client_port,
     current_setting('server_version_num')::integer AS version, pg_is_in_recovery() AS recovery,
     shobj_description(oid,'pg_database') AS marker FROM pg_database WHERE datname=current_database()`),
   );
-  atStage(
-    bootstrap
-      ? "BOOTSTRAP_IDENTITY_RESULT_REJECTED"
-      : "FIXTURE_IDENTITY_RESULT_REJECTED",
-    () => {
-      const { rows } = result;
-      check(rows.length === 1);
-      const r = object(rows[0]);
-      check(
-        r.database === (bootstrap ? "postgres" : target.database) &&
-          r.username === (bootstrap ? CI_ADMIN : "native_session_fixture") &&
-          r.address === identity.server &&
-          r.port === 5432 &&
-          r.client_address === identity.gateway &&
-          typeof r.client_port === "number" &&
-          Number.isInteger(r.client_port) &&
-          r.client_port > 0 &&
-          r.client_port <= 65535 &&
-          typeof r.version === "number" &&
-          Number.isFinite(r.version) &&
-          Number.isInteger(r.version) &&
-          r.version === 160015 &&
-          r.recovery === false &&
-          r.marker ===
-            (bootstrap
-              ? "default administrative connection database"
-              : target.marker),
-      );
-    },
-  );
+  let stage: DiagnosticCode = "BOOTSTRAP_IDENTITY_RESULT_REJECTED";
+  try {
+    const { rows } = result;
+    check(rows.length === 1);
+    const r = object(rows[0]);
+    // Preserve the original short-circuit order and exact predicates. Codes only,
+    // never the observed values; the existing helper preserves an owned failure.
+    stage = "BOOTSTRAP_IDENTITY_DATABASE_REJECTED";
+    check(r.database === (bootstrap ? "postgres" : target.database));
+    stage = "BOOTSTRAP_IDENTITY_USER_REJECTED";
+    check(r.username === (bootstrap ? CI_ADMIN : "native_session_fixture"));
+    stage = "BOOTSTRAP_IDENTITY_SERVER_ADDRESS_REJECTED";
+    check(r.address === identity.server);
+    stage = "BOOTSTRAP_IDENTITY_SERVER_PORT_REJECTED";
+    check(r.port === 5432);
+    stage = "BOOTSTRAP_IDENTITY_CLIENT_ADDRESS_REJECTED";
+    check(r.client_address === identity.gateway);
+    stage = "BOOTSTRAP_IDENTITY_CLIENT_PORT_REJECTED";
+    check(
+      typeof r.client_port === "number" &&
+        Number.isInteger(r.client_port) &&
+        r.client_port > 0 &&
+        r.client_port <= 65535,
+    );
+    stage = "BOOTSTRAP_IDENTITY_VERSION_REJECTED";
+    check(
+      typeof r.version === "number" &&
+        Number.isFinite(r.version) &&
+        Number.isInteger(r.version) &&
+        r.version === 160015,
+    );
+    stage = "BOOTSTRAP_IDENTITY_RECOVERY_REJECTED";
+    check(r.recovery === false);
+    stage = "BOOTSTRAP_IDENTITY_MARKER_REJECTED";
+    check(
+      r.marker ===
+        (bootstrap
+          ? "default administrative connection database"
+          : target.marker),
+    );
+  } catch (error) {
+    throw failure(
+      bootstrap ? stage : "FIXTURE_IDENTITY_RESULT_REJECTED",
+      error,
+    );
+  }
 }
 export async function verifyCiEmpty(pool: Pick<Pool, "query">): Promise<void> {
   const { rows } = await pool.query(`SELECT

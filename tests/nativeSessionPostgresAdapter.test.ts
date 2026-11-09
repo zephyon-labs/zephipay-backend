@@ -1,3 +1,4 @@
+import { postgresAddressProjectionFixture } from "./helpers/postgresAddressProjectionFixture";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Pool, PoolClient } from "pg";
@@ -392,7 +393,11 @@ test("database identity and empty-target checks fail closed before mutation", as
     const pool = {
       query: async (sql: string) => {
         calls.push(sql);
-        return { rows: [{ ...safe, ...changes }] };
+        return {
+          rows: [
+            postgresAddressProjectionFixture(sql, { ...safe, ...changes }),
+          ],
+        };
       },
     } as unknown as Pick<Pool, "query">;
     await assert.rejects(() => verifyNativeDisposable(pool, target, true));
@@ -401,7 +406,9 @@ test("database identity and empty-target checks fail closed before mutation", as
   }
   const occupied = {
     query: async (sql: string) => ({
-      rows: sql.includes("current_database()") ? [safe] : [{ count: "1" }],
+      rows: sql.includes("current_database()")
+        ? [postgresAddressProjectionFixture(sql, safe)]
+        : [{ count: "1" }],
     }),
   } as unknown as Pick<Pool, "query">;
   await assert.rejects(() => verifyNativeDisposable(occupied, target, true), /empty/);

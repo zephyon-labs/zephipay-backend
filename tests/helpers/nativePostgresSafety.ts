@@ -53,7 +53,7 @@ export async function verifyNativeDisposable(
 ): Promise<void> {
   const { rows } =
     await pool.query(`SELECT current_database() AS database, current_user AS username,
-    inet_server_addr()::text AS address, inet_server_port() AS port, current_setting('server_version_num')::integer AS version,
+    host(inet_server_addr()) AS address, inet_server_port() AS port, current_setting('server_version_num')::integer AS version,
     pg_is_in_recovery() AS recovery, shobj_description(oid,'pg_database') AS marker FROM pg_database WHERE datname=current_database()`);
   const r = rows[0];
   const version: unknown = r?.version;
