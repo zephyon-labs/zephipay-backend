@@ -625,6 +625,12 @@ test("driver rejects supplied target, missing execution context and malformed ra
 const reporter = require("../scripts/native-postgres-ci-reporter.cjs") as (
   source: AsyncIterable<unknown>,
 ) => AsyncIterable<string>;
+const caseNames: readonly string[] =
+  require("../scripts/native-postgres-ci-reporter.cjs").CASE_NAMES;
+const passingEvents = caseNames.map((name) => ({
+  type: "test:pass",
+  data: { name, nesting: 0, details: { type: "test" } },
+}));
 const summary = {
   type: "test:summary",
   data: {
@@ -652,7 +658,8 @@ async function report(events: unknown[]) {
   return output;
 }
 test("structured reporter requires a complete zero-skip manifest", async () => {
-  assert.match(await report([summary]), /16 passed/);
+  assert.match(await report([...passingEvents, summary]), /16 passed/);
+  await assert.rejects(report([summary]));
   for (const events of [
     [],
     [{ type: "test:stdout", data: { message: "16 passed" } }],
@@ -693,7 +700,7 @@ test("real Node reporter exits nonzero on a synthetic skipped case; no database 
   try {
     writeFileSync(
       file,
-      'const {test}=require("node:test"); for(let i=0;i<16;i++) test(`synthetic ${i}`,()=>{});',
+      `const {test}=require("node:test"); const names=${JSON.stringify(caseNames)}; for(let i=0;i<16;i++) test(names[i],()=>{});`,
     );
     assert.match(
       execFileSync(process.execPath, args, {
@@ -706,7 +713,7 @@ test("real Node reporter exits nonzero on a synthetic skipped case; no database 
     );
     writeFileSync(
       file,
-      'const {test}=require("node:test"); for(let i=0;i<16;i++) test(`synthetic ${i}`,{skip:i===0},()=>{});',
+      `const {test}=require("node:test"); const names=${JSON.stringify(caseNames)}; for(let i=0;i<16;i++) test(names[i],{skip:i===0},()=>{});`,
     );
     assert.throws(() =>
       execFileSync(process.execPath, args, {
@@ -1062,7 +1069,7 @@ test("actual child reporter channel keeps 16 mandatory and conceals hostile test
     ] as const) {
       writeFileSync(
         file,
-        `const {test}=require('node:test'); for(let i=0;i<${count};i++)test('synthetic '+i,${option},()=>{${body}});`,
+        `const {test}=require('node:test'); const names=${JSON.stringify(caseNames)}; for(let i=0;i<${count};i++)test(names[i],${option},()=>{${body}});`,
       );
       if (code === null)
         assert.doesNotThrow(() => executeCiChild(args, {}, "integrate"));
@@ -1070,7 +1077,11 @@ test("actual child reporter channel keeps 16 mandatory and conceals hostile test
         assert.throws(
           () => executeCiChild(args, {}, "integrate"),
           (error) => {
-            assert.equal(renderFailure(error), `NATIVE_PG_FAILURE ${code}\n`);
+            assert.ok(
+              renderFailure(error).startsWith(`NATIVE_PG_FAILURE ${code}\n`),
+            );
+            assert.ok(readFailureReport(renderFailure(error)));
+            assert.ok(!renderFailure(error).includes("SECRET_SENTINEL"));
             return true;
           },
         );

@@ -98,6 +98,8 @@ const codes = [
   "INTEGRATION_REPORT_MISSING",
   "INTEGRATION_REPORT_INVALID",
   "INTEGRATION_TEST_FAILED",
+  "INTEGRATION_HOOK_FAILED",
+  "INTEGRATION_FILE_FAILED",
   "INTEGRATION_TEST_SKIPPED",
   "INTEGRATION_INCOMPLETE",
   "INTEGRATION_SUMMARY_MISSING",
@@ -115,6 +117,7 @@ type Report = Readonly<{
   primary: DiagnosticCode;
   cleanup: readonly DiagnosticCode[];
   inspection?: InspectionOrigin;
+  integration?: string;
 }>;
 const reports = new WeakMap<object, Report>();
 function known(error: unknown): Report | undefined {
@@ -132,6 +135,7 @@ function make(
   primary: DiagnosticCode,
   cleanup: readonly DiagnosticCode[] = [],
   inspection?: InspectionOrigin,
+  integration?: string,
 ): Error {
   const error = new Error(safe(primary));
   reports.set(
@@ -141,6 +145,7 @@ function make(
       cleanup: Object.freeze([...cleanup]),
       inspection:
         inspection && origins.has(inspection) ? inspection : undefined,
+      integration,
     }),
   );
   return error;
@@ -148,7 +153,12 @@ function make(
 export function failure(code: DiagnosticCode, error?: unknown): Error {
   const report = known(error);
   return report
-    ? make(report.primary, report.cleanup, report.inspection)
+    ? make(
+        report.primary,
+        report.cleanup,
+        report.inspection,
+        report.integration,
+      )
     : make(code);
 }
 export function atStage<T>(code: DiagnosticCode, work: () => T): T {
@@ -196,6 +206,7 @@ export async function withCleanup<T>(
         report.primary,
         [...report.cleanup, cleanupCode],
         "inspection" in report ? report.inspection : undefined,
+        "integration" in report ? report.integration : undefined,
       );
     } else {
       failed = true;
@@ -215,11 +226,15 @@ export function renderFailure(error: unknown): string {
     ("inspection" in report && report.inspection
       ? `NATIVE_PG_INSPECTION ${report.inspection}\n`
       : "") +
+    ("integration" in report ? (report.integration ?? "") : "") +
     report.cleanup.map((code) => `NATIVE_PG_CLEANUP ${code}\n`).join("")
   );
 }
 export const PREPARATION_OK = "NATIVE_PG_STATUS PREPARATION_OK\n";
-export const INTEGRATION_OK = "NATIVE_PG_STATUS INTEGRATION_OK_16\n";
+export const INTEGRATION_OK =
+  "NATIVE_PG_STATUS INTEGRATION_OK_16\n" +
+  "NATIVE_PG_INTEGRATION NONE NONE COMPLETE 16 16 0 0 0 0\n" +
+  "NATIVE_PG_TOTALS SUCCESS 16 16 0 0 0 0 0\n";
 
 /** fd 3 is explicitly provisioned by the parent. Never parse stdout/stderr as reports. */
 export function sendChildReport(
@@ -242,7 +257,7 @@ export function sendChildReport(
 export function readFailureReport(text: string): Error | undefined {
   if (text.length > 4096 || !text.endsWith("\n")) return;
   const lines = text.slice(0, -1).split("\n");
-  if (lines.length < 1 || lines.length > 5) return;
+  if (lines.length < 1 || lines.length > 7) return;
   const primary = lines[0].slice("NATIVE_PG_FAILURE ".length);
   if (lines[0] !== `NATIVE_PG_FAILURE ${primary}` || !allowed.has(primary))
     return;
@@ -254,6 +269,66 @@ export function readFailureReport(text: string): Error | undefined {
     inspection = origin as InspectionOrigin;
     start++;
   }
+  let integration: string | undefined;
+  if (lines[start]?.startsWith("NATIVE_PG_INTEGRATION ")) {
+    // Six identified-case counts: executed, passed, failed, skipped, cancelled, TODO.
+    const detail =
+      /^NATIVE_PG_INTEGRATION (CASE_FAILURE|HOOK_FAILURE|FILE_FAILURE|REPORTING_FAILURE) (NONE|CASE_(?:0[1-9]|1[0-6])) (COMPLETE|PARTIAL) ((?:0|[1-9][0-9]?)(?: (?:0|[1-9][0-9]?)){5})$/.exec(
+        lines[start],
+      );
+    if (!detail) return;
+    const [, category, id, completeness, encoded] = detail;
+    const counts = encoded.split(" ").map(Number);
+    if (
+      counts.some((v) => v > 16) ||
+      counts[0] !== counts[1] + counts[2] ||
+      counts.slice(1).reduce((a, b) => a + b, 0) > 16
+    )
+      return;
+    const validCategory =
+      (category === "CASE_FAILURE" &&
+        id !== "NONE" &&
+        ((primary === "INTEGRATION_TEST_FAILED" && counts[2] + counts[4] > 0) ||
+          (primary === "INTEGRATION_TEST_SKIPPED" &&
+            counts[3] + counts[5] > 0))) ||
+      (category === "HOOK_FAILURE" &&
+        primary === "INTEGRATION_HOOK_FAILED" &&
+        (id === "NONE" || counts.slice(2).some((v) => v > 0))) ||
+      (category === "FILE_FAILURE" &&
+        id === "NONE" &&
+        primary === "INTEGRATION_FILE_FAILED") ||
+      (category === "REPORTING_FAILURE" &&
+        id === "NONE" &&
+        [
+          "INTEGRATION_REPORT_INVALID",
+          "INTEGRATION_INCOMPLETE",
+          "INTEGRATION_SUMMARY_MISSING",
+        ].includes(primary));
+    if (!validCategory || inspection) return;
+    if (
+      category === "REPORTING_FAILURE" &&
+      (completeness === "COMPLETE") !== (primary === "INTEGRATION_INCOMPLETE")
+    )
+      return;
+    integration = lines[start++] + "\n";
+    if (completeness === "COMPLETE") {
+      const summary =
+        /^NATIVE_PG_TOTALS (SUCCESS|FAILURE) ((?:0|[1-9][0-9]?)(?: (?:0|[1-9][0-9]?)){6})$/.exec(
+          lines[start] ?? "",
+        );
+      if (!summary) return;
+      const totals = summary[2].split(" ").map(Number);
+      if (
+        totals.some((v) => v > 32) ||
+        totals[6] !== 0 ||
+        totals[0] !== totals.slice(1, 6).reduce((a, b) => a + b, 0) ||
+        (summary[1] === "SUCCESS") !== (totals[2] === 0 && totals[4] === 0) ||
+        counts.slice(1).some((v, i) => v > totals[i + 1])
+      )
+        return;
+      integration += lines[start++] + "\n";
+    }
+  }
   if (lines.length - start > 3) return;
   const cleanup: DiagnosticCode[] = [];
   for (const line of lines.slice(start)) {
@@ -261,7 +336,7 @@ export function readFailureReport(text: string): Error | undefined {
     if (line !== `NATIVE_PG_CLEANUP ${code}` || !cleanupCodes.has(code)) return;
     cleanup.push(code as DiagnosticCode);
   }
-  return make(primary as DiagnosticCode, cleanup, inspection);
+  return make(primary as DiagnosticCode, cleanup, inspection, integration);
 }
 
 /** No getters, proxies, inherited fields, messages, stderr or string coercion. */
@@ -316,6 +391,7 @@ export function atInspection<T>(origin: InspectionOrigin, work: () => T): T {
       primary,
       report?.cleanup,
       report?.inspection ?? (inspectionCode(primary) ? origin : undefined),
+      report?.integration,
     );
   }
 }

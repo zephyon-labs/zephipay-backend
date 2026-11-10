@@ -182,3 +182,52 @@ All identity/security predicates and their evaluation order remain unchanged; on
 Remaining hosted gates include actual `host(inet)` results, the GitHub runner's effective Docker port publication and client-address/gateway relationship, and completion of native preparation and all 16 cases. Any mismatch still rejects. Effective data-directory/WAL placement and physical durability remain unverified. No SQL, database connection, Docker operation, hosted execution, remote Git operation or production action was performed for this correction.
 
 Local validation: **313/313 focused CI/preparation/adapter tests** and **1,071/1,071 Backend unit tests**, with zero failures, skips, cancellations or TODOs (**21 additional cases**). Lint, build, explicit strict script/test type checking and `git diff --check` passed. Seven changed/new files pass Prettier; the minimally updated adapter test retains exactly its 13 pre-existing formatting-difference hunks, with zero new formatting deviations. AST comparison verified every ordered identity predicate unchanged, the three SQL projection substitutions only, and unchanged provenance/empty-target functions. The local safety helper is otherwise byte-for-byte identical; diagnostics differ only by nine allowlisted codes. Production/core source, workflow, scripts, schema/migrations, dependencies, profile selector and native integration/recovery files remain unchanged from `4205a31`.
+
+## PR #15 native integration reporter correction — November 10, 2026
+
+The fifth run on `ae3d796` ([42611727052, attempt 1](https://github.com/zephyon-labs/zephipay-backend/actions/runs/42611727052)) passed 1,071 unit and 535 existing PostgreSQL tests. Reviewed sequential execution established that the fresh fixture and native schema preparation completed, but the reporter stopped at `INTEGRATION_TEST_FAILED` without exposing the case or totals. The underlying database/test failure remains **unidentified**. This local correction changes reporting only; it does not fix or claim acceptance of native integration.
+
+The fixed manifest is now checked by exact test name, nesting and uniqueness, in addition to the existing count requirement. The integration definitions are unchanged. No name or path is emitted; only these reviewed IDs can appear in diagnostic output:
+
+| Identifier | Existing exact test name                                                                                   |
+| ---------- | ---------------------------------------------------------------------------------------------------------- |
+| `CASE_01`  | real connections serialize duplicate completion/revocation and retain canonical effects                    |
+| `CASE_02`  | actual blocked concurrent transaction: complete obtains binding lock first                                 |
+| `CASE_03`  | actual blocked concurrent transaction: cancel obtains binding lock first                                   |
+| `CASE_04`  | actual blocked concurrent transaction: validate obtains binding lock first                                 |
+| `CASE_05`  | actual blocked concurrent transaction: revoke obtains binding lock first                                   |
+| `CASE_06`  | FOR UPDATE account lock conflicts with KEY SHARE before the canonical session is locked                    |
+| `CASE_07`  | canonical mutation and native transition roll back on a real database statement failure                    |
+| `CASE_08`  | terminal response waits for acknowledged COMMIT; injected response loss recovers committed revocation      |
+| `CASE_09`  | actual PostgreSQL-observed expiry persists and refreshed credentials do not renew it                       |
+| `CASE_10`  | controlled expiry-equality sample persists a real watermark and subsequent earlier database time is denied |
+| `CASE_11`  | connection termination rolls back a waiting transaction and yields unavailable authority                   |
+| `CASE_12`  | candidate schema rejects identity changes, unknown states, deletion and watermark reversal                 |
+| `CASE_13`  | malformed driver record after a real SELECT cannot change canonical identity                               |
+| `CASE_14`  | native mutations change the captured account-version predicate used for pending Web eligibility            |
+| `CASE_15`  | new application process recovers after a prior process exits following real commit                         |
+| `CASE_16`  | native account access creates no economic objects or capabilities                                          |
+
+The reporter consumes structured `test:pass` / `test:fail` events through the final process summary and end of stream. Per-file summaries are not final totals. The first observed failure is retained even if subsequent cases, hooks or reporting fail. Four finite categories distinguish `CASE_FAILURE`, `HOOK_FAILURE`, `FILE_FAILURE` and `REPORTING_FAILURE`. Hook recognition uses Node's own `ERR_TEST_FAILURE` / `hookFailed` fields; this identifies the hook category, not an unreported before-versus-after phase. File/startup recognition uses a failed file wrapper's internal name/file equality; neither string leaves the reporter. Unknown names, events, duplicate IDs, nested cases, malformed fields, proxies and accessor failures cannot create success.
+
+Local synthetic processes on **Node 22.20.0** independently exercised all 16 IDs, before/after and per-case hooks, startup failure, multiple failures, skip, TODO, cancellation and timeout. These probes confirmed that a failed after-hook can add a process-level failure beyond the 16 named cases, and that Node counts test timeouts as cancelled. The [Node 22.20 test-runner documentation](https://nodejs.org/download/release/v22.20.0/docs/api/test.html#class-testsstream) supplies the structured-event reference. The exact hosted Node 22.23.2 execution remains a separately authorized gate; no software was installed or hosted run performed.
+
+The existing dedicated fd-3 grammar now adds at most two bounded lines before any separate cleanup records:
+
+```text
+NATIVE_PG_FAILURE INTEGRATION_TEST_FAILED
+NATIVE_PG_INTEGRATION CASE_FAILURE CASE_03 COMPLETE 16 15 1 0 0 0
+NATIVE_PG_TOTALS FAILURE 16 15 1 0 0 0 0
+```
+
+The six identified-case numbers are **executed, passed, failed, skipped, cancelled, TODO**, each bounded by 16. Here `executed = passed + failed`: it counts recognized terminal pass/fail outcomes, including hook-caused failures, and excludes skip/cancel/TODO. It is **not proof that a test body was entered**. Zero observed counts do not establish that no work began. Process totals have **tests, passed, failed, skipped, cancelled, TODO, suites**, bounded by 32 and required to reconcile with all observed terminal events; suites must remain zero. Process totals can include a file or after-hook failure that has no case ID.
+
+`COMPLETE` means that a valid final process summary was reconciled and the event stream ended cleanly; it does not mean that all 16 cases ran or passed. A clean 15-case run remains a failure with complete totals. `PARTIAL` reports contain only observed identified-case counts and **no authoritative totals line**. Iterator interruption, duplicate/inconsistent summary, unknown event or malformed metadata forces partial reporting without replacing an earlier failure. A hard kill or timeout can prevent any report from being written; the parent then fails without inventing counts.
+
+Success requires every exact manifest member once, all 16 passed, no failure, skip, cancellation or TODO, reconciled final totals, and clean stream completion. The full three-line success record is compared exactly by the existing parent; the former bare success line is insufficient. The unchanged parent additionally requires child exit zero with no signal/execution error. A nonzero exit, timeout or output overflow cannot be accepted even after a success record. Legacy failure-only reports remain denials and grant no acceptance.
+
+The existing allowlisted parser retains its 4 KiB limit and at most three separate cleanup codes. It validates finite category/ID combinations, numeric bounds, arithmetic, completion/totals consistency and category/primary-code agreement. The existing owned-failure mechanism preserves the metadata through outer stages and cleanup; no new reporting framework or alternate transport is added. Unknown/raw exception text, assertion values, stacks, names, paths, database values, credentials, URLs and workflow commands are never emitted in fd 3 or the parent report. Child stdout/stderr remain captured and discarded; a reporter exception itself contains only a static code.
+
+No native core, adapter, schema, migration, authentication, economic authority, database safety predicate, privilege, workflow permission, test definition, job/child timeout or retry behavior changes. No database connection, SQL execution, Docker/WSL operation, remote Git action or hosted execution was performed. Effective data-directory/WAL placement and physical durability remain unverified. Matt/Nova review and Sol's focused verification precede any separately authorized hosted run.
+
+Local validation: **319/319** focused reporter/CI/preparation tests and **1,104/1,104** full unit tests passed, with zero failures, skips, cancellations or TODOs. The correction adds 33 tests, including real synthetic Node subprocesses without PostgreSQL. Lint, application build, strict TypeScript checking of the affected test/script graph, reporter syntax, changed-file formatting and diff checks passed. The original reporter returned only `INTEGRATION_TEST_FAILED` in a controlled two-failure reproduction; the corrected reporter retained `CASE_03` and reconciled 14 passes and two failures after draining the stream. Both child executions exited nonzero. This establishes the reporting correction locally, not the underlying hosted integration failure or hosted Node-version compatibility.
