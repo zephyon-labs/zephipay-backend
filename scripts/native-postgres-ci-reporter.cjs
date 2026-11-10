@@ -44,6 +44,8 @@ const benign = new Set([
 ]);
 const failureTypes = new Set([
   "testCodeFailure",
+  "uncaughtException",
+  "unhandledRejection",
   "hookFailed",
   "cancelledByParent",
   "testAborted",

@@ -98,11 +98,41 @@ function safe(text: string) {
   );
   assert.ok(text.length <= 4096);
 }
-function real(prefix = "", body = "", options = "{}", count = 16) {
+type AsyncFailure = "uncaughtException" | "unhandledRejection";
+function real(
+  prefix = "",
+  body = "",
+  options = "{}",
+  count = 16,
+  observe?: { type: AsyncFailure; interrupt?: boolean },
+) {
   const dir = mkdtempSync(path.join(tmpdir(), "native-reporter-regression-"));
   const file = path.join(dir, "synthetic.cjs");
   const source = `const {test,before,after,beforeEach,afterEach}=require('node:test'); const names=${JSON.stringify(names)}; ${prefix}; for(let i=0;i<${count};i++) test(names[i],${options},()=>{${body}});`;
   writeFileSync(file, source);
+  let reporterPath = path.resolve("scripts/native-postgres-ci-reporter.cjs");
+  const observed = path.join(dir, "observed");
+  if (observe) {
+    const wrapper = path.join(dir, "reporter.cjs");
+    // Observe real Node events without changing their fields. Fault injection only
+    // interrupts the stream after yielding the actual CASE_04 failure event.
+    writeFileSync(
+      wrapper,
+      `const reporter=require(${JSON.stringify(reporterPath)});
+       const {writeFileSync}=require('node:fs');
+       module.exports=async function*(source){
+         yield* reporter((async function*(){for await(const event of source){
+           const match=event.type==='test:fail' &&
+             event.data.name===reporter.CASE_NAMES[3] &&
+             event.data.details.error.failureType===${JSON.stringify(observe.type)};
+           if(match)writeFileSync(${JSON.stringify(observed)},'OBSERVED');
+           yield event;
+           if(match && ${observe.interrupt === true})throw Error(${JSON.stringify(hostile)});
+         }})());
+       };`,
+    );
+    reporterPath = wrapper;
+  }
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     NATIVE_SESSION_CI_DIAGNOSTIC_FD: "3",
@@ -114,7 +144,7 @@ function real(prefix = "", body = "", options = "{}", count = 16) {
       [
         "--test",
         "--test-concurrency=1",
-        `--test-reporter=${path.resolve("scripts/native-postgres-ci-reporter.cjs")}`,
+        `--test-reporter=${reporterPath}`,
         file,
       ],
       {
@@ -127,10 +157,92 @@ function real(prefix = "", body = "", options = "{}", count = 16) {
     );
     const channel = String(result.output[3] ?? "");
     safe(channel);
+    if (observe) assert.equal(readFileSync(observed, "utf8"), "OBSERVED");
     return { result, channel };
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+function asyncBody(type: AsyncFailure, index = 3) {
+  const action =
+    type === "uncaughtException"
+      ? `throw Error(${JSON.stringify(hostile)})`
+      : `void Promise.reject(Error(${JSON.stringify(hostile)}))`;
+  // Keep the owning test active until Node's own async failure handler aborts it.
+  return `if(i===${index})return new Promise(()=>{setImmediate(()=>{${action};});});`;
+}
+function assertChildDenial(actual: ReturnType<typeof real>) {
+  assert.ok(
+    Number.isInteger(actual.result.status) && actual.result.status! > 0,
+  );
+  assert.equal(actual.result.signal, null);
+  assert.equal(actual.result.error, undefined);
+  assert.equal(
+    renderFailure(readFailureReport(actual.channel)),
+    actual.channel,
+  );
+  // Feed the actual subprocess result, including its fd-3 bytes, to the unchanged
+  // parent. No fabricated outcome or second subprocess is needed for this check.
+  const spawn = (() => actual.result) as unknown as typeof spawnSync;
+  assert.throws(
+    () => executeCiChild([], {}, "integrate", spawn),
+    (e) => {
+      assert.equal(renderFailure(e), actual.channel);
+      safe(renderFailure(e));
+      return true;
+    },
+  );
+}
+
+for (const type of ["uncaughtException", "unhandledRejection"] as const) {
+  test(`real ${type} preserves CASE_04, complete counts and fd-3 parent interpretation`, () => {
+    const actual = real("", asyncBody(type), "{}", 16, { type });
+    assert.equal(
+      actual.channel,
+      "NATIVE_PG_FAILURE INTEGRATION_TEST_FAILED\nNATIVE_PG_INTEGRATION CASE_FAILURE CASE_04 COMPLETE 16 15 1 0 0 0\nNATIVE_PG_TOTALS FAILURE 16 15 1 0 0 0 0\n",
+    );
+    assertChildDenial(actual);
+  });
+  test(`real ${type} preserves the first failure before or after another failure`, () => {
+    for (const earlier of [true, false]) {
+      const second = earlier
+        ? `if(i===1)throw Error(${JSON.stringify(hostile)});`
+        : asyncBody(
+            type === "uncaughtException"
+              ? "unhandledRejection"
+              : "uncaughtException",
+            8,
+          );
+      const actual = real("", asyncBody(type) + second, "{}", 16, { type });
+      assert.equal(
+        actual.channel,
+        `NATIVE_PG_FAILURE INTEGRATION_TEST_FAILED\nNATIVE_PG_INTEGRATION CASE_FAILURE ${earlier ? "CASE_02" : "CASE_04"} COMPLETE 16 14 2 0 0 0\nNATIVE_PG_TOTALS FAILURE 16 14 2 0 0 0 0\n`,
+      );
+      assertChildDenial(actual);
+    }
+  });
+  test(`real ${type} retains partial evidence after an interrupted event stream`, () => {
+    const actual = real("", asyncBody(type), "{}", 16, {
+      type,
+      interrupt: true,
+    });
+    assert.equal(
+      actual.channel,
+      "NATIVE_PG_FAILURE INTEGRATION_TEST_FAILED\nNATIVE_PG_INTEGRATION CASE_FAILURE CASE_04 PARTIAL 4 3 1 0 0 0\n",
+    );
+    assertChildDenial(actual);
+  });
+  test(`real ${type} with unknown or duplicate attribution invents no case identity`, () => {
+    for (const replacement of [JSON.stringify(hostile), "names[2]"]) {
+      const actual = real(`names[3]=${replacement}`, asyncBody(type));
+      assert.equal(
+        actual.channel,
+        "NATIVE_PG_FAILURE INTEGRATION_REPORT_INVALID\nNATIVE_PG_INTEGRATION REPORTING_FAILURE NONE PARTIAL 15 15 0 0 0 0\n",
+      );
+      assertChildDenial(actual);
+    }
+  });
 }
 
 test("fixed CASE_01 through CASE_16 manifest exactly matches unchanged integration definitions", () => {
@@ -382,6 +494,7 @@ test("unknown events, names, malformed metadata, proxies and hostile accessors c
         },
       },
     },
+    outcome(3, "fail", "unsupportedAsyncFailure"),
     { ...outcome(0), data: { ...outcome(0).data, skip: {} } },
   ];
   for (const event of failures) {

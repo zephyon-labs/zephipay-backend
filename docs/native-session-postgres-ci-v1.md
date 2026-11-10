@@ -231,3 +231,21 @@ The existing allowlisted parser retains its 4 KiB limit and at most three separa
 No native core, adapter, schema, migration, authentication, economic authority, database safety predicate, privilege, workflow permission, test definition, job/child timeout or retry behavior changes. No database connection, SQL execution, Docker/WSL operation, remote Git action or hosted execution was performed. Effective data-directory/WAL placement and physical durability remain unverified. Matt/Nova review and Sol's focused verification precede any separately authorized hosted run.
 
 Local validation: **319/319** focused reporter/CI/preparation tests and **1,104/1,104** full unit tests passed, with zero failures, skips, cancellations or TODOs. The correction adds 33 tests, including real synthetic Node subprocesses without PostgreSQL. Lint, application build, strict TypeScript checking of the affected test/script graph, reporter syntax, changed-file formatting and diff checks passed. The original reporter returned only `INTEGRATION_TEST_FAILED` in a controlled two-failure reproduction; the corrected reporter retained `CASE_03` and reconciled 14 passes and two failures after draining the stream. Both child executions exited nonzero. This establishes the reporting correction locally, not the underlying hosted integration failure or hosted Node-version compatibility.
+
+### PR #15 asynchronous failure P2 correction — November 10, 2026
+
+The correction to `c25044923e0d6ffcd14da69898ca7246836785e3` adds only `uncaughtException` and `unhandledRejection` to the reporter's finite failure-type allowlist. The pinned [Node 22.23.2 harness source](https://github.com/nodejs/node/blob/v22.23.2/lib/internal/test_runner/harness.js) registers both process-event handlers and uses the event name in `ERR_TEST_FAILURE` for an active owning test. Unattributed or already-finished asynchronous activity does not supply equivalent case attribution; no case identity is inferred from diagnostic text.
+
+Actual local Node subprocesses independently reproduced both failures in the exact `CASE_04` manifest member. A test-only wrapper confirms the actual structured failure type without changing event fields. At the prior candidate, both yielded `INTEGRATION_REPORT_INVALID`, `REPORTING_FAILURE NONE PARTIAL`, and identified-case counts `15 15 0 0 0 0`. After correction, both exit nonzero with:
+
+```text
+NATIVE_PG_FAILURE INTEGRATION_TEST_FAILED
+NATIVE_PG_INTEGRATION CASE_FAILURE CASE_04 COMPLETE 16 15 1 0 0 0
+NATIVE_PG_TOTALS FAILURE 16 15 1 0 0 0 0
+```
+
+Eight added regressions use real synthetic subprocesses for both types: single failure, an earlier ordinary failure, a later failure of the other asynchronous type, interrupted event consumption, unknown hostile names and duplicate attribution. The actual fd-3 report and subprocess result are passed through the existing parser and parent rejection path. Interrupting after the actual fourth-case failure yields `CASE_04 PARTIAL 4 3 1 0 0 0` without final totals. Node can exit 7 on this injected reporter interruption; the unchanged parent requires a successful child exit for acceptance and preserves the valid failure report. Unknown failure types, ambiguous attribution and hostile payloads remain fail-closed. Existing hook, file, ordinary-case, cleanup and strict 16-case success regressions remain in place.
+
+No parser, parent executor, manifest, timeout, workflow, authority code or database safety predicate changes. Local execution uses installed Node **22.20.0**; **22.23.2** was checked against its published source, not executed. No dependency installation, database connection or hosted run occurred. The underlying hosted integration failure, effective data-directory/WAL placement and physical durability remain unresolved. Matt/Nova review and Sol's focused verification of this P2 are required before any separately authorized remote execution.
+
+Validation: **327/327** focused reporter/CI/preparation tests and **1,112/1,112** full Backend unit tests passed, with zero failures, skips, cancellations or TODOs. Lint, strict TypeScript checking of the affected test/script graph, reporter syntax, changed-file formatting and diff checks passed. Protected source, workflow, database-safety and integration-definition files are byte-for-byte unchanged from the parent.
