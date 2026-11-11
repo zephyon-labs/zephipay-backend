@@ -245,6 +245,66 @@ for (const type of ["uncaughtException", "unhandledRejection"] as const) {
   });
 }
 
+for (const type of ["uncaughtException", "unhandledRejection"] as const)
+  test(`CASE_11 retains only the finite ${type} label through fd 3`, () => {
+    const actual = real(
+      "",
+      asyncBody(type, 10) +
+        `if(i===12)throw Error(${JSON.stringify(hostile)});`,
+    );
+    assert.equal(
+      actual.channel,
+      "NATIVE_PG_FAILURE INTEGRATION_TEST_FAILED\nNATIVE_PG_INTEGRATION CASE_FAILURE CASE_11 COMPLETE 16 14 2 0 0 0\nNATIVE_PG_TOTALS FAILURE 16 14 2 0 0 0 0\n" +
+        `NATIVE_PG_CASE_11_TYPE ${type === "uncaughtException" ? "ASYNC_EXCEPTION" : "ASYNC_REJECTION"}\n`,
+    );
+    assertChildDenial(actual);
+  });
+test("CASE_11 hook and cancellation types use OTHER; earlier failures own the report", () => {
+  const hook = real(
+    `let seen=0; beforeEach(()=>{if(++seen===11)throw Error(${JSON.stringify(hostile)});})`,
+  );
+  assert.ok(hook.channel.includes("HOOK_FAILURE CASE_11 COMPLETE"));
+  assert.ok(hook.channel.endsWith("NATIVE_PG_CASE_11_TYPE OTHER\n"));
+  assertChildDenial(hook);
+  const timeout = real(
+    "",
+    "if(i===10)return new Promise(r=>setTimeout(r,80))",
+    "{timeout:i===10?10:undefined}",
+  );
+  assert.ok(timeout.channel.includes("CASE_11 COMPLETE 15 15 0 0 1 0"));
+  assert.ok(timeout.channel.endsWith("NATIVE_PG_CASE_11_TYPE OTHER\n"));
+  assertChildDenial(timeout);
+  const first = real(
+    "",
+    `if(i===1)throw Error(${JSON.stringify(hostile)});` +
+      asyncBody("uncaughtException", 10),
+  );
+  assert.ok(first.channel.includes("CASE_FAILURE CASE_02 COMPLETE"));
+  assert.ok(!first.channel.includes("NATIVE_PG_CASE_11_TYPE"));
+  assertChildDenial(first);
+});
+test("CASE_11 type metadata preserves partial evidence and rejects unsafe or misplaced labels", async () => {
+  const partial = await collect([outcome(10, "fail")], true);
+  assert.equal(
+    partial.text,
+    "NATIVE_PG_FAILURE INTEGRATION_TEST_FAILED\nNATIVE_PG_INTEGRATION CASE_FAILURE CASE_11 PARTIAL 1 0 1 0 0 0\nNATIVE_PG_CASE_11_TYPE TEST_FAILURE\n",
+  );
+  assert.equal(renderFailure(readFailureReport(partial.text)), partial.text);
+  for (const invalid of [
+    partial.text.replace("TEST_FAILURE\n", hostile + "\n"),
+    partial.text.replace("TYPE TEST_FAILURE", "TYPE UNKNOWN"),
+    partial.text.replace("CASE_FAILURE CASE_11", "CASE_FAILURE CASE_12"),
+    partial.text.replace("NATIVE_PG_CASE_11_TYPE TEST_FAILURE\n", ""),
+    partial.text + "NATIVE_PG_CASE_11_TYPE TEST_FAILURE\n",
+  ])
+    assert.equal(readFailureReport(invalid), undefined);
+  const cleanup = partial.text + "NATIVE_PG_CLEANUP PREPARE_RELEASE_FAILED\n";
+  assert.equal(renderFailure(readFailureReport(cleanup)), cleanup);
+  const unknown = await collect([outcome(10, "fail", "unknownType")], true);
+  assert.ok(unknown.text.includes("REPORTING_FAILURE NONE PARTIAL"));
+  assert.ok(!unknown.text.includes("NATIVE_PG_CASE_11_TYPE"));
+});
+
 test("fixed CASE_01 through CASE_16 manifest exactly matches unchanged integration definitions", () => {
   const file = "tests/postgresNativeSession.integration.ts";
   const source = ts.createSourceFile(
@@ -298,7 +358,8 @@ for (let index = 0; index < 16; index++)
     assert.equal(result.status, 1);
     assert.equal(
       channel,
-      `NATIVE_PG_FAILURE INTEGRATION_TEST_FAILED\nNATIVE_PG_INTEGRATION CASE_FAILURE CASE_${String(index + 1).padStart(2, "0")} COMPLETE 16 15 1 0 0 0\nNATIVE_PG_TOTALS FAILURE 16 15 1 0 0 0 0\n`,
+      `NATIVE_PG_FAILURE INTEGRATION_TEST_FAILED\nNATIVE_PG_INTEGRATION CASE_FAILURE CASE_${String(index + 1).padStart(2, "0")} COMPLETE 16 15 1 0 0 0\nNATIVE_PG_TOTALS FAILURE 16 15 1 0 0 0 0\n` +
+        (index === 10 ? "NATIVE_PG_CASE_11_TYPE TEST_FAILURE\n" : ""),
     );
     assert.equal(renderFailure(readFailureReport(channel)), channel);
   });

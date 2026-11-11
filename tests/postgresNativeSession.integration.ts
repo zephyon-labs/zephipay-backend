@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
-import { after, before, test } from "node:test";
+import { after, afterEach, before, test } from "node:test";
 import { Pool, type PoolClient } from "pg";
 import { NativeSessionCore } from "../src/nativeSession/core";
 import { NativeCredentialPolicy } from "../src/nativeSession/policy";
@@ -19,6 +19,10 @@ import {
 } from "./helpers/nativeSessionHarness";
 import { nativeDisposableTarget, verifyNativeDisposable } from "./helpers/nativePostgresTarget";
 import { waitForPostgresPast } from "./helpers/postgresClock";
+import {
+  instrumentNativePool,
+  type NativePostgresHook,
+} from "./helpers/nativePostgresInstrumentation";
 
 const target = nativeDisposableTarget(process.env);
 const pool = new Pool(target.pool);
@@ -63,27 +67,25 @@ function latch() {
   });
   return { promise, release };
 }
-type Hook = (sql: string, client: PoolClient, result?: unknown) => Promise<void>;
-function instrument(beforeQuery?: Hook, afterQuery?: Hook) {
-  const pids: number[] = [];
-  const source = {
-    query: pool.query.bind(pool),
-    connect: async () => {
-      const client = await pool.connect();
-      pids.push(Number((await client.query("SELECT pg_backend_pid() AS pid")).rows[0].pid));
-      return {
-        query: async (sql: string, values?: unknown[]) => {
-          await beforeQuery?.(sql, client);
-          const result = await client.query(sql, values);
-          await afterQuery?.(sql, client, result);
-          return result;
-        },
-        release: (destroy?: boolean) => client.release(destroy),
-      } as unknown as PoolClient;
-    },
-  } as Pick<Pool, "query" | "connect">;
-  return { source, pids };
+const instruments: ReturnType<typeof instrumentNativePool>[] = [];
+function instrument(
+  beforeQuery?: NativePostgresHook,
+  afterQuery?: NativePostgresHook,
+) {
+  const observed = instrumentNativePool(pool, beforeQuery, afterQuery);
+  instruments.push(observed);
+  return observed;
 }
+afterEach(async () => {
+  const results = await Promise.allSettled(
+    instruments.splice(0).map((i) => i.settle()),
+  );
+  assert.ok(
+    results.every((r) => r.status === "fulfilled"),
+    "Instrumented connection ownership failed",
+  );
+});
+
 async function seed() {
   const accountId = randomUUID(),
     subject = `native-fixture:${randomUUID()}`,
@@ -426,6 +428,7 @@ test("connection termination rolls back a waiting transaction and yields unavail
           ])
         ).rows[0].blocked,
     );
+    observed.expectTermination(observed.pids[0]);
     await pool.query("SELECT pg_terminate_backend($1)", [observed.pids[0]]);
     assert.equal((await pending).kind, "unavailable");
     await holder.query("ROLLBACK");

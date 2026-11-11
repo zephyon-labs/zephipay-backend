@@ -328,6 +328,21 @@ export function readFailureReport(text: string): Error | undefined {
         return;
       integration += lines[start++] + "\n";
     }
+    if (id === "CASE_11") {
+      const type =
+        /^NATIVE_PG_CASE_11_TYPE (ASYNC_EXCEPTION|ASYNC_REJECTION|TEST_FAILURE|OTHER)$/.exec(
+          lines[start] ?? "",
+        );
+      if (!type) return;
+      if (
+        type[1] !== "OTHER" &&
+        (category !== "CASE_FAILURE" ||
+          primary !== "INTEGRATION_TEST_FAILED" ||
+          counts[2] === 0)
+      )
+        return;
+      integration += lines[start++] + "\n";
+    }
   }
   if (lines.length - start > 3) return;
   const cleanup: DiagnosticCode[] = [];

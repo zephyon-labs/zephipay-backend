@@ -93,8 +93,8 @@ async function collect(source) {
   let first,
     finalSummary,
     invalid = false;
-  const fail = (code, category, id = "NONE") => {
-    first ??= { code, category, id };
+  const fail = (code, category, id = "NONE", failureType) => {
+    first ??= { code, category, id, failureType };
   };
   const bad = () => {
     invalid = true;
@@ -192,14 +192,14 @@ async function collect(source) {
           typeof file === "string" &&
           name === file;
         if (failureType === "hookFailed")
-          fail("INTEGRATION_HOOK_FAILED", "HOOK_FAILURE", id);
+          fail("INTEGRATION_HOOK_FAILED", "HOOK_FAILURE", id, failureType);
         else if (id === "NONE") {
           if (fileFailure) fail("INTEGRATION_FILE_FAILED", "FILE_FAILURE");
           else bad();
         } else if (skip || todo)
-          fail("INTEGRATION_TEST_SKIPPED", "CASE_FAILURE", id);
+          fail("INTEGRATION_TEST_SKIPPED", "CASE_FAILURE", id, failureType);
         else if (type === "test:fail")
-          fail("INTEGRATION_TEST_FAILED", "CASE_FAILURE", id);
+          fail("INTEGRATION_TEST_FAILED", "CASE_FAILURE", id, failureType);
         if (totals[0] >= 32) {
           bad();
           continue;
@@ -227,7 +227,11 @@ async function collect(source) {
   const summary = complete
     ? `NATIVE_PG_TOTALS ${finalSummary.success ? "SUCCESS" : "FAILURE"} ${finalSummary.values.join(" ")}\n`
     : "";
-  return { code: first?.code, text: header + detail + summary };
+  const case11 =
+    first?.id === "CASE_11"
+      ? `NATIVE_PG_CASE_11_TYPE ${first.failureType === "uncaughtException" ? "ASYNC_EXCEPTION" : first.failureType === "unhandledRejection" ? "ASYNC_REJECTION" : first.failureType === "testCodeFailure" ? "TEST_FAILURE" : "OTHER"}\n`
+      : "";
+  return { code: first?.code, text: header + detail + summary + case11 };
 }
 
 module.exports = async function* nativePostgresReporter(source) {
