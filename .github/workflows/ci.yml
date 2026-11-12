@@ -34,6 +34,25 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      native_postgres:
+        image: postgres:16.15-bookworm@sha256:5983db9a9c6ad225a48a46cfe2e03e6680b1826662befd0465eb05b34cb1c64e
+        env:
+          POSTGRES_USER: native_session_ci_admin
+          POSTGRES_PASSWORD: native-session-ci-admin-disposable-only
+          POSTGRES_DB: postgres
+        ports:
+          - "127.0.0.1:55432:5432"
+        options: >-
+          --health-cmd "pg_isready -U native_session_ci_admin -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+          --label zephyon.native.fixture=github-service-v1
+          --label zephyon.native.repository=${{ github.repository_id }}
+          --label zephyon.native.run=${{ github.run_id }}
+          --label zephyon.native.attempt=${{ github.run_attempt }}
+          --label zephyon.native.source=${{ github.sha }}
+          --tmpfs /var/lib/postgresql/data:rw,nosuid,noexec,size=1073741824
     steps:
       - name: Check out repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
@@ -76,3 +95,12 @@ jobs:
         env:
           TEST_DATABASE_URL: postgresql://economic_ci:disposable-ci-only@localhost:5432/economic_ci
         run: npm run test:postgres
+
+      - name: Native-session isolated PostgreSQL preparation and integration
+        env:
+          NATIVE_SESSION_TEST_PROFILE: github-service-v1
+          NATIVE_SESSION_CI_SERVICE_ID: ${{ job.services.native_postgres.id }}
+          NATIVE_SESSION_CI_ORIGINAL_SERVICE_ID: ${{ job.services.postgres.id }}
+          NATIVE_SESSION_CI_NETWORK: ${{ job.services.native_postgres.network }}
+          NATIVE_SESSION_CI_PORT: ${{ job.services.native_postgres.ports['5432'] }}
+        run: node --import tsx scripts/run-native-session-postgres-ci.ts
